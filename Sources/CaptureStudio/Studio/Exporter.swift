@@ -1,0 +1,52 @@
+import Foundation
+import AVFoundation
+
+enum ExportPreset: String, CaseIterable, Identifiable {
+    case hd1080 = "1080p"
+    case uhd4K = "4K"
+    case source = "Source"
+
+    var id: String { rawValue }
+
+    var avPreset: String {
+        switch self {
+        case .hd1080: return AVAssetExportPreset1920x1080
+        case .uhd4K: return AVAssetExportPreset3840x2160
+        case .source: return AVAssetExportPresetHighestQuality
+        }
+    }
+}
+
+enum Exporter {
+    /// Exports the trimmed composition to an MP4. Masters are read-only inputs.
+    static func export(composition: AVMutableComposition,
+                       videoComposition: AVVideoComposition? = nil,
+                       audioMix: AVAudioMix? = nil,
+                       timeRange: CMTimeRange,
+                       preset: ExportPreset,
+                       to destination: URL,
+                       onProgress: @escaping (Double) -> Void) async throws -> URL {
+        guard let session = AVAssetExportSession(asset: composition,
+                                                 presetName: preset.avPreset) else {
+            throw NSError(domain: "CaptureStudio", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Export preset \(preset.rawValue) is not supported for this recording."
+            ])
+        }
+        session.timeRange = timeRange
+        session.videoComposition = videoComposition
+        session.audioMix = audioMix
+        try? FileManager.default.removeItem(at: destination)
+
+        let monitor = Task {
+            for await state in session.states(updateInterval: 0.25) {
+                if case .exporting(let progress) = state {
+                    onProgress(progress.fractionCompleted)
+                }
+            }
+        }
+        defer { monitor.cancel() }
+        try await session.export(to: destination, as: .mp4)
+        onProgress(1.0)
+        return destination
+    }
+}
