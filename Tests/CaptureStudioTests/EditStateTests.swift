@@ -116,11 +116,23 @@ import Foundation
         #expect(loaded.cameraAspect == .threeByFour)
     }
 
+    @Test func cameraRotationRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let edit = EditState(cameraRotation: 270)
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().cameraRotation == 270)
+    }
+
     @Test func legacyEditJSONDefaultsCameraAspectAndShadowRadius() throws {
         let json = #"{"schemaVersion":1,"trimIn":2.0}"#
         let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
         #expect(edit.cameraAspect == .original)
         #expect(edit.cameraShadowRadius == 0.5)
+        #expect(edit.cameraRotation == 0)
     }
 
     @Test func unknownCameraAspectFallsBackToOriginal() throws {

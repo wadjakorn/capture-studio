@@ -52,21 +52,31 @@ final class StudioModel: ObservableObject {
     @Published var cameraShadowRadius = 0.5
     // Camera feed crop aspect — `original` keeps native aspect.
     @Published private(set) var cameraAspect: CameraAspect = .original
+    // Camera orientation, degrees clockwise: 0/90/180/270. 90/270 swap w/h.
+    @Published private(set) var cameraRotation = 0
 
     var cameraShown: Bool { cameraVisible && cameraTrackID != nil }
+    /// Camera feed size after the 90° orientation step — width/height swapped
+    /// at 90/270 so PiP aspect and feed crop track the rotated content.
+    var cameraOrientedSize: CGSize? {
+        guard let s = cameraNaturalSize else { return nil }
+        return (cameraRotation == 90 || cameraRotation == 270)
+            ? CGSize(width: s.height, height: s.width) : s
+    }
     /// The styled-camera pipeline (custom Core Image compositor) is needed
     /// only when the camera frame is non-rectangular, rounded, bordered, or
     /// shadowed; otherwise the cheap layer-instruction path is used.
     var cameraNeedsCompositor: Bool {
         cameraShown && (cameraShape != .rectangle || cameraCornerRadius > 0
-                        || cameraBorderWidth > 0 || cameraShadow)
+                        || cameraBorderWidth > 0 || cameraShadow
+                        || cameraRotation != 0)
     }
     /// Camera feed crop aspect — circle forces 1:1, then an explicit preset,
     /// else the native feed aspect.
     private var cameraFeedAspect: CGFloat {
         if cameraShape == .circle { return 1 }
         if let r = cameraAspect.ratio { return CGFloat(r) }
-        guard let s = cameraNaturalSize, s.height > 0 else { return 1 }
+        guard let s = cameraOrientedSize, s.height > 0 else { return 1 }
         return s.width / s.height
     }
 
@@ -193,6 +203,7 @@ final class StudioModel: ObservableObject {
             cameraShadow = edit.cameraShadow
             cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
             cameraAspect = edit.cameraAspect
+            cameraRotation = ((edit.cameraRotation / 90 % 4) + 4) % 4 * 90
             micVolume = min(max(0, edit.micVolume), 3)
             systemVolume = min(max(0, edit.systemVolume), 1)
             showCursor = edit.showCursor
@@ -401,8 +412,8 @@ final class StudioModel: ObservableObject {
 
     /// PiP rect in render-space pixels for the current camera settings.
     var cameraPipRect: CGRect? {
-        guard let cameraNaturalSize, renderSize.width > 0 else { return nil }
-        return pipRect(in: renderSize, cameraSize: cameraNaturalSize)
+        guard let cameraOrientedSize, renderSize.width > 0 else { return nil }
+        return pipRect(in: renderSize, cameraSize: cameraOrientedSize)
     }
 
     /// PiP rect for an arbitrary canvas — settings are normalized, so the
@@ -425,9 +436,9 @@ final class StudioModel: ObservableObject {
     /// Reuses CropMath at the feed's native aspect — zoom 1 = whole feed,
     /// zoom 4 = quarter. Center clamped so the crop stays inside the feed.
     var cameraCropRectInFeed: CGRect? {
-        guard let cameraNaturalSize, cameraNaturalSize.width > 0,
-              cameraNaturalSize.height > 0 else { return nil }
-        return CropMath.cropRect(source: cameraNaturalSize, ratio: cameraFeedAspect,
+        guard let cameraOrientedSize, cameraOrientedSize.width > 0,
+              cameraOrientedSize.height > 0 else { return nil }
+        return CropMath.cropRect(source: cameraOrientedSize, ratio: cameraFeedAspect,
                                  zoom: 1.0 / cameraZoom,
                                  centerX: cameraFeedX, centerY: cameraFeedY)
     }
@@ -457,12 +468,12 @@ final class StudioModel: ObservableObject {
 
     /// Live camera feed pan during drag; clamps so the crop stays inside feed.
     func setCameraFeedCenter(x: Double, y: Double) {
-        guard let cameraNaturalSize, cameraNaturalSize.width > 0,
-              cameraNaturalSize.height > 0 else { return }
-        let maxFit = CropMath.maxFitSize(source: cameraNaturalSize, ratio: cameraFeedAspect)
+        guard let cameraOrientedSize, cameraOrientedSize.width > 0,
+              cameraOrientedSize.height > 0 else { return }
+        let maxFit = CropMath.maxFitSize(source: cameraOrientedSize, ratio: cameraFeedAspect)
         let z = 1.0 / cameraZoom
         let size = CGSize(width: maxFit.width * z, height: maxFit.height * z)
-        let c = CropMath.clampedCenter(source: cameraNaturalSize, cropSize: size,
+        let c = CropMath.clampedCenter(source: cameraOrientedSize, cropSize: size,
                                        centerX: x, centerY: y)
         cameraFeedX = c.x
         cameraFeedY = c.y
@@ -472,6 +483,20 @@ final class StudioModel: ObservableObject {
     func setCameraShape(_ shape: CameraShape) {
         applyCameraStyle { cameraShape = shape }
         // Aspect changed → re-clamp the feed center for the new crop.
+        setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
+        saveEdit()
+    }
+
+    /// Cycle camera orientation +90° clockwise (0→90→180→270→0).
+    func rotateCamera() {
+        setCameraRotation((cameraRotation + 90) % 360)
+    }
+
+    /// Set camera orientation to a 90° step (degrees normalized to 0/90/180/270).
+    func setCameraRotation(_ degrees: Int) {
+        let normalized = ((degrees / 90 % 4) + 4) % 4 * 90
+        applyCameraStyle { cameraRotation = normalized }
+        // Aspect swapped → re-clamp the feed center for the rotated crop.
         setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
         saveEdit()
     }
@@ -693,11 +718,11 @@ final class StudioModel: ObservableObject {
             cameraTrackID: cameraTrackID
         )
         // Camera styling only when a (styled) camera is actually shown.
-        if cameraTrackID != nil, let cameraNaturalSize {
-            let pip = pipRect(in: canvas, cameraSize: cameraNaturalSize)
-            let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: cameraNaturalSize)
+        if cameraTrackID != nil, let oriented = cameraOrientedSize {
+            let pip = pipRect(in: canvas, cameraSize: oriented)
+            let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: oriented)
             let minSide = min(pip.width, pip.height)
-            layout.feedSize = cameraNaturalSize
+            layout.feedSize = oriented
             layout.feedCrop = feedCrop
             layout.pip = pip
             layout.shape = cameraShape
@@ -706,6 +731,7 @@ final class StudioModel: ObservableObject {
             layout.borderColor = Self.cgColor(hex: cameraBorderHex)
             layout.shadow = cameraShadow
             layout.shadowRadius = CGFloat(cameraShadowRadius)
+            layout.cameraQuarterTurns = cameraRotation / 90
         } else {
             layout.cameraTrackID = nil
         }
@@ -854,6 +880,7 @@ final class StudioModel: ObservableObject {
             cameraShadow: cameraShadow,
             cameraShadowRadius: cameraShadowRadius,
             cameraAspect: cameraAspect,
+            cameraRotation: cameraRotation,
             micVolume: micVolume,
             systemVolume: systemVolume,
             showCursor: showCursor,

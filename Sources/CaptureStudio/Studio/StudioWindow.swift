@@ -259,6 +259,20 @@ struct StudioView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
+            HStack(spacing: 8) {
+                Button {
+                    model.rotateCamera()
+                } label: {
+                    Label("Rotate", systemImage: "rotate.right")
+                }
+                .help("Rotate camera 90°")
+                if model.cameraRotation != 0 {
+                    Text("\(model.cameraRotation)°")
+                        .font(.caption).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             // Aspect only applies to rectangles; a circle is forced to 1:1.
             if model.cameraShape == .rectangle {
                 VStack(alignment: .leading, spacing: 2) {

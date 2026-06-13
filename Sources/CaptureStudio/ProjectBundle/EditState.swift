@@ -101,6 +101,9 @@ struct EditState: Codable, Equatable {
     var cameraShadowRadius: Double = 0.5
     /// Camera feed crop aspect; `original` keeps the native aspect.
     var cameraAspect: CameraAspect = .original
+    /// Camera orientation, degrees clockwise: 0/90/180/270. Corrects a sideways
+    /// or portrait-mounted camera. At 90/270 the feed's width/height swap.
+    var cameraRotation: Int = 0
     /// Per-source playback/export volume. System is 0–1 (attenuation). Mic is
     /// 0–3: values >1 boost gain for quiet voice. Older bundles (mic ≤ 1) load
     /// unchanged.
@@ -127,7 +130,7 @@ struct EditState: Codable, Equatable {
          cameraShape: CameraShape = .rectangle, cameraCornerRadius: Double = 0,
          cameraBorderWidth: Double = 0, cameraBorderHex: String = "#FFFFFF",
          cameraShadow: Bool = false, cameraShadowRadius: Double = 0.5,
-         cameraAspect: CameraAspect = .original,
+         cameraAspect: CameraAspect = .original, cameraRotation: Int = 0,
          micVolume: Double = 1.0, systemVolume: Double = 1.0,
          showCursor: Bool = true, clickFeedback: Bool = false,
          cropAspect: CropAspect = .original, cropCenterX: Double = 0.5,
@@ -148,6 +151,7 @@ struct EditState: Codable, Equatable {
         self.cameraShadow = cameraShadow
         self.cameraShadowRadius = cameraShadowRadius
         self.cameraAspect = cameraAspect
+        self.cameraRotation = cameraRotation
         self.micVolume = micVolume
         self.systemVolume = systemVolume
         self.showCursor = showCursor
@@ -181,6 +185,7 @@ struct EditState: Codable, Equatable {
         cameraShadowRadius = try c.decodeIfPresent(Double.self, forKey: .cameraShadowRadius) ?? 0.5
         let camAspectRaw = try c.decodeIfPresent(String.self, forKey: .cameraAspect)
         cameraAspect = camAspectRaw.flatMap(CameraAspect.init(rawValue:)) ?? .original
+        cameraRotation = try c.decodeIfPresent(Int.self, forKey: .cameraRotation) ?? 0
         micVolume = try c.decodeIfPresent(Double.self, forKey: .micVolume) ?? 1.0
         systemVolume = try c.decodeIfPresent(Double.self, forKey: .systemVolume) ?? 1.0
         showCursor = try c.decodeIfPresent(Bool.self, forKey: .showCursor) ?? true

@@ -22,6 +22,9 @@ struct CompositorLayout {
     /// Camera PiP rect in canvas pixels (top-left).
     var pip: CGRect = .zero
     var shape: CameraShape = .rectangle
+    /// Camera orientation in clockwise quarter turns (0–3); feed rotated before
+    /// crop/scale so `feedSize`/`feedCrop` are already in oriented space.
+    var cameraQuarterTurns: Int = 0
     var cornerRadiusPx: CGFloat = 0
     var borderWidthPx: CGFloat = 0
     var borderColor: CGColor = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
@@ -236,7 +239,15 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                              instruction: StudioCompositionInstruction) -> CIImage? {
         guard layout.feedCrop.width > 0, layout.pip.width > 0,
               let mask = instruction.maskImage else { return nil }
-        let image = CIImage(cvPixelBuffer: buffer)
+        var image = CIImage(cvPixelBuffer: buffer)
+        // Orient the raw feed first (clockwise quarter turns), then re-anchor its
+        // extent at the origin so all downstream crop/scale runs in oriented space.
+        if layout.cameraQuarterTurns != 0 {
+            let angle = -CGFloat(layout.cameraQuarterTurns) * .pi / 2
+            let rotated = image.transformed(by: CGAffineTransform(rotationAngle: angle))
+            image = rotated.transformed(by: CGAffineTransform(translationX: -rotated.extent.minX,
+                                                              y: -rotated.extent.minY))
+        }
         let cropCI = Self.flip(layout.feedCrop, in: layout.feedSize.height)
         let sx = layout.pip.width / layout.feedCrop.width
         let sy = layout.pip.height / layout.feedCrop.height
