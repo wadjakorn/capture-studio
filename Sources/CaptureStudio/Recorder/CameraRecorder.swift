@@ -42,6 +42,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
+    /// The clock the session stamps sample PTS against. When a mic is added,
+    /// AVCaptureSession switches its master clock to the audio device clock
+    /// (which starts near 0), so PTS leave the host timebase the screen track
+    /// uses. We convert first-frame PTS back to host time via this clock so
+    /// the recorded anchors stay comparable across tracks.
+    private var sessionClock: CMClock?
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
@@ -86,7 +92,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         if let micDevice {
             attachMic(micDevice)
         }
+
         session.commitConfiguration()
+        sessionClock = session.synchronizationClock
 
         // startRunning blocks; keep it off the main thread.
         await withCheckedContinuation { continuation in
@@ -255,11 +263,19 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
             writer.startSession(atSourceTime: pts)
-            sessionStartHostTime = pts.seconds
+            sessionStartHostTime = hostSeconds(pts)
         }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
         }
+    }
+
+    /// Converts a session-clock PTS to seconds on the host-time clock so the
+    /// recorded anchor is comparable with the screen track's host-time anchor.
+    private func hostSeconds(_ pts: CMTime) -> Double {
+        guard let sessionClock else { return pts.seconds }
+        return CMSyncConvertTime(pts, from: sessionClock,
+                                 to: CMClockGetHostTimeClock()).seconds
     }
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
@@ -268,7 +284,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if audioStartHostTime == nil {
             writer.startSession(atSourceTime: pts)
-            audioStartHostTime = pts.seconds
+            audioStartHostTime = hostSeconds(pts)
         }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
