@@ -6,11 +6,11 @@ A free, open-source macOS screen recorder and simple editor — built as a [Scre
 
 - **Screen recording** — full display capture at 60 fps, selectable display, high-bitrate H.264 masters
 - **Cursor-free masters** — the cursor is *not* baked into the video; cursor positions, clicks, and scrolls are captured as a separate 60 Hz event stream (groundwork for auto-zoom and cursor effects)
-- **Camera** — record any camera as a separate track, shown as a draggable/resizable picture-in-picture overlay in the editor
-- **Microphone** — selectable input device, recorded as a separate track
+- **Camera** — record any camera as a separate track, shown as a draggable/resizable picture-in-picture overlay; style it with shape (rectangle/circle), corner radius, border color, drop shadow, aspect-ratio preset, and feed zoom/pan
+- **Microphone** — selectable input device, recorded as a separate track; a camera's own mic is captured on the camera's session so it isn't lost to device contention
 - **System audio** — captures what your Mac is playing (excluding the app itself)
-- **Studio editor** — opens automatically after recording: preview, trim in/out, per-source volume sliders (system audio vs mic), camera overlay toggle
-- **Export** — 1080p, 4K, or source resolution MP4
+- **Studio editor** — opens automatically after recording: preview, trim in/out, per-source volume sliders (system audio vs mic), camera overlay styling, and reframe crop (Original/9:16/1:1/4:5/16:9/4:3)
+- **Export** — 1080p, 4K, or source resolution MP4; reframed output follows the chosen crop aspect
 - **Non-destructive** — recordings are `.capturestudio` bundles; master files are never modified, all edits are metadata (`edit.json`)
 
 ## Requirements
@@ -59,7 +59,7 @@ My Recording.capturestudio/
 ├── mic.m4a          # if mic enabled
 ├── system.m4a       # if system audio enabled
 ├── events.jsonl     # cursor positions (60 Hz), clicks, scrolls
-└── edit.json        # editor state: trim, volumes, camera overlay
+└── edit.json        # editor state: trim, volumes, camera overlay + styling, reframe crop
 ```
 
 All tracks are stamped against the host clock, so alignment is pure arithmetic on stored offsets — no waveform-sync guessing.
