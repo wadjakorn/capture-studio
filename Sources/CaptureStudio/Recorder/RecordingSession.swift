@@ -10,7 +10,9 @@ import AppKit
 final class RecordingSession: ObservableObject {
     enum State: Equatable {
         case idle
-        case preparing
+        case arming                       // warming up sources (sessions starting)
+        case armed                        // sources warm, preview shown, awaiting Record
+        case preparing                    // beginRecording flipping writers on
         case recording(startedAt: Date)
         case finishing
         case failed(String)
@@ -21,10 +23,17 @@ final class RecordingSession: ObservableObject {
     /// Non-fatal problems from the last recording (camera died, mic failed…).
     @Published private(set) var warnings: [String] = []
 
+    /// The live session, exposed so the app delegate can tear down on quit.
+    /// There is only ever one.
+    static weak var shared: RecordingSession?
+
+    init() { Self.shared = self }
+
     private var bundle: ProjectBundle?
     private var screenRecorder: ScreenRecorder?
     private var cameraRecorder: CameraRecorder?
     private var micRecorder: MicRecorder?
+    private var previewPanel: CameraPreviewPanel?
     private let eventTracker = EventTracker()
     private var displayInfo: DisplayInfo?
 
@@ -33,14 +42,24 @@ final class RecordingSession: ObservableObject {
         return false
     }
 
-    func start(displayID: CGDirectDisplayID,
-               cameraID: String? = nil,
-               micID: String? = nil,
-               systemAudio: Bool = false) async {
+    var isArmed: Bool {
+        if case .armed = state { return true }
+        return false
+    }
+
+    /// Warms up all sources (camera + mic AVCaptureSessions start running) and
+    /// shows the live camera preview, WITHOUT writing anything. The screen
+    /// SCStream is deferred to `beginRecording()` so no screen-recording
+    /// indicator appears during preview. Moves the slow warm-up before the
+    /// countdown so Record begins near-instantly. → `.armed`.
+    func arm(displayID: CGDirectDisplayID,
+             cameraID: String? = nil,
+             micID: String? = nil,
+             systemAudio: Bool = false) async {
         guard state == .idle || isFailed else { return }
-        state = .preparing
+        state = .arming
         warnings = []
-        Log.recorder.info("start: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio)")
+        Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio)")
 
         do {
             let (items, scDisplays) = try await DeviceDiscovery.displays()
@@ -56,18 +75,14 @@ final class RecordingSession: ObservableObject {
             )
             let bundle = try ProjectBundle.createNew()
 
-            // Screen is mandatory — failure here aborts the recording.
-            // System audio rides the same stream and degrades to a warning.
+            // Construct the screen recorder but DO NOT start it yet — the
+            // SCStream starts in beginRecording(). System audio rides it.
             let screen = ScreenRecorder(
                 display: scDisplay, item: item, outputURL: bundle.screenURL,
                 systemAudioURL: systemAudio ? bundle.systemAudioURL : nil
             )
             screen.onStreamError = { [weak self] error in
                 Task { @MainActor in await self?.stop(streamError: error) }
-            }
-            try await screen.start()
-            if let warning = screen.systemAudioWarning {
-                warnings.append(warning)
             }
 
             // Camera/mic are best-effort — failure becomes a warning.
@@ -87,35 +102,109 @@ final class RecordingSession: ObservableObject {
                     micOutputURL: micDevice != nil ? bundle.micURL : nil
                 )
                 do {
-                    try await recorder.start()
+                    try await recorder.warmUp()
                     cameraRecorder = recorder
+                    // Live preview off the recorder's own session — excluded
+                    // from screen.mp4 because the whole app is excluded.
+                    let panel = CameraPreviewPanel(session: recorder.captureSession,
+                                                   onDisplay: displayID)
+                    panel.show()
+                    previewPanel = panel
                     if let w = recorder.micWarning {
                         Log.recorder.error("mic on camera session failed: \(w, privacy: .public)")
                         // Mic couldn't attach to the camera session — try a
                         // standalone session for an unrelated mic device.
-                        if let micDevice { await startStandaloneMic(micDevice, bundle: bundle) }
+                        if let micDevice { await warmUpStandaloneMic(micDevice, bundle: bundle) }
                     }
                 } catch {
-                    Log.recorder.error("camera start failed: \(error.localizedDescription, privacy: .public)")
+                    Log.recorder.error("camera warm-up failed: \(error.localizedDescription, privacy: .public)")
                     warnings.append("Camera not recorded: \(error.localizedDescription)")
-                    if let micDevice { await startStandaloneMic(micDevice, bundle: bundle) }
+                    if let micDevice { await warmUpStandaloneMic(micDevice, bundle: bundle) }
                 }
             } else if let micDevice {
-                await startStandaloneMic(micDevice, bundle: bundle)
+                await warmUpStandaloneMic(micDevice, bundle: bundle)
             }
-
-            eventTracker.start()
 
             self.bundle = bundle
             self.screenRecorder = screen
             self.displayInfo = item.displayInfo
-            state = .recording(startedAt: Date())
-            Log.recorder.info("recording: \(bundle.url.lastPathComponent, privacy: .public)")
+            state = .armed
+            Log.recorder.info("armed: \(bundle.url.lastPathComponent, privacy: .public)")
         } catch {
-            Log.recorder.error("start failed: \(error.localizedDescription, privacy: .public)")
-            cleanupAbandonedBundle()
+            Log.recorder.error("arm failed: \(error.localizedDescription, privacy: .public)")
+            await tearDownArmed()
             state = .failed(error.localizedDescription)
         }
+    }
+
+    /// Flips the warmed sources into recording: starts the screen SCStream
+    /// (mandatory) and the camera/mic writers (best-effort). Called by the view
+    /// after the countdown. → `.recording`.
+    func beginRecording() async {
+        guard isArmed, let bundle, let screenRecorder, let displayInfo else { return }
+        state = .preparing
+
+        do {
+            // Screen is mandatory — failure here aborts the recording.
+            try await screenRecorder.start()
+            if let warning = screenRecorder.systemAudioWarning {
+                warnings.append(warning)
+            }
+        } catch {
+            Log.recorder.error("screen start failed: \(error.localizedDescription, privacy: .public)")
+            await tearDownArmed()
+            state = .failed(error.localizedDescription)
+            return
+        }
+
+        // Warmed camera/mic now begin writing; the next frame anchors their
+        // host-clock start time. Best-effort: failure is a warning.
+        if let cameraRecorder {
+            do { try cameraRecorder.beginWriting() }
+            catch {
+                Log.recorder.error("camera beginWriting failed: \(error.localizedDescription, privacy: .public)")
+                warnings.append("Camera not recorded: \(error.localizedDescription)")
+            }
+        }
+        if let micRecorder {
+            do { try micRecorder.beginWriting() }
+            catch {
+                Log.recorder.error("mic beginWriting failed: \(error.localizedDescription, privacy: .public)")
+                warnings.append("Microphone not recorded: \(error.localizedDescription)")
+            }
+        }
+
+        eventTracker.start()
+        _ = displayInfo  // retained for stop(); already stored
+        _ = bundle
+        state = .recording(startedAt: Date())
+        Log.recorder.info("recording: \(bundle.url.lastPathComponent, privacy: .public)")
+    }
+
+    /// Cancels from the armed state: tears down warmed sessions, closes the
+    /// preview, deletes the abandoned bundle. → `.idle`.
+    func cancelArming() async {
+        guard isArmed || state == .arming else { return }
+        await tearDownArmed()
+        state = .idle
+    }
+
+    /// Stops warmed (never-finalized) recorders, closes preview, deletes bundle.
+    /// Used by cancel and by arm/begin failure paths.
+    private func tearDownArmed() async {
+        previewPanel?.close()
+        previewPanel = nil
+        eventTracker.cancel()
+        await cameraRecorder?.discard()
+        await micRecorder?.discard()
+        if let url = bundle?.url {
+            try? FileManager.default.removeItem(at: url)
+        }
+        bundle = nil
+        screenRecorder = nil
+        cameraRecorder = nil
+        micRecorder = nil
+        displayInfo = nil
     }
 
     /// Stops all recorders, finalizes files, writes meta.json LAST
@@ -185,6 +274,8 @@ final class RecordingSession: ObservableObject {
             state = .failed(error.localizedDescription)
         }
 
+        previewPanel?.close()
+        previewPanel = nil
         self.bundle = nil
         self.screenRecorder = nil
         self.cameraRecorder = nil
@@ -201,28 +292,28 @@ final class RecordingSession: ObservableObject {
         return false
     }
 
-    /// Records a mic on its own session (no camera, or camera-hosted mic
-    /// failed to attach). Best-effort: failure is a warning.
-    private func startStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle) async {
+    /// Warms up a mic on its own session (no camera, or camera-hosted mic
+    /// failed to attach). Best-effort: failure is a warning. The writer is
+    /// created later in `beginRecording()`.
+    private func warmUpStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle) async {
         let recorder = MicRecorder(device: device, outputURL: bundle.micURL)
         do {
-            try await recorder.start()
+            try await recorder.warmUp()
             micRecorder = recorder
         } catch {
-            Log.recorder.error("mic start failed: \(error.localizedDescription, privacy: .public)")
+            Log.recorder.error("mic warm-up failed: \(error.localizedDescription, privacy: .public)")
             warnings.append("Microphone not recorded: \(error.localizedDescription)")
         }
     }
 
-    private func cleanupAbandonedBundle() {
-        eventTracker.cancel()
-        if let url = bundle?.url {
+    /// Best-effort synchronous teardown for app termination while armed or
+    /// recording: stop sessions and remove an unfinalized bundle.
+    func tearDownForQuit() {
+        previewPanel?.close()
+        previewPanel = nil
+        if !isRecording, let url = bundle?.url {
+            // Armed but not yet recording → the bundle is empty; drop it.
             try? FileManager.default.removeItem(at: url)
         }
-        bundle = nil
-        screenRecorder = nil
-        cameraRecorder = nil
-        micRecorder = nil
-        displayInfo = nil
     }
 }

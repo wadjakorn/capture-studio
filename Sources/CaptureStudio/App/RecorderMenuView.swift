@@ -14,6 +14,8 @@ struct RecorderMenuView: View {
     @State private var systemAudioEnabled = AppSettings.recordSystemAudio
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
+    @State private var counting = false
+    @State private var countdownTask: Task<Void, Never>?
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -94,6 +96,12 @@ struct RecorderMenuView: View {
                 }
                 .keyboardShortcut(.escape, modifiers: [])
             }
+        case .arming:
+            Label("Warming up…", systemImage: "hourglass")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        case .armed:
+            armedView
         case .preparing, .finishing:
             ProgressView()
                 .controlSize(.small)
@@ -106,6 +114,40 @@ struct RecorderMenuView: View {
             }
         case .idle:
             idleView
+        }
+    }
+
+    private var armedView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(counting ? "Starting…" : "Sources ready", systemImage: "checkmark.circle")
+                .font(.callout)
+                .foregroundStyle(counting ? Color.secondary : Color.green)
+            HStack {
+                Button {
+                    let displayID = selectedDisplayID
+                    counting = true
+                    countdownTask = Task {
+                        await CountdownOverlay.run(seconds: AppSettings.countdownSeconds,
+                                                   displayID: displayID)
+                        guard !Task.isCancelled else { return }
+                        await session.beginRecording()
+                        counting = false
+                    }
+                } label: {
+                    Label("Record", systemImage: "record.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(counting)
+
+                Button("Cancel") {
+                    countdownTask?.cancel()
+                    countdownTask = nil
+                    counting = false
+                    Task { await session.cancelArming() }
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+            }
         }
     }
 
@@ -156,13 +198,11 @@ struct RecorderMenuView: View {
                     var mic = micID
                     if camera != nil, await !Permissions.requestCapture(.video) { camera = nil }
                     if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }
-                    await CountdownOverlay.run(seconds: AppSettings.countdownSeconds,
-                                               displayID: displayID)
-                    await session.start(displayID: displayID, cameraID: camera,
-                                        micID: mic, systemAudio: systemAudio)
+                    await session.arm(displayID: displayID, cameraID: camera,
+                                      micID: mic, systemAudio: systemAudio)
                 }
             } label: {
-                Label("Start Recording", systemImage: "record.circle")
+                Label("Preview", systemImage: "eye")
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)

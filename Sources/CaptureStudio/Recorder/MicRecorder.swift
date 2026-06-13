@@ -34,7 +34,10 @@ final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate 
         super.init()
     }
 
-    func start() async throws {
+    /// Warms up the session (opens the device, starts running) without creating
+    /// a writer — buffers flow to the delegate but are discarded while `writer`
+    /// is nil. Lets the mic be ready before the countdown.
+    func warmUp() async throws {
         let deviceInput: AVCaptureDeviceInput
         do {
             deviceInput = try AVCaptureDeviceInput(device: device)
@@ -56,27 +59,33 @@ final class MicRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate 
                 continuation.resume()
             }
         }
+    }
 
+    /// Creates the writer and begins accepting samples. Call after `warmUp()`.
+    func beginWriting() throws {
         guard let settings = output.recommendedAudioSettingsForAssetWriter(writingTo: .m4a) else {
-            session.stopRunning()
             throw MicError.writerSetupFailed("no recommended settings")
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .m4a)
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
         input.expectsMediaDataInRealTime = true
         guard writer.canAdd(input) else {
-            session.stopRunning()
             throw MicError.writerSetupFailed("writer rejected input")
         }
         writer.add(input)
         guard writer.startWriting() else {
-            session.stopRunning()
             throw MicError.writerSetupFailed(writer.error?.localizedDescription ?? "unknown")
         }
         queue.sync {
             self.writer = writer
             self.input = input
         }
+    }
+
+    /// Tears down without finalizing — for Cancel from the armed state.
+    func discard() async {
+        session.stopRunning()
+        queue.sync { self.writer?.cancelWriting() }
     }
 
     func markTruncated() {

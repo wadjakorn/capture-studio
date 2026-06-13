@@ -37,6 +37,10 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private let micDevice: AVCaptureDevice?
     private let micOutputURL: URL?
     private let session = AVCaptureSession()
+    /// The live capture session, exposed so a preview layer can render the feed
+    /// in parallel with the file writer (an independent connection — no extra
+    /// device open, so no same-device audio/video contention).
+    var captureSession: AVCaptureSession { session }
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "capturestudio.camera.output")
 
@@ -45,12 +49,23 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
-    /// Count of startup frames dropped while waiting for a host-clock PTS.
-    private var videoWarmupDrops = 0
-    private var audioWarmupDrops = 0
-    /// After this many drops, accept the next frame regardless (safety net so
-    /// an unexpected clock never loses the whole track).
-    private static let maxWarmupDrops = 30
+    /// Last PTS appended to each track. Adding a mic makes AVCaptureSession
+    /// switch its master clock to the audio device clock once at startup, so
+    /// video frames straddling the switch are non-monotonic; dropping any
+    /// backward frame keeps the writer from going to .failed.
+    private var lastVideoPTS = CMTime.negativeInfinity
+    private var lastAudioPTS = CMTime.negativeInfinity
+    /// True once an audio sample has been seen — the session's master clock has
+    /// then settled on the audio device clock, so video PTS stop jumping.
+    private var audioReady = false
+    /// Safe cross-queue read of `audioReady`: it's written on `audioQueue`
+    /// (in `appendAudio`) and read here on the video `queue`. Bounce the read
+    /// through `audioQueue` so the write is properly published.
+    private var isAudioReady: Bool { audioQueue.sync { audioReady } }
+    /// Frames dropped while waiting for audio to come online. After this many,
+    /// anchor video anyway so a silent mic never loses the camera track.
+    private var videoWaitForAudioDrops = 0
+    private static let maxWaitForAudioDrops = 60
 
     // Mic captured on this same session (best-effort).
     private let audioOutput = AVCaptureAudioDataOutput()
@@ -71,7 +86,14 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         super.init()
     }
 
-    func start() async throws {
+    /// Warms up the capture session: opens the device(s), wires the delegate,
+    /// and starts the session running so buffers flow — but creates NO writers.
+    /// The delegate's append funcs early-return while `writer`/`audioWriter` are
+    /// nil, so warm-up buffers are discarded. Crucially, audio starts flowing
+    /// here, so the AVCaptureSession master-clock switch (host → audio device
+    /// clock) settles entirely before `beginWriting()`, making the first written
+    /// frame anchor cleanly with no wait.
+    func warmUp() async throws {
         let deviceInput: AVCaptureDeviceInput
         do {
             deviceInput = try AVCaptureDeviceInput(device: device)
@@ -102,21 +124,23 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
                 continuation.resume()
             }
         }
+    }
 
+    /// Creates the writers and begins accepting samples. Call after `warmUp()`
+    /// (session already running, audio clock settled). The next delegate frame
+    /// anchors `sessionStartHostTime`.
+    func beginWriting() throws {
         guard let settings = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) else {
-            session.stopRunning()
             throw CameraError.writerSetupFailed("no recommended settings")
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = true
         guard writer.canAdd(input) else {
-            session.stopRunning()
             throw CameraError.writerSetupFailed("writer rejected input")
         }
         writer.add(input)
         guard writer.startWriting() else {
-            session.stopRunning()
             throw CameraError.writerSetupFailed(writer.error?.localizedDescription ?? "unknown")
         }
         // Publish writer/input to the capture queue before accepting buffers.
@@ -125,6 +149,15 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             self.input = input
         }
         if micAttached { startAudioWriter() }
+    }
+
+    /// Tears down a warmed (and possibly already-writing) recorder without
+    /// finalizing anything — for Cancel from the armed state or app teardown.
+    /// Never throws, produces no TrackInfo.
+    func discard() async {
+        session.stopRunning()
+        queue.sync { self.writer?.cancelWriting() }
+        audioQueue.sync { self.audioWriter?.cancelWriting() }
     }
 
     /// Adds the mic device's input + an audio output to the session. On any
@@ -261,42 +294,41 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard let writer, let input, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
-            // Adding a mic makes AVCaptureSession's master clock switch to the
-            // audio device clock once at startup, so the first few frames can
-            // be stamped on a transient clock (PTS near 0) before it settles
-            // on host time. Anchoring on such a frame corrupts the track
-            // timeline. Drop startup frames until the PTS matches wall-clock
-            // host time; that frame's PTS is then a valid host-clock anchor.
-            guard isHostClockPTS(pts, drops: &videoWarmupDrops) else { return }
+            // When a mic shares this session, wait until audio is flowing so the
+            // master clock has switched to the audio device clock and settled.
+            // Anchoring before then means later (post-switch) frames jump
+            // backward and fail the writer. Give up waiting after a bound so a
+            // silent mic never costs the camera track.
+            if micAttached, !isAudioReady {
+                videoWaitForAudioDrops += 1
+                if videoWaitForAudioDrops <= Self.maxWaitForAudioDrops { return }
+            }
             writer.startSession(atSourceTime: pts)
-            sessionStartHostTime = pts.seconds
+            // Anchor on the host clock captured now (independent of whatever
+            // clock the buffer PTS uses), so it stays comparable with the
+            // screen track's host-clock anchor.
+            sessionStartHostTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
         }
+        guard pts >= lastVideoPTS else { return } // drop any backward frame
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
+            lastVideoPTS = pts
         }
-    }
-
-    /// True if `pts` looks like it is on the host-time clock (within a few
-    /// seconds of now), or if we have dropped enough frames that we accept it
-    /// regardless. Increments `drops` while rejecting.
-    private func isHostClockPTS(_ pts: CMTime, drops: inout Int) -> Bool {
-        let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-        if abs(pts.seconds - hostNow) < 5 { return true }
-        drops += 1
-        return drops > Self.maxWarmupDrops
     }
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+        audioReady = true // master clock is now on the audio device clock
         guard let writer = audioWriter, let input = audioInput,
               writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if audioStartHostTime == nil {
-            guard isHostClockPTS(pts, drops: &audioWarmupDrops) else { return }
             writer.startSession(atSourceTime: pts)
-            audioStartHostTime = pts.seconds
+            audioStartHostTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
         }
+        guard pts >= lastAudioPTS else { return }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
+            lastAudioPTS = pts
         }
     }
 }

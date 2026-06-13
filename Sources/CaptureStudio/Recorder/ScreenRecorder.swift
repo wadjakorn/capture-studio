@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
+import AppKit
 
 /// Captures one display via SCStream and writes screen.mp4, plus system.m4a
 /// when system audio is enabled (same stream, separate writer — SCStream audio
@@ -141,7 +142,17 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             config.capturesAudio = false
         }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // Exclude our own app from the capture so the live camera-preview panel
+        // (and the menu-bar popup, etc.) never bleed into screen.mp4.
+        let filter: SCContentFilter
+        if let me = try? await SCShareableContent.current.applications.first(where: {
+            $0.processID == NSRunningApplication.current.processIdentifier
+        }) {
+            filter = SCContentFilter(display: display, excludingApplications: [me],
+                                     exceptingWindows: [])
+        } else {
+            filter = SCContentFilter(display: display, excludingWindows: [])
+        }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
         if audioWriter != nil {
