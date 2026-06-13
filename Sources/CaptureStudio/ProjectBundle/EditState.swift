@@ -101,7 +101,9 @@ struct EditState: Codable, Equatable {
     var cameraShadowRadius: Double = 0.5
     /// Camera feed crop aspect; `original` keeps the native aspect.
     var cameraAspect: CameraAspect = .original
-    /// Per-source playback/export volume, 0–1.
+    /// Per-source playback/export volume. System is 0–1 (attenuation). Mic is
+    /// 0–3: values >1 boost gain for quiet voice. Older bundles (mic ≤ 1) load
+    /// unchanged.
     var micVolume: Double = 1.0
     var systemVolume: Double = 1.0
     /// Reframe crop. Center is normalized 0–1 in screen-source space; zoom is

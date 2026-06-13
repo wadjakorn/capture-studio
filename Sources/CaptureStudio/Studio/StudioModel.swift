@@ -103,7 +103,9 @@ final class StudioModel: ObservableObject {
     var hasMicTrack: Bool { micTrackID != nil }
     var hasSystemAudioTrack: Bool { systemTrackID != nil }
 
-    // Per-source volumes, 0–1. Applied live via AVAudioMix; persisted to edit.json.
+    // Per-source volumes. Applied live via AVAudioMix; persisted to edit.json.
+    // System is 0–1 (attenuation only). Mic is 0–3: values >1 boost gain for
+    // quiet voice (~+9.5 dB at 3.0; may clip loud peaks).
     @Published var micVolume = 1.0
     @Published var systemVolume = 1.0
 
@@ -169,7 +171,7 @@ final class StudioModel: ObservableObject {
             cameraShadow = edit.cameraShadow
             cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
             cameraAspect = edit.cameraAspect
-            micVolume = min(max(0, edit.micVolume), 1)
+            micVolume = min(max(0, edit.micVolume), 3)
             systemVolume = min(max(0, edit.systemVolume), 1)
             cropAspect = edit.cropAspect
             cropCenterX = min(max(0, edit.cropCenterX), 1)
@@ -615,7 +617,7 @@ final class StudioModel: ObservableObject {
 
     /// Live volume change during slider drag; persist via commitVolumeEdit().
     func setMicVolume(_ value: Double) {
-        micVolume = min(max(0, value), 1)
+        micVolume = min(max(0, value), 3)
         applyAudioMix()
     }
 

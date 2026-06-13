@@ -94,11 +94,13 @@ struct StudioView: View {
                         if model.hasMicTrack {
                             volumeSlider(
                                 systemImage: "mic",
-                                help: "Microphone volume",
+                                help: "Microphone volume (up to 300% to boost quiet voice)",
                                 value: Binding(
                                     get: { model.micVolume },
                                     set: { model.setMicVolume($0) }
-                                )
+                                ),
+                                range: 0...3,
+                                showPercent: true
                             )
                         }
                     }
@@ -193,15 +195,24 @@ struct StudioView: View {
     }
 
     private func volumeSlider(systemImage: String, help: String,
-                              value: Binding<Double>) -> some View {
+                              value: Binding<Double>,
+                              range: ClosedRange<Double> = 0...1,
+                              showPercent: Bool = false) -> some View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
-            Slider(value: value, in: 0...1) { editing in
+            Slider(value: value, in: range) { editing in
                 if !editing { model.commitVolumeEdit() }
             }
             .frame(width: 80)
             .controlSize(.small)
+            if showPercent {
+                Text("\(Int((value.wrappedValue * 100).rounded()))%")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
         }
         .help(help)
     }
