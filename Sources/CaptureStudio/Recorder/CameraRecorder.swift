@@ -4,7 +4,13 @@ import AVFoundation
 /// Records one camera device to camera.mp4 via its own AVCaptureSession.
 /// Sample buffer PTS are on the host clock — same timebase as the screen
 /// track, so alignment is pure offset arithmetic.
-final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+///
+/// Optionally also captures a microphone to mic.m4a **on the same session**.
+/// A camera's built-in mic (e.g. a USB webcam) cannot stream audio to a rival
+/// AVCaptureSession while this session owns the device — the audio session
+/// gets zero buffers. Hosting the mic here avoids that contention.
+final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
+                            AVCaptureAudioDataOutputSampleBufferDelegate {
     enum CameraError: LocalizedError {
         case deviceUnavailable
         case writerSetupFailed(String)
@@ -19,8 +25,17 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
+    /// Result of a camera recording: the camera track plus, when a mic was
+    /// hosted on this session and produced audio, its track too.
+    struct Result {
+        var camera: TrackInfo
+        var mic: TrackInfo?
+    }
+
     private let device: AVCaptureDevice
     private let outputURL: URL
+    private let micDevice: AVCaptureDevice?
+    private let micOutputURL: URL?
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "capturestudio.camera.output")
@@ -31,9 +46,22 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
 
-    init(device: AVCaptureDevice, outputURL: URL) {
+    // Mic captured on this same session (best-effort).
+    private let audioOutput = AVCaptureAudioDataOutput()
+    private let audioQueue = DispatchQueue(label: "capturestudio.camera.audio")
+    private var audioWriter: AVAssetWriter?
+    private var audioInput: AVAssetWriterInput?
+    private var audioStartHostTime: Double?
+    private var micAttached = false
+    /// Non-fatal mic setup problem; surfaced so the caller can fall back.
+    private(set) var micWarning: String?
+
+    init(device: AVCaptureDevice, outputURL: URL,
+         micDevice: AVCaptureDevice? = nil, micOutputURL: URL? = nil) {
         self.device = device
         self.outputURL = outputURL
+        self.micDevice = micDevice
+        self.micOutputURL = micOutputURL
         super.init()
     }
 
@@ -52,6 +80,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         session.addInput(deviceInput)
         session.addOutput(output)
         output.setSampleBufferDelegate(self, queue: queue)
+
+        // Add the mic to this same session (best-effort). Audio setup failures
+        // become a warning, never abort the camera.
+        if let micDevice {
+            attachMic(micDevice)
+        }
         session.commitConfiguration()
 
         // startRunning blocks; keep it off the main thread.
@@ -83,13 +117,63 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             self.writer = writer
             self.input = input
         }
+        if micAttached { startAudioWriter() }
+    }
+
+    /// Adds the mic device's input + an audio output to the session. On any
+    /// failure, records a warning and leaves the mic unattached.
+    private func attachMic(_ micDevice: AVCaptureDevice) {
+        guard micOutputURL != nil else { return }
+        let micInput: AVCaptureDeviceInput
+        do {
+            micInput = try AVCaptureDeviceInput(device: micDevice)
+        } catch {
+            micWarning = "Microphone unavailable: \(error.localizedDescription)"
+            return
+        }
+        guard session.canAddInput(micInput), session.canAddOutput(audioOutput) else {
+            micWarning = "Microphone could not be added to the camera session."
+            return
+        }
+        session.addInput(micInput)
+        session.addOutput(audioOutput)
+        audioOutput.setSampleBufferDelegate(self, queue: audioQueue)
+        micAttached = true
+    }
+
+    private func startAudioWriter() {
+        guard let micOutputURL else { return }
+        guard let settings = audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: .m4a) else {
+            micWarning = "Microphone settings unavailable."
+            return
+        }
+        do {
+            let writer = try AVAssetWriter(outputURL: micOutputURL, fileType: .m4a)
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+            input.expectsMediaDataInRealTime = true
+            guard writer.canAdd(input) else {
+                micWarning = "Microphone writer rejected input."
+                return
+            }
+            writer.add(input)
+            guard writer.startWriting() else {
+                micWarning = writer.error?.localizedDescription ?? "Microphone writer failed to start."
+                return
+            }
+            audioQueue.sync {
+                self.audioWriter = writer
+                self.audioInput = input
+            }
+        } catch {
+            micWarning = "Microphone writer failed: \(error.localizedDescription)"
+        }
     }
 
     func markTruncated() {
         queue.sync { truncated = true }
     }
 
-    func stop() async throws -> TrackInfo {
+    func stop() async throws -> Result {
         session.stopRunning()
         let (writer, input, startTime): (AVAssetWriter?, AVAssetWriterInput?, Double?) = queue.sync {
             (self.writer, self.input, self.sessionStartHostTime)
@@ -99,6 +183,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
         guard let startTime else {
             writer.cancelWriting()
+            await finishAudio()  // tear down the audio writer too
             throw CameraError.noSamplesCaptured
         }
         input.markAsFinished()
@@ -108,7 +193,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
 
         let fps = device.activeFormat.videoSupportedFrameRateRanges.first?.maxFrameRate
-        return TrackInfo(
+        let cameraTrack = TrackInfo(
             type: .camera,
             filename: outputURL.lastPathComponent,
             sessionStartHostTime: startTime,
@@ -118,17 +203,72 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             deviceID: device.uniqueID,
             truncated: truncated
         )
+        let micTrack = await finishAudio()
+        return Result(camera: cameraTrack, mic: micTrack)
     }
 
-    // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+    /// Finalizes the audio writer if it captured samples. Returns the mic
+    /// TrackInfo, or nil (no mic, no samples, or failure — the camera survives).
+    @discardableResult
+    private func finishAudio() async -> TrackInfo? {
+        let (writer, input, startTime): (AVAssetWriter?, AVAssetWriterInput?, Double?) = audioQueue.sync {
+            (self.audioWriter, self.audioInput, self.audioStartHostTime)
+        }
+        guard let writer, let input, let micDevice, let startTime else {
+            writer?.cancelWriting()
+            if micAttached, micWarning == nil, audioStartHostTime == nil {
+                micWarning = "Microphone produced no audio."
+            }
+            return nil
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        if writer.status == .failed {
+            micWarning = writer.error?.localizedDescription ?? "Microphone finish failed."
+            return nil
+        }
+        return TrackInfo(
+            type: .mic,
+            filename: (micOutputURL ?? outputURL).lastPathComponent,
+            sessionStartHostTime: startTime,
+            nominalFPS: nil,
+            codec: "aac",
+            deviceName: micDevice.localizedName,
+            deviceID: micDevice.uniqueID,
+            truncated: truncated
+        )
+    }
+
+    // MARK: - Sample buffer delegate (video + audio share this callback)
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        if output === audioOutput {
+            appendAudio(sampleBuffer)
+        } else {
+            appendVideo(sampleBuffer)
+        }
+    }
+
+    private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
         guard let writer, let input, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
             writer.startSession(atSourceTime: pts)
             sessionStartHostTime = pts.seconds
+        }
+        if input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+
+    private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard let writer = audioWriter, let input = audioInput,
+              writer.status == .writing else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if audioStartHostTime == nil {
+            writer.startSession(atSourceTime: pts)
+            audioStartHostTime = pts.seconds
         }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)

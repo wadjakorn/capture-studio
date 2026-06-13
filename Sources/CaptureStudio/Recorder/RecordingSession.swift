@@ -71,25 +71,37 @@ final class RecordingSession: ObservableObject {
             }
 
             // Camera/mic are best-effort — failure becomes a warning.
-            if let cameraID, let device = DeviceDiscovery.cameras().first(where: { $0.uniqueID == cameraID }) {
-                let recorder = CameraRecorder(device: device, outputURL: bundle.cameraURL)
+            let micDevice = micID.flatMap { id in
+                DeviceDiscovery.microphones().first { $0.uniqueID == id }
+            }
+            let cameraDevice = cameraID.flatMap { id in
+                DeviceDiscovery.cameras().first { $0.uniqueID == id }
+            }
+
+            if let cameraDevice {
+                // Host the mic on the camera's session: a camera's own mic
+                // can't stream to a rival capture session (it gets no buffers).
+                let recorder = CameraRecorder(
+                    device: cameraDevice, outputURL: bundle.cameraURL,
+                    micDevice: micDevice,
+                    micOutputURL: micDevice != nil ? bundle.micURL : nil
+                )
                 do {
                     try await recorder.start()
                     cameraRecorder = recorder
+                    if let w = recorder.micWarning {
+                        Log.recorder.error("mic on camera session failed: \(w, privacy: .public)")
+                        // Mic couldn't attach to the camera session — try a
+                        // standalone session for an unrelated mic device.
+                        if let micDevice { await startStandaloneMic(micDevice, bundle: bundle) }
+                    }
                 } catch {
                     Log.recorder.error("camera start failed: \(error.localizedDescription, privacy: .public)")
                     warnings.append("Camera not recorded: \(error.localizedDescription)")
+                    if let micDevice { await startStandaloneMic(micDevice, bundle: bundle) }
                 }
-            }
-            if let micID, let device = DeviceDiscovery.microphones().first(where: { $0.uniqueID == micID }) {
-                let recorder = MicRecorder(device: device, outputURL: bundle.micURL)
-                do {
-                    try await recorder.start()
-                    micRecorder = recorder
-                } catch {
-                    Log.recorder.error("mic start failed: \(error.localizedDescription, privacy: .public)")
-                    warnings.append("Microphone not recorded: \(error.localizedDescription)")
-                }
+            } else if let micDevice {
+                await startStandaloneMic(micDevice, bundle: bundle)
             }
 
             eventTracker.start()
@@ -130,8 +142,14 @@ final class RecordingSession: ObservableObject {
             }
 
             if let cameraRecorder {
-                do { tracks.append(try await cameraRecorder.stop()) }
-                catch { warnings.append("Camera track lost: \(error.localizedDescription)") }
+                do {
+                    let result = try await cameraRecorder.stop()
+                    tracks.append(result.camera)
+                    if let micTrack = result.mic { tracks.append(micTrack) }
+                    if let w = cameraRecorder.micWarning { warnings.append(w) }
+                } catch {
+                    warnings.append("Camera track lost: \(error.localizedDescription)")
+                }
             }
             if let micRecorder {
                 do { tracks.append(try await micRecorder.stop()) }
@@ -181,6 +199,19 @@ final class RecordingSession: ObservableObject {
     private var isFailed: Bool {
         if case .failed = state { return true }
         return false
+    }
+
+    /// Records a mic on its own session (no camera, or camera-hosted mic
+    /// failed to attach). Best-effort: failure is a warning.
+    private func startStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle) async {
+        let recorder = MicRecorder(device: device, outputURL: bundle.micURL)
+        do {
+            try await recorder.start()
+            micRecorder = recorder
+        } catch {
+            Log.recorder.error("mic start failed: \(error.localizedDescription, privacy: .public)")
+            warnings.append("Microphone not recorded: \(error.localizedDescription)")
+        }
     }
 
     private func cleanupAbandonedBundle() {
