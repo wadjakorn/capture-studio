@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct StudioView: View {
     @StateObject private var model: StudioModel
+    @State private var showCameraStyle = false
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -24,7 +25,7 @@ struct StudioView: View {
                 editorView
             }
         }
-        .frame(minWidth: 720, minHeight: 480)
+        .frame(minWidth: 480, minHeight: 480)
         .task { await model.load() }
         .navigationTitle(model.bundle.url.deletingPathExtension().lastPathComponent)
     }
@@ -34,6 +35,9 @@ struct StudioView: View {
             if let player = model.player {
                 ZStack {
                     PlayerView(player: player)
+                    if model.cropActive {
+                        CropPanOverlay(model: model)
+                    }
                     if model.hasCameraTrack && model.cameraVisible {
                         CameraPipOverlay(model: model)
                     }
@@ -48,65 +52,140 @@ struct StudioView: View {
         VStack(spacing: 10) {
             timeline
 
-            HStack(spacing: 12) {
-                Button {
-                    model.togglePlay()
-                } label: {
-                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                        .frame(width: 24)
-                }
-                .keyboardShortcut(.space, modifiers: [])
-
-                Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Divider().frame(height: 16)
-
-                Button("Set In") { model.setTrimIn(model.currentTime) }
-                Button("Set Out") { model.setTrimOut(model.currentTime) }
-                Button("Reset") { model.resetTrim() }
-                Text("Trim \(timecode(model.trimIn)) – \(timecode(model.trimOut))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                if model.hasSystemAudioTrack {
-                    volumeSlider(
-                        systemImage: "speaker.wave.2",
-                        help: "System audio volume",
-                        value: Binding(
-                            get: { model.systemVolume },
-                            set: { model.setSystemVolume($0) }
-                        )
-                    )
-                }
-                if model.hasMicTrack {
-                    volumeSlider(
-                        systemImage: "mic",
-                        help: "Microphone volume",
-                        value: Binding(
-                            get: { model.micVolume },
-                            set: { model.setMicVolume($0) }
-                        )
-                    )
-                }
-
-                if model.hasCameraTrack {
-                    Toggle(isOn: Binding(
-                        get: { model.cameraVisible },
-                        set: { _ in model.toggleCamera() }
-                    )) {
-                        Image(systemName: "video.circle")
+            FlowLayout(hSpacing: 12, vSpacing: 8) {
+                // Playback cluster.
+                HStack(spacing: 8) {
+                    Button {
+                        model.togglePlay()
+                    } label: {
+                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                            .frame(width: 24)
                     }
-                    .toggleStyle(.button)
-                    .help("Show/hide camera overlay")
+                    .keyboardShortcut(.space, modifiers: [])
+
+                    Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                // Trim cluster.
+                HStack(spacing: 8) {
+                    Button("Set In") { model.setTrimIn(model.currentTime) }
+                    Button("Set Out") { model.setTrimOut(model.currentTime) }
+                    Button("Reset") { model.resetTrim() }
+                    Text("Trim \(timecode(model.trimIn)) – \(timecode(model.trimOut))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                // Volume cluster.
+                if model.hasSystemAudioTrack || model.hasMicTrack {
+                    HStack(spacing: 8) {
+                        if model.hasSystemAudioTrack {
+                            volumeSlider(
+                                systemImage: "speaker.wave.2",
+                                help: "System audio volume",
+                                value: Binding(
+                                    get: { model.systemVolume },
+                                    set: { model.setSystemVolume($0) }
+                                )
+                            )
+                        }
+                        if model.hasMicTrack {
+                            volumeSlider(
+                                systemImage: "mic",
+                                help: "Microphone volume",
+                                value: Binding(
+                                    get: { model.micVolume },
+                                    set: { model.setMicVolume($0) }
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Reframe cluster.
+                HStack(spacing: 8) {
+                    Menu {
+                        ForEach(CropAspect.allCases, id: \.self) { aspect in
+                            Button {
+                                model.setCropAspect(aspect)
+                            } label: {
+                                if model.cropAspect == aspect {
+                                    Label(aspect.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(aspect.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "aspectratio")
+                    }
+                    .menuStyle(.button)
+                    .fixedSize()
+                    .help("Reframe aspect ratio")
+
+                    if model.cropActive {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus.magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            Slider(value: Binding(
+                                get: { 1.2 - model.cropZoom },
+                                set: { model.setCropZoom(1.2 - $0) }
+                            ), in: 0.2...1.0) { editing in
+                                if !editing { model.commitCropEdit() }
+                            }
+                            .frame(width: 80)
+                            .controlSize(.small)
+                        }
+                        .help("Crop zoom — drag the video to pan")
+                    }
+                }
+
+                // Camera cluster.
+                if model.hasCameraTrack {
+                    HStack(spacing: 8) {
+                        Toggle(isOn: Binding(
+                            get: { model.cameraVisible },
+                            set: { _ in model.toggleCamera() }
+                        )) {
+                            Image(systemName: "video.circle")
+                        }
+                        .toggleStyle(.button)
+                        .help("Show/hide camera overlay")
+
+                        if model.cameraVisible {
+                            HStack(spacing: 4) {
+                                Image(systemName: "person.crop.square")
+                                    .foregroundStyle(.secondary)
+                                Slider(value: Binding(
+                                    get: { model.cameraZoom },
+                                    set: { model.setCameraZoom($0) }
+                                ), in: 1.0...4.0) { editing in
+                                    if !editing { model.commitCameraEdit() }
+                                }
+                                .frame(width: 80)
+                                .controlSize(.small)
+                            }
+                            .help("Camera zoom — ⌥-drag the camera to pan")
+
+                            Button {
+                                showCameraStyle.toggle()
+                            } label: {
+                                Image(systemName: "paintbrush")
+                            }
+                            .help("Camera frame style")
+                            .popover(isPresented: $showCameraStyle,
+                                     arrowEdge: .bottom) {
+                                cameraStylePopover
+                            }
+                        }
+                    }
                 }
 
                 Button("Reveal Masters") { model.revealMastersInFinder() }
 
-                exportControls
+                HStack(spacing: 8) { exportControls }
             }
         }
         .padding(12)
@@ -125,6 +204,111 @@ struct StudioView: View {
             .controlSize(.small)
         }
         .help(help)
+    }
+
+    // MARK: - Camera style
+
+    /// Common border colors offered as one-tap swatches.
+    private static let borderPresets = [
+        "#FFFFFF", "#000000", "#FF3B30", "#FF9500",
+        "#34C759", "#007AFF", "#AF52DE", "#8E8E93",
+    ]
+
+    private var cameraStylePopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Shape", selection: Binding(
+                get: { model.cameraShape },
+                set: { model.setCameraShape($0) }
+            )) {
+                ForEach(CameraShape.allCases, id: \.self) { shape in
+                    Text(shape.displayName).tag(shape)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            // Aspect only applies to rectangles; a circle is forced to 1:1.
+            if model.cameraShape == .rectangle {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Aspect").font(.caption).foregroundStyle(.secondary)
+                    Picker("Aspect", selection: Binding(
+                        get: { model.cameraAspect },
+                        set: { model.setCameraAspect($0) }
+                    )) {
+                        ForEach(CameraAspect.allCases, id: \.self) { a in
+                            Text(a.displayName).tag(a)
+                        }
+                    }
+                    .labelsHidden()
+                }
+
+                styleSlider("Corner radius", value: Binding(
+                    get: { model.cameraCornerRadius },
+                    set: { model.setCameraCornerRadius($0) }
+                ), range: 0...1)
+            }
+
+            styleSlider("Border", value: Binding(
+                get: { model.cameraBorderWidth },
+                set: { model.setCameraBorderWidth($0) }
+            ), range: 0...0.1)
+
+            if model.cameraBorderWidth > 0 {
+                borderColorControls
+            }
+
+            Toggle("Shadow", isOn: Binding(
+                get: { model.cameraShadow },
+                set: { model.setCameraShadow($0) }
+            ))
+
+            if model.cameraShadow {
+                styleSlider("Shadow", value: Binding(
+                    get: { model.cameraShadowRadius },
+                    set: { model.setCameraShadowRadius($0) }
+                ), range: 0...1)
+            }
+        }
+        .padding(14)
+        .frame(width: 240)
+    }
+
+    /// Preset swatches plus a compact custom picker. Tapping a swatch sets the
+    /// border color inline; only the custom picker opens the system panel.
+    private var borderColorControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Border color").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                ForEach(Self.borderPresets, id: \.self) { hex in
+                    let selected = hex.caseInsensitiveCompare(model.cameraBorderHex) == .orderedSame
+                    Circle()
+                        .fill(Color(hexString: hex))
+                        .frame(width: 20, height: 20)
+                        .overlay(Circle().strokeBorder(.secondary.opacity(0.4), lineWidth: 0.5))
+                        .overlay(
+                            Circle().strokeBorder(Color.accentColor,
+                                                  lineWidth: selected ? 2.5 : 0)
+                                .padding(-2)
+                        )
+                        .onTapGesture { model.setCameraBorderHex(hex) }
+                }
+            }
+            ColorPicker("Custom", selection: Binding(
+                get: { Color(hexString: model.cameraBorderHex) },
+                set: { model.setCameraBorderHex($0.hexString()) }
+            ), supportsOpacity: false)
+            .labelsHidden()
+        }
+    }
+
+    private func styleSlider(_ title: String, value: Binding<Double>,
+                             range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Slider(value: value, in: range) { editing in
+                if !editing { model.commitCameraEdit() }
+            }
+        }
     }
 
     // MARK: - Timeline
@@ -220,5 +404,26 @@ struct StudioView: View {
         let minutes = Int(total) / 60
         let secs = total - Double(minutes * 60)
         return String(format: "%02d:%04.1f", minutes, secs)
+    }
+}
+
+extension Color {
+    /// Parses "#RRGGBB" (or "RRGGBB"); falls back to white.
+    init(hexString: String) {
+        var s = hexString.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        let v = UInt64(s, radix: 16) ?? 0xFFFFFF
+        self.init(.sRGB,
+                  red: Double((v >> 16) & 0xFF) / 255,
+                  green: Double((v >> 8) & 0xFF) / 255,
+                  blue: Double(v & 0xFF) / 255)
+    }
+
+    func hexString() -> String {
+        let ns = NSColor(self).usingColorSpace(.sRGB) ?? .white
+        return String(format: "#%02X%02X%02X",
+                      Int((ns.redComponent * 255).rounded()),
+                      Int((ns.greenComponent * 255).rounded()),
+                      Int((ns.blueComponent * 255).rounded()))
     }
 }

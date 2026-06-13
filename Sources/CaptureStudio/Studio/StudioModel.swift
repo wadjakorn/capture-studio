@@ -36,7 +36,68 @@ final class StudioModel: ObservableObject {
     @Published var cameraCenterX = 0.85
     @Published var cameraCenterY = 0.82
     @Published var cameraScale = 0.24
-    private(set) var renderSize: CGSize = .zero
+    // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
+    // 0–1 in the camera's own space. Persisted to edit.json.
+    @Published var cameraZoom = 1.0
+    @Published var cameraFeedX = 0.5
+    @Published var cameraFeedY = 0.5
+    // Camera PiP frame styling. Corner radius / border width are fractions
+    // (0–1 of half-min-side / pip width). Persisted to edit.json.
+    @Published private(set) var cameraShape: CameraShape = .rectangle
+    @Published var cameraCornerRadius = 0.0
+    @Published var cameraBorderWidth = 0.0
+    @Published var cameraBorderHex = "#FFFFFF"
+    @Published var cameraShadow = false
+    @Published var cameraShadowRadius = 0.5
+    // Camera feed crop aspect — `original` keeps native aspect.
+    @Published private(set) var cameraAspect: CameraAspect = .original
+
+    var cameraShown: Bool { cameraVisible && cameraTrackID != nil }
+    /// The styled-camera pipeline (custom Core Image compositor) is needed
+    /// only when the camera frame is non-rectangular, rounded, bordered, or
+    /// shadowed; otherwise the cheap layer-instruction path is used.
+    var cameraNeedsCompositor: Bool {
+        cameraShown && (cameraShape != .rectangle || cameraCornerRadius > 0
+                        || cameraBorderWidth > 0 || cameraShadow)
+    }
+    /// Camera feed crop aspect — circle forces 1:1, then an explicit preset,
+    /// else the native feed aspect.
+    private var cameraFeedAspect: CGFloat {
+        if cameraShape == .circle { return 1 }
+        if let r = cameraAspect.ratio { return CGFloat(r) }
+        guard let s = cameraNaturalSize, s.height > 0 else { return 1 }
+        return s.width / s.height
+    }
+
+    // Reframe crop — center normalized 0–1 in screen-source space, zoom =
+    // fraction of the max-fit crop (1.0 = widest). Persisted to edit.json.
+    @Published private(set) var cropAspect: CropAspect = .original
+    @Published var cropCenterX = 0.5
+    @Published var cropCenterY = 0.5
+    @Published var cropZoom = 1.0
+    var cropActive: Bool { cropAspect != .original }
+
+    /// Screen master natural size (source space for the crop).
+    private(set) var sourceSize: CGSize = .zero
+    /// Output canvas: crop output size when reframing, else the source size.
+    /// When the custom compositor runs without a crop, the preview canvas is
+    /// capped to a 1080-class short side so CI compositing stays smooth;
+    /// export still rebuilds at full resolution.
+    var renderSize: CGSize {
+        if cropActive { return previewCanvasSize }
+        if cameraNeedsCompositor { return Self.cappedPreviewSize(sourceSize) }
+        return sourceSize
+    }
+
+    /// Scales `size` down so its shorter side is ≤ 1080 (even pixels); leaves
+    /// smaller sizes untouched.
+    private static func cappedPreviewSize(_ size: CGSize) -> CGSize {
+        let shortSide = min(size.width, size.height)
+        guard shortSide > 1080 else { return size }
+        let scale = 1080 / shortSide
+        return CGSize(width: (size.width * scale / 2).rounded() * 2,
+                      height: (size.height * scale / 2).rounded() * 2)
+    }
     private(set) var cameraNaturalSize: CGSize?
     var hasCameraTrack: Bool { cameraTrackID != nil }
     var hasMicTrack: Bool { micTrackID != nil }
@@ -80,7 +141,7 @@ final class StudioModel: ObservableObject {
 
             self.meta = meta
             self.composition = built.composition
-            self.renderSize = built.renderSize
+            self.sourceSize = built.renderSize
             self.screenTrackID = built.screenTrackID
             self.cameraTrackID = built.cameraTrackID
             self.micTrackID = built.micTrackID
@@ -98,8 +159,22 @@ final class StudioModel: ObservableObject {
             cameraCenterX = edit.cameraCenterX
             cameraCenterY = edit.cameraCenterY
             cameraScale = edit.cameraScale
+            cameraZoom = min(max(1, edit.cameraZoom), 4)
+            cameraFeedX = min(max(0, edit.cameraFeedX), 1)
+            cameraFeedY = min(max(0, edit.cameraFeedY), 1)
+            cameraShape = edit.cameraShape
+            cameraCornerRadius = min(max(0, edit.cameraCornerRadius), 1)
+            cameraBorderWidth = min(max(0, edit.cameraBorderWidth), 0.1)
+            cameraBorderHex = edit.cameraBorderHex
+            cameraShadow = edit.cameraShadow
+            cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
+            cameraAspect = edit.cameraAspect
             micVolume = min(max(0, edit.micVolume), 1)
             systemVolume = min(max(0, edit.systemVolume), 1)
+            cropAspect = edit.cropAspect
+            cropCenterX = min(max(0, edit.cropCenterX), 1)
+            cropCenterY = min(max(0, edit.cropCenterY), 1)
+            cropZoom = min(max(0.2, edit.cropZoom), 1)
             applyVideoComposition()
             applyAudioMix()
 
@@ -225,18 +300,38 @@ final class StudioModel: ObservableObject {
     /// PiP rect in render-space pixels for the current camera settings.
     var cameraPipRect: CGRect? {
         guard let cameraNaturalSize, renderSize.width > 0 else { return nil }
-        let width = renderSize.width * cameraScale
-        let scale = width / cameraNaturalSize.width
-        let height = cameraNaturalSize.height * scale
+        return pipRect(in: renderSize, cameraSize: cameraNaturalSize)
+    }
+
+    /// PiP rect for an arbitrary canvas — settings are normalized, so the
+    /// same values place the camera in both preview and export canvases.
+    /// PiP height keys off the visible feed crop's aspect so the camera fills
+    /// the frame without distortion when zoomed/panned.
+    private func pipRect(in canvas: CGSize, cameraSize: CGSize) -> CGRect {
+        let width = canvas.width * cameraScale
+        let cropSize = cameraCropRectInFeed?.size ?? cameraSize
+        let aspect = cropSize.height > 0 ? cropSize.width / cropSize.height : 1
+        let height = aspect > 0 ? width / aspect : width
         return CGRect(
-            x: cameraCenterX * renderSize.width - width / 2,
-            y: cameraCenterY * renderSize.height - height / 2,
+            x: cameraCenterX * canvas.width - width / 2,
+            y: cameraCenterY * canvas.height - height / 2,
             width: width, height: height
         )
     }
 
-    /// Rebuilds the video composition (PiP transform) and applies it to the
-    /// player item. Cheap — instructions only, no re-encode.
+    /// Visible crop of the camera feed in feed pixels; nil when unavailable.
+    /// Reuses CropMath at the feed's native aspect — zoom 1 = whole feed,
+    /// zoom 4 = quarter. Center clamped so the crop stays inside the feed.
+    var cameraCropRectInFeed: CGRect? {
+        guard let cameraNaturalSize, cameraNaturalSize.width > 0,
+              cameraNaturalSize.height > 0 else { return nil }
+        return CropMath.cropRect(source: cameraNaturalSize, ratio: cameraFeedAspect,
+                                 zoom: 1.0 / cameraZoom,
+                                 centerX: cameraFeedX, centerY: cameraFeedY)
+    }
+
+    /// Rebuilds the video composition (crop + PiP transforms) and applies it
+    /// to the player item. Cheap — instructions only, no re-encode.
     func applyVideoComposition() {
         playerItem?.videoComposition = buildVideoComposition()
     }
@@ -252,36 +347,268 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    private func buildVideoComposition() -> AVMutableVideoComposition? {
-        guard cameraVisible,
-              let composition,
-              let cameraTrackID,
-              let cameraNaturalSize,
-              let cameraTrack = composition.track(withTrackID: cameraTrackID),
-              let screenTrack = composition.track(withTrackID: screenTrackID),
-              let pip = cameraPipRect, cameraNaturalSize.width > 0 else {
+    /// Live camera feed zoom during slider drag; re-clamps the feed center.
+    func setCameraZoom(_ value: Double) {
+        cameraZoom = min(max(1, value), 4)
+        setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
+    }
+
+    /// Live camera feed pan during drag; clamps so the crop stays inside feed.
+    func setCameraFeedCenter(x: Double, y: Double) {
+        guard let cameraNaturalSize, cameraNaturalSize.width > 0,
+              cameraNaturalSize.height > 0 else { return }
+        let maxFit = CropMath.maxFitSize(source: cameraNaturalSize, ratio: cameraFeedAspect)
+        let z = 1.0 / cameraZoom
+        let size = CGSize(width: maxFit.width * z, height: maxFit.height * z)
+        let c = CropMath.clampedCenter(source: cameraNaturalSize, cropSize: size,
+                                       centerX: x, centerY: y)
+        cameraFeedX = c.x
+        cameraFeedY = c.y
+        applyVideoComposition()
+    }
+
+    func setCameraShape(_ shape: CameraShape) {
+        applyCameraStyle { cameraShape = shape }
+        // Aspect changed → re-clamp the feed center for the new crop.
+        setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
+        saveEdit()
+    }
+
+    func setCameraAspect(_ aspect: CameraAspect) {
+        cameraAspect = aspect
+        // Crop aspect changed → re-clamp the feed center (also re-renders).
+        setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
+        saveEdit()
+    }
+
+    func setCameraShadowRadius(_ value: Double) {
+        applyCameraStyle { cameraShadowRadius = min(max(0, value), 1) }
+    }
+
+    func setCameraCornerRadius(_ value: Double) {
+        applyCameraStyle { cameraCornerRadius = min(max(0, value), 1) }
+    }
+
+    func setCameraBorderWidth(_ value: Double) {
+        applyCameraStyle { cameraBorderWidth = min(max(0, value), 0.1) }
+    }
+
+    func setCameraBorderHex(_ hex: String) {
+        applyCameraStyle { cameraBorderHex = hex }
+        saveEdit()
+    }
+
+    func setCameraShadow(_ on: Bool) {
+        applyCameraStyle { cameraShadow = on }
+        saveEdit()
+    }
+
+    /// Applies a camera-style mutation; if it engages/disengages the custom
+    /// compositor, swap the player item so AVPlayer re-evaluates the
+    /// compositor class, then reapply the composition.
+    private func applyCameraStyle(_ mutate: () -> Void) {
+        let was = cameraNeedsCompositor
+        mutate()
+        if cameraNeedsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
+    }
+
+    // MARK: - Reframe crop
+
+    /// Current crop rect in screen-source pixels; nil when not reframing.
+    var cropRectInSource: CGRect? {
+        guard let ratio = cropAspect.ratio, sourceSize.width > 0 else { return nil }
+        return CropMath.cropRect(source: sourceSize, ratio: ratio, zoom: cropZoom,
+                                 centerX: cropCenterX, centerY: cropCenterY)
+    }
+
+    func setCropAspect(_ aspect: CropAspect) {
+        cropAspect = aspect
+        cropCenterX = 0.5
+        cropCenterY = 0.5
+        cropZoom = 1.0
+        refreshPlayerItemForCanvasChange()
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Live crop pan during drag; clamps so the crop stays inside the source.
+    func setCropCenter(x: Double, y: Double) {
+        guard let ratio = cropAspect.ratio, sourceSize.width > 0 else { return }
+        let maxFit = CropMath.maxFitSize(source: sourceSize, ratio: ratio)
+        let size = CGSize(width: maxFit.width * cropZoom, height: maxFit.height * cropZoom)
+        let c = CropMath.clampedCenter(source: sourceSize, cropSize: size,
+                                       centerX: x, centerY: y)
+        cropCenterX = c.x
+        cropCenterY = c.y
+        applyVideoComposition()
+    }
+
+    /// Live crop zoom during slider drag; re-clamps the center for the new size.
+    func setCropZoom(_ value: Double) {
+        cropZoom = min(max(0.2, value), 1.0)
+        setCropCenter(x: cropCenterX, y: cropCenterY)
+    }
+
+    /// Persist crop settings; call at gesture end, not per drag tick.
+    func commitCropEdit() {
+        saveEdit()
+    }
+
+    /// Preview output canvas when reframing (1080-class; export may rebuild
+    /// at a higher resolution).
+    private var previewCanvasSize: CGSize {
+        canvasSize(shortSide: 1080) ?? sourceSize
+    }
+
+    /// Output canvas for the active aspect: the short side is fixed
+    /// (1080-class / 2160-class), the long side derived (even-pixel).
+    /// Landscape 16:9 at 1080 → 1920×1080; portrait 9:16 → 1080×1920.
+    private func canvasSize(shortSide: CGFloat) -> CGSize? {
+        guard let ratio = cropAspect.ratio else { return nil }
+        if ratio >= 1 {
+            let width = (shortSide * ratio / 2).rounded() * 2
+            return CGSize(width: width, height: shortSide)
+        }
+        let height = (shortSide / ratio / 2).rounded() * 2
+        return CGSize(width: shortSide, height: height)
+    }
+
+    /// AVPlayer caches the item's presentation size; replacing the video
+    /// composition alone keeps the old letterbox when renderSize changes
+    /// shape, so swap in a fresh player item at the same position.
+    private func refreshPlayerItemForCanvasChange() {
+        guard let composition, let player else { return }
+        let wasPlaying = isPlaying
+        let position = player.currentTime()
+        let item = AVPlayerItem(asset: composition)
+        playerItem = item
+        player.replaceCurrentItem(with: item)
+        applyAudioMix()
+        player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
+        if wasPlaying { player.play() }
+    }
+
+    private func buildVideoComposition(canvasOverride: CGSize? = nil) -> AVMutableVideoComposition? {
+        guard let composition,
+              let screenTrack = composition.track(withTrackID: screenTrackID) else {
             return nil
         }
-        let scale = pip.width / cameraNaturalSize.width
+        let cameraShown = cameraVisible && cameraTrackID != nil
+        guard cameraShown || cropActive else { return nil }
+        let canvas = canvasOverride ?? renderSize
+        guard canvas.width > 0 else { return nil }
 
-        let cameraLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: cameraTrack)
-        cameraLayer.setTransform(
-            CGAffineTransform(scaleX: scale, y: scale)
-                .concatenating(CGAffineTransform(translationX: pip.minX, y: pip.minY)),
-            at: .zero
-        )
+        // Styled camera (circle / rounded / border / shadow) needs the custom
+        // Core Image compositor; everything else uses layer instructions.
+        if cameraNeedsCompositor, let cameraTrackID, cameraNaturalSize != nil {
+            return buildCompositorComposition(canvas: canvas, screenTrack: screenTrack,
+                                              cameraTrackID: cameraTrackID,
+                                              composition: composition)
+        }
+
+        var layers: [AVMutableVideoCompositionLayerInstruction] = []
+
+        // Camera PiP — first layer instruction renders topmost.
+        if cameraShown, let cameraTrackID, let cameraNaturalSize,
+           cameraNaturalSize.width > 0,
+           let cameraTrack = composition.track(withTrackID: cameraTrackID) {
+            let pip = pipRect(in: canvas, cameraSize: cameraNaturalSize)
+            let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: cameraNaturalSize)
+            // Scale the cropped feed to fill the PiP, then shift so the crop's
+            // origin lands at the PiP origin. cropRectangle is applied first.
+            let scale = pip.width / feedCrop.width
+            let cameraLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: cameraTrack)
+            cameraLayer.setCropRectangle(feedCrop, at: .zero)
+            cameraLayer.setTransform(
+                CGAffineTransform(scaleX: scale, y: scale)
+                    .concatenating(CGAffineTransform(translationX: pip.minX - feedCrop.minX * scale,
+                                                     y: pip.minY - feedCrop.minY * scale)),
+                at: .zero
+            )
+            layers.append(cameraLayer)
+        }
+
         let screenLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: screenTrack)
+        if let crop = cropRectInSource, crop.width > 0 {
+            // Scale so the crop fills the canvas, then shift its origin to 0.
+            let s = canvas.width / crop.width
+            screenLayer.setTransform(
+                CGAffineTransform(scaleX: s, y: s)
+                    .concatenating(CGAffineTransform(translationX: -crop.minX * s,
+                                                     y: -crop.minY * s)),
+                at: .zero
+            )
+        }
+        layers.append(screenLayer)
 
         let instruction = AVMutableVideoCompositionInstruction()
         instruction.timeRange = CMTimeRange(start: .zero, duration: composition.duration)
-        // First layer instruction renders topmost.
-        instruction.layerInstructions = [cameraLayer, screenLayer]
+        instruction.layerInstructions = layers
 
         let videoComposition = AVMutableVideoComposition()
-        videoComposition.renderSize = renderSize
+        videoComposition.renderSize = canvas
         videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
         videoComposition.instructions = [instruction]
         return videoComposition
+    }
+
+    /// Builds a composition that routes through `StudioCompositor` for the
+    /// styled camera. Screen crop + camera feed crop + PiP placement are all
+    /// passed as a `CompositorLayout` (top-left pixel coords).
+    private func buildCompositorComposition(canvas: CGSize,
+                                            screenTrack: AVMutableCompositionTrack,
+                                            cameraTrackID: CMPersistentTrackID,
+                                            composition: AVMutableComposition) -> AVMutableVideoComposition? {
+        guard let cameraNaturalSize else { return nil }
+        let pip = pipRect(in: canvas, cameraSize: cameraNaturalSize)
+        let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: cameraNaturalSize)
+        let minSide = min(pip.width, pip.height)
+
+        var layout = CompositorLayout(
+            canvas: canvas,
+            sourceSize: sourceSize,
+            screenCrop: cropRectInSource,
+            screenTrackID: screenTrackID,
+            cameraTrackID: cameraTrackID
+        )
+        layout.feedSize = cameraNaturalSize
+        layout.feedCrop = feedCrop
+        layout.pip = pip
+        layout.shape = cameraShape
+        layout.cornerRadiusPx = cameraCornerRadius * minSide / 2
+        layout.borderWidthPx = cameraBorderWidth * pip.width
+        layout.borderColor = Self.cgColor(hex: cameraBorderHex)
+        layout.shadow = cameraShadow
+        layout.shadowRadius = CGFloat(cameraShadowRadius)
+
+        let instruction = StudioCompositionInstruction(
+            timeRange: CMTimeRange(start: .zero, duration: composition.duration),
+            layout: layout
+        )
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.customVideoCompositorClass = StudioCompositor.self
+        videoComposition.renderSize = canvas
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.instructions = [instruction]
+        return videoComposition
+    }
+
+    /// Parses "#RRGGBB" (or "RRGGBB"); falls back to white.
+    private static func cgColor(hex: String) -> CGColor {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else {
+            return CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        }
+        return CGColor(
+            red: CGFloat((v >> 16) & 0xFF) / 255,
+            green: CGFloat((v >> 8) & 0xFF) / 255,
+            blue: CGFloat(v & 0xFF) / 255,
+            alpha: 1
+        )
     }
 
     // MARK: - Audio mix (per-source volume)
@@ -374,8 +701,22 @@ final class StudioModel: ObservableObject {
             cameraCenterX: cameraCenterX,
             cameraCenterY: cameraCenterY,
             cameraScale: cameraScale,
+            cameraZoom: cameraZoom,
+            cameraFeedX: cameraFeedX,
+            cameraFeedY: cameraFeedY,
+            cameraShape: cameraShape,
+            cameraCornerRadius: cameraCornerRadius,
+            cameraBorderWidth: cameraBorderWidth,
+            cameraBorderHex: cameraBorderHex,
+            cameraShadow: cameraShadow,
+            cameraShadowRadius: cameraShadowRadius,
+            cameraAspect: cameraAspect,
             micVolume: micVolume,
-            systemVolume: systemVolume
+            systemVolume: systemVolume,
+            cropAspect: cropAspect,
+            cropCenterX: cropCenterX,
+            cropCenterY: cropCenterY,
+            cropZoom: cropZoom
         )
         try? bundle.writeEdit(edit)
     }
@@ -390,14 +731,29 @@ final class StudioModel: ObservableObject {
             start: CMTime(seconds: trimIn, preferredTimescale: 600),
             end: CMTime(seconds: trimOut, preferredTimescale: 600)
         )
+        // Fixed-size session presets letterbox a portrait renderSize, so when
+        // reframing the output pixels come from the video composition's
+        // canvas and the session preset is quality-only.
+        let videoComposition: AVMutableVideoComposition?
+        let avPresetOverride: String?
+        if cropActive {
+            videoComposition = buildVideoComposition(canvasOverride: exportCanvasSize(for: preset))
+            avPresetOverride = AVAssetExportPresetHighestQuality
+        } else {
+            // Camera-only (plain or styled): export at full source resolution
+            // (renderSize may be capped for smooth preview), preset scales.
+            videoComposition = buildVideoComposition(canvasOverride: sourceSize)
+            avPresetOverride = nil
+        }
         Task {
             do {
                 let url = try await Exporter.export(
                     composition: composition,
-                    videoComposition: buildVideoComposition(),
+                    videoComposition: videoComposition,
                     audioMix: buildAudioMix(),
                     timeRange: range,
                     preset: preset,
+                    avPresetOverride: avPresetOverride,
                     to: destination
                 ) { [weak self] progress in
                     Task { @MainActor in
@@ -410,6 +766,21 @@ final class StudioModel: ObservableObject {
             } catch {
                 exportState = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    /// Export canvas when reframing: 1080/2160-wide for the quality presets,
+    /// crop-rect pixel size (even-aligned, no upscale) for Source.
+    private func exportCanvasSize(for preset: ExportPreset) -> CGSize {
+        switch preset {
+        case .hd1080:
+            return canvasSize(shortSide: 1080) ?? sourceSize
+        case .uhd4K:
+            return canvasSize(shortSide: 2160) ?? sourceSize
+        case .source:
+            guard let crop = cropRectInSource else { return sourceSize }
+            return CGSize(width: (crop.width / 2).rounded(.down) * 2,
+                          height: (crop.height / 2).rounded(.down) * 2)
         }
     }
 

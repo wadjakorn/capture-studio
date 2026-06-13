@@ -3,11 +3,15 @@ import SwiftUI
 /// Interactive handles for the camera PiP, drawn over the player. The PiP
 /// itself is burned into preview frames by the video composition; this view
 /// just maps view-space drags back into normalized render-space settings.
+///
+/// Gestures: a plain drag moves the PiP, ⌥-drag pans the camera feed crop
+/// (when zoomed in), and the bottom-right handle resizes it.
 struct CameraPipOverlay: View {
     @ObservedObject var model: StudioModel
 
     @State private var dragStartCenter: CGPoint?
     @State private var resizeStartScale: Double?
+    @State private var feedStartCenter: CGPoint?
     @State private var hovering = false
 
     var body: some View {
@@ -21,16 +25,28 @@ struct CameraPipOverlay: View {
                     width: pip.width * viewScale,
                     height: pip.height * viewScale
                 )
+                let canPan = model.cameraZoom > 1.0
 
-                RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(hovering || dragStartCenter != nil || resizeStartScale != nil
-                                  ? Color.accentColor : Color.white.opacity(0.35),
-                                  lineWidth: 2)
+                // Plain drag moves the PiP; ⌥-drag pans the feed crop (only
+                // when zoomed in). The modifier-gated pan takes priority so the
+                // two never compete for the same drag.
+                Color.clear
                     .contentShape(Rectangle())
                     .frame(width: pipView.width, height: pipView.height)
                     .position(x: pipView.midX, y: pipView.midY)
-                    .onHover { hovering = $0 }
+                    .highPriorityGesture(feedPanGesture(pipView: pipView).modifiers(.option),
+                                         including: canPan ? .all : .subviews)
                     .gesture(moveGesture(viewScale: viewScale))
+
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(hovering || dragStartCenter != nil
+                                  || resizeStartScale != nil || feedStartCenter != nil
+                                  ? Color.accentColor : Color.white.opacity(0.35),
+                                  lineWidth: 2)
+                    .frame(width: pipView.width, height: pipView.height)
+                    .position(x: pipView.midX, y: pipView.midY)
+                    .onHover { hovering = $0 }
+                    .allowsHitTesting(false)
 
                 // Resize handle, bottom-right corner.
                 Circle()
@@ -74,6 +90,30 @@ struct CameraPipOverlay: View {
             }
             .onEnded { _ in
                 resizeStartScale = nil
+                model.commitCameraEdit()
+            }
+    }
+
+    /// Pans the camera feed crop; content follows the cursor. Maps view px →
+    /// feed px via the crop-to-PiP scale, then normalizes by the feed size.
+    private func feedPanGesture(pipView: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                if feedStartCenter == nil {
+                    feedStartCenter = CGPoint(x: model.cameraFeedX, y: model.cameraFeedY)
+                }
+                guard let start = feedStartCenter,
+                      let crop = model.cameraCropRectInFeed,
+                      let feed = model.cameraNaturalSize,
+                      pipView.width > 0, feed.width > 0 else { return }
+                let feedPxPerViewX = crop.width / pipView.width
+                let feedPxPerViewY = crop.height / pipView.height
+                let dx = Double(value.translation.width * feedPxPerViewX) / feed.width
+                let dy = Double(value.translation.height * feedPxPerViewY) / feed.height
+                model.setCameraFeedCenter(x: start.x - dx, y: start.y - dy)
+            }
+            .onEnded { _ in
+                feedStartCenter = nil
                 model.commitCameraEdit()
             }
     }

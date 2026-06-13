@@ -19,15 +19,19 @@ enum ExportPreset: String, CaseIterable, Identifiable {
 
 enum Exporter {
     /// Exports the trimmed composition to an MP4. Masters are read-only inputs.
+    /// `avPresetOverride` replaces the preset's session preset — used when
+    /// reframing, where output size comes from the video composition's
+    /// renderSize and the session preset must not impose its own dimensions.
     static func export(composition: AVMutableComposition,
                        videoComposition: AVVideoComposition? = nil,
                        audioMix: AVAudioMix? = nil,
                        timeRange: CMTimeRange,
                        preset: ExportPreset,
+                       avPresetOverride: String? = nil,
                        to destination: URL,
                        onProgress: @escaping (Double) -> Void) async throws -> URL {
         guard let session = AVAssetExportSession(asset: composition,
-                                                 presetName: preset.avPreset) else {
+                                                 presetName: avPresetOverride ?? preset.avPreset) else {
             throw NSError(domain: "CaptureStudio", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Export preset \(preset.rawValue) is not supported for this recording."
             ])
