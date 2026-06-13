@@ -28,9 +28,26 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     static let targetFPS = 60.0
-    /// ~0.12 bits per pixel at 60fps keeps UI text crisp through the second
-    /// encode at export time (≈50 Mbps for 4K).
-    private static let bitsPerPixel = 0.12
+    /// HEVC is ~40% more efficient than H.264, so a lower bits-per-pixel keeps
+    /// UI text crisp through the second encode at export time.
+    private static let bitsPerPixel = 0.09
+    /// Cap the longest captured side. Native retina (e.g. 5K = 5120×2880)
+    /// saturates the realtime HEVC encoder at 60fps and drops most frames; a
+    /// 1440p ceiling keeps a steady 60fps and is plenty sharp for export,
+    /// where masters are re-encoded to 1080p/4K anyway.
+    private static let maxCaptureLongSide = 2560
+
+    /// Captured pixel size: source scaled down so the longest side fits
+    /// `maxCaptureLongSide`, preserving aspect, rounded to even dimensions
+    /// (the encoder requires even width/height).
+    static func captureSize(forWidth w: Int, height h: Int) -> (width: Int, height: Int) {
+        let longest = max(w, h)
+        guard longest > maxCaptureLongSide, longest > 0 else { return (w, h) }
+        let scale = Double(maxCaptureLongSide) / Double(longest)
+        let sw = Int((Double(w) * scale).rounded()) & ~1
+        let sh = Int((Double(h) * scale).rounded()) & ~1
+        return (max(2, sw), max(2, sh))
+    }
 
     private let display: SCDisplay
     private let item: DisplayItem
@@ -72,14 +89,14 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
         }
 
-        let bitrate = Int(Double(item.pixelWidth * item.pixelHeight) * Self.targetFPS * Self.bitsPerPixel)
+        let capture = Self.captureSize(forWidth: item.pixelWidth, height: item.pixelHeight)
+        let bitrate = Int(Double(capture.width * capture.height) * Self.targetFPS * Self.bitsPerPixel)
         let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: item.pixelWidth,
-            AVVideoHeightKey: item.pixelHeight,
+            AVVideoCodecKey: AVVideoCodecType.hevc,
+            AVVideoWidthKey: capture.width,
+            AVVideoHeightKey: capture.height,
             AVVideoCompressionPropertiesKey: [
                 AVVideoAverageBitRateKey: bitrate,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                 AVVideoExpectedSourceFrameRateKey: Int(Self.targetFPS),
                 AVVideoMaxKeyFrameIntervalKey: Int(Self.targetFPS) * 2,
             ],
@@ -109,8 +126,8 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let config = SCStreamConfiguration()
-        config.width = item.pixelWidth
-        config.height = item.pixelHeight
+        config.width = capture.width
+        config.height = capture.height
         config.showsCursor = false
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.targetFPS))
@@ -188,7 +205,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             filename: outputURL.lastPathComponent,
             sessionStartHostTime: startTime,
             nominalFPS: Self.targetFPS,
-            codec: "h264",
+            codec: "hevc",
             deviceName: item.name,
             deviceID: String(item.id)
         )

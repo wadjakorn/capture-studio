@@ -42,15 +42,15 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
-    /// The clock the session stamps sample PTS against. When a mic is added,
-    /// AVCaptureSession switches its master clock to the audio device clock
-    /// (which starts near 0), so PTS leave the host timebase the screen track
-    /// uses. We convert first-frame PTS back to host time via this clock so
-    /// the recorded anchors stay comparable across tracks.
-    private var sessionClock: CMClock?
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
+    /// Count of startup frames dropped while waiting for a host-clock PTS.
+    private var videoWarmupDrops = 0
+    private var audioWarmupDrops = 0
+    /// After this many drops, accept the next frame regardless (safety net so
+    /// an unexpected clock never loses the whole track).
+    private static let maxWarmupDrops = 30
 
     // Mic captured on this same session (best-effort).
     private let audioOutput = AVCaptureAudioDataOutput()
@@ -94,7 +94,6 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
 
         session.commitConfiguration()
-        sessionClock = session.synchronizationClock
 
         // startRunning blocks; keep it off the main thread.
         await withCheckedContinuation { continuation in
@@ -262,20 +261,29 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard let writer, let input, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
+            // Adding a mic makes AVCaptureSession's master clock switch to the
+            // audio device clock once at startup, so the first few frames can
+            // be stamped on a transient clock (PTS near 0) before it settles
+            // on host time. Anchoring on such a frame corrupts the track
+            // timeline. Drop startup frames until the PTS matches wall-clock
+            // host time; that frame's PTS is then a valid host-clock anchor.
+            guard isHostClockPTS(pts, drops: &videoWarmupDrops) else { return }
             writer.startSession(atSourceTime: pts)
-            sessionStartHostTime = hostSeconds(pts)
+            sessionStartHostTime = pts.seconds
         }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
         }
     }
 
-    /// Converts a session-clock PTS to seconds on the host-time clock so the
-    /// recorded anchor is comparable with the screen track's host-time anchor.
-    private func hostSeconds(_ pts: CMTime) -> Double {
-        guard let sessionClock else { return pts.seconds }
-        return CMSyncConvertTime(pts, from: sessionClock,
-                                 to: CMClockGetHostTimeClock()).seconds
+    /// True if `pts` looks like it is on the host-time clock (within a few
+    /// seconds of now), or if we have dropped enough frames that we accept it
+    /// regardless. Increments `drops` while rejecting.
+    private func isHostClockPTS(_ pts: CMTime, drops: inout Int) -> Bool {
+        let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        if abs(pts.seconds - hostNow) < 5 { return true }
+        drops += 1
+        return drops > Self.maxWarmupDrops
     }
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
@@ -283,8 +291,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
               writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if audioStartHostTime == nil {
+            guard isHostClockPTS(pts, drops: &audioWarmupDrops) else { return }
             writer.startSession(atSourceTime: pts)
-            audioStartHostTime = hostSeconds(pts)
+            audioStartHostTime = pts.seconds
         }
         if input.isReadyForMoreMediaData {
             input.append(sampleBuffer)
