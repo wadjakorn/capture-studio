@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import AppKit
+import CoreImage
 
 /// Loads a bundle, builds the preview composition (screen video + mic audio,
 /// offset-aligned on the shared host-clock anchors), and owns trim/export state.
@@ -85,7 +86,7 @@ final class StudioModel: ObservableObject {
     /// export still rebuilds at full resolution.
     var renderSize: CGSize {
         if cropActive { return previewCanvasSize }
-        if cameraNeedsCompositor { return Self.cappedPreviewSize(sourceSize) }
+        if needsCompositor { return Self.cappedPreviewSize(sourceSize) }
         return sourceSize
     }
 
@@ -108,6 +109,27 @@ final class StudioModel: ObservableObject {
     // quiet voice (~+9.5 dB at 3.0; may clip loud peaks).
     @Published var micVolume = 1.0
     @Published var systemVolume = 1.0
+
+    // Cursor + click overlays composited from events.jsonl (screen.mp4 has no
+    // baked cursor). Cursor defaults on; click feedback off. Persisted to edit.json.
+    @Published var showCursor = true
+    @Published var clickFeedback = false
+    /// Cursor positions / clicks in screen-source pixels (crop-independent).
+    private var cursorSamples: [CursorSample] = []
+    private var clickSamples: [ClickSample] = []
+    /// Cached, canvas-independent overlay glyphs (rendered once at load).
+    private var overlayGlyphs: [String: CursorGlyph] = [:]
+    private var ringImage: CIImage?
+    private var ringPixelSize: CGSize = .zero
+    var hasCursorData: Bool { !cursorSamples.isEmpty }
+    var hasClickData: Bool { !clickSamples.isEmpty }
+    /// The Core Image compositor is needed for a styled camera OR for any active
+    /// cursor/click overlay (layer instructions can't draw per-frame motion).
+    var needsCompositor: Bool {
+        cameraNeedsCompositor
+            || (showCursor && hasCursorData)
+            || (clickFeedback && hasClickData)
+    }
 
     private var screenTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
     private var cameraTrackID: CMPersistentTrackID?
@@ -173,6 +195,9 @@ final class StudioModel: ObservableObject {
             cameraAspect = edit.cameraAspect
             micVolume = min(max(0, edit.micVolume), 3)
             systemVolume = min(max(0, edit.systemVolume), 1)
+            showCursor = edit.showCursor
+            clickFeedback = edit.clickFeedback
+            loadOverlayData(display: meta.display)
             cropAspect = edit.cropAspect
             cropCenterX = min(max(0, edit.cropCenterX), 1)
             cropCenterY = min(max(0, edit.cropCenterY), 1)
@@ -297,6 +322,81 @@ final class StudioModel: ObservableObject {
         )
     }
 
+    // MARK: - Cursor / click overlays
+
+    /// Reads events.jsonl, maps cursor/click events to source pixels, and
+    /// prerenders the cursor glyphs + click ring. No-op if no events file.
+    private func loadOverlayData(display: DisplayInfo) {
+        guard let data = try? Data(contentsOf: bundle.eventsURL),
+              let events = try? EventsCodec.decodeLines(data), !events.isEmpty else {
+            cursorSamples = []; clickSamples = []
+            return
+        }
+        let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
+        cursorSamples = s.cursor
+        clickSamples = s.clicks
+
+        var glyphs: [String: CursorGlyph] = [:]
+        for name in Set(cursorSamples.map(\.cursor)) {
+            if let g = Self.makeGlyph(named: name) { glyphs[name] = g }
+        }
+        if glyphs["arrow"] == nil, let g = Self.makeGlyph(named: "arrow") {
+            glyphs["arrow"] = g
+        }
+        overlayGlyphs = glyphs
+        if !clickSamples.isEmpty {
+            let r = Self.makeRingImage(side: 128)
+            ringImage = r?.image
+            ringPixelSize = r?.size ?? .zero
+        }
+    }
+
+    private static func nsCursor(named name: String) -> NSCursor {
+        switch name {
+        case "ibeam": return .iBeam
+        case "pointingHand": return .pointingHand
+        case "crosshair": return .crosshair
+        case "closedHand": return .closedHand
+        case "openHand": return .openHand
+        case "resizeLeftRight": return .resizeLeftRight
+        case "resizeUpDown": return .resizeUpDown
+        default: return .arrow
+        }
+    }
+
+    private static func makeGlyph(named name: String) -> CursorGlyph? {
+        let cursor = nsCursor(named: name)
+        let image = cursor.image
+        let pointSize = image.size
+        guard pointSize.width > 0,
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return nil
+        }
+        return CursorGlyph(
+            image: CIImage(cgImage: cg),
+            pointSize: pointSize,
+            pixelSize: CGSize(width: cg.width, height: cg.height),
+            hotspot: cursor.hotSpot
+        )
+    }
+
+    /// White ring (stroked circle) on a clear square, for click feedback.
+    private static func makeRingImage(side: CGFloat) -> (image: CIImage, size: CGSize)? {
+        let px = Int(side)
+        guard let ctx = CGContext(data: nil, width: px, height: px,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let lw = side * 0.09
+        let rect = CGRect(x: 0, y: 0, width: side, height: side).insetBy(dx: lw, dy: lw)
+        ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.9))
+        ctx.setLineWidth(lw)
+        ctx.addEllipse(in: rect)
+        ctx.strokePath()
+        return ctx.makeImage().map { (CIImage(cgImage: $0), CGSize(width: side, height: side)) }
+    }
+
     // MARK: - Camera PiP
 
     /// PiP rect in render-space pixels for the current camera settings.
@@ -405,6 +505,27 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    func setShowCursor(_ on: Bool) {
+        applyOverlayChange { showCursor = on }
+        saveEdit()
+    }
+
+    func setClickFeedback(_ on: Bool) {
+        applyOverlayChange { clickFeedback = on }
+        saveEdit()
+    }
+
+    /// Like `applyCameraStyle`, but watches `needsCompositor` (cursor/click
+    /// overlays toggle the compositor and the preview canvas cap).
+    private func applyOverlayChange(_ mutate: () -> Void) {
+        let was = needsCompositor
+        mutate()
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
+    }
+
     /// Applies a camera-style mutation; if it engages/disengages the custom
     /// compositor, swap the player item so AVPlayer re-evaluates the
     /// compositor class, then reapply the composition.
@@ -499,15 +620,15 @@ final class StudioModel: ObservableObject {
             return nil
         }
         let cameraShown = cameraVisible && cameraTrackID != nil
-        guard cameraShown || cropActive else { return nil }
+        guard cameraShown || cropActive || needsCompositor else { return nil }
         let canvas = canvasOverride ?? renderSize
         guard canvas.width > 0 else { return nil }
 
-        // Styled camera (circle / rounded / border / shadow) needs the custom
-        // Core Image compositor; everything else uses layer instructions.
-        if cameraNeedsCompositor, let cameraTrackID, cameraNaturalSize != nil {
+        // The custom Core Image compositor handles a styled camera and/or the
+        // cursor + click overlays; everything else uses cheap layer instructions.
+        if needsCompositor {
             return buildCompositorComposition(canvas: canvas, screenTrack: screenTrack,
-                                              cameraTrackID: cameraTrackID,
+                                              cameraTrackID: cameraShown ? cameraTrackID : nil,
                                               composition: composition)
         }
 
@@ -562,13 +683,8 @@ final class StudioModel: ObservableObject {
     /// passed as a `CompositorLayout` (top-left pixel coords).
     private func buildCompositorComposition(canvas: CGSize,
                                             screenTrack: AVMutableCompositionTrack,
-                                            cameraTrackID: CMPersistentTrackID,
+                                            cameraTrackID: CMPersistentTrackID?,
                                             composition: AVMutableComposition) -> AVMutableVideoComposition? {
-        guard let cameraNaturalSize else { return nil }
-        let pip = pipRect(in: canvas, cameraSize: cameraNaturalSize)
-        let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: cameraNaturalSize)
-        let minSide = min(pip.width, pip.height)
-
         var layout = CompositorLayout(
             canvas: canvas,
             sourceSize: sourceSize,
@@ -576,19 +692,44 @@ final class StudioModel: ObservableObject {
             screenTrackID: screenTrackID,
             cameraTrackID: cameraTrackID
         )
-        layout.feedSize = cameraNaturalSize
-        layout.feedCrop = feedCrop
-        layout.pip = pip
-        layout.shape = cameraShape
-        layout.cornerRadiusPx = cameraCornerRadius * minSide / 2
-        layout.borderWidthPx = cameraBorderWidth * pip.width
-        layout.borderColor = Self.cgColor(hex: cameraBorderHex)
-        layout.shadow = cameraShadow
-        layout.shadowRadius = CGFloat(cameraShadowRadius)
+        // Camera styling only when a (styled) camera is actually shown.
+        if cameraTrackID != nil, let cameraNaturalSize {
+            let pip = pipRect(in: canvas, cameraSize: cameraNaturalSize)
+            let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: cameraNaturalSize)
+            let minSide = min(pip.width, pip.height)
+            layout.feedSize = cameraNaturalSize
+            layout.feedCrop = feedCrop
+            layout.pip = pip
+            layout.shape = cameraShape
+            layout.cornerRadiusPx = cameraCornerRadius * minSide / 2
+            layout.borderWidthPx = cameraBorderWidth * pip.width
+            layout.borderColor = Self.cgColor(hex: cameraBorderHex)
+            layout.shadow = cameraShadow
+            layout.shadowRadius = CGFloat(cameraShadowRadius)
+        } else {
+            layout.cameraTrackID = nil
+        }
+
+        // Cursor / click overlay payload.
+        let pointWidth = meta?.display.pointWidth ?? 0
+        layout.sourcePerPoint = pointWidth > 0 ? sourceSize.width / pointWidth : 1
+        layout.showCursor = showCursor && hasCursorData
+        layout.clickFeedback = clickFeedback && hasClickData
+        var overlay = OverlayPayload()
+        if layout.showCursor {
+            overlay.cursorSamples = cursorSamples
+            overlay.glyphs = overlayGlyphs
+        }
+        if layout.clickFeedback {
+            overlay.clickSamples = clickSamples
+            overlay.ring = ringImage
+            overlay.ringPixelSize = ringPixelSize
+        }
 
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),
-            layout: layout
+            layout: layout,
+            overlay: overlay
         )
         let videoComposition = AVMutableVideoComposition()
         videoComposition.customVideoCompositorClass = StudioCompositor.self
@@ -715,6 +856,8 @@ final class StudioModel: ObservableObject {
             cameraAspect: cameraAspect,
             micVolume: micVolume,
             systemVolume: systemVolume,
+            showCursor: showCursor,
+            clickFeedback: clickFeedback,
             cropAspect: cropAspect,
             cropCenterX: cropCenterX,
             cropCenterY: cropCenterY,

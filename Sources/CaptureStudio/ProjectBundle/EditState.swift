@@ -106,6 +106,11 @@ struct EditState: Codable, Equatable {
     /// unchanged.
     var micVolume: Double = 1.0
     var systemVolume: Double = 1.0
+    /// Cursor + click overlays composited from events.jsonl at render time
+    /// (screen.mp4 has no baked cursor). Cursor defaults on; click feedback off.
+    /// Bundles written before these fields decode as on/off respectively.
+    var showCursor: Bool = true
+    var clickFeedback: Bool = false
     /// Reframe crop. Center is normalized 0–1 in screen-source space; zoom is
     /// the crop size as a fraction of the largest crop of that aspect that
     /// fits the source (1.0 = widest).
@@ -124,6 +129,7 @@ struct EditState: Codable, Equatable {
          cameraShadow: Bool = false, cameraShadowRadius: Double = 0.5,
          cameraAspect: CameraAspect = .original,
          micVolume: Double = 1.0, systemVolume: Double = 1.0,
+         showCursor: Bool = true, clickFeedback: Bool = false,
          cropAspect: CropAspect = .original, cropCenterX: Double = 0.5,
          cropCenterY: Double = 0.5, cropZoom: Double = 1.0) {
         self.trimIn = trimIn
@@ -144,6 +150,8 @@ struct EditState: Codable, Equatable {
         self.cameraAspect = cameraAspect
         self.micVolume = micVolume
         self.systemVolume = systemVolume
+        self.showCursor = showCursor
+        self.clickFeedback = clickFeedback
         self.cropAspect = cropAspect
         self.cropCenterX = cropCenterX
         self.cropCenterY = cropCenterY
@@ -175,6 +183,8 @@ struct EditState: Codable, Equatable {
         cameraAspect = camAspectRaw.flatMap(CameraAspect.init(rawValue:)) ?? .original
         micVolume = try c.decodeIfPresent(Double.self, forKey: .micVolume) ?? 1.0
         systemVolume = try c.decodeIfPresent(Double.self, forKey: .systemVolume) ?? 1.0
+        showCursor = try c.decodeIfPresent(Bool.self, forKey: .showCursor) ?? true
+        clickFeedback = try c.decodeIfPresent(Bool.self, forKey: .clickFeedback) ?? false
         // Raw-string decode so an unknown future aspect degrades to no crop.
         let aspectRaw = try c.decodeIfPresent(String.self, forKey: .cropAspect)
         cropAspect = aspectRaw.flatMap(CropAspect.init(rawValue:)) ?? .original

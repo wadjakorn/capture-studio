@@ -28,6 +28,36 @@ struct CompositorLayout {
     var shadow: Bool = false
     /// Shadow intensity 0–1 (scales blur/offset/opacity together).
     var shadowRadius: CGFloat = 0.5
+
+    // Cursor / click overlays (composited from events.jsonl).
+    var showCursor: Bool = false
+    var clickFeedback: Bool = false
+    /// Source pixels per screen point (sourceSize.width / display.pointWidth);
+    /// used with the screen crop scale to size the cursor glyph in canvas px.
+    var sourcePerPoint: CGFloat = 1
+}
+
+/// A prerendered cursor glyph plus the metadata needed to place/size it.
+struct CursorGlyph {
+    /// Glyph image, origin (0,0), `pixelSize` extent.
+    let image: CIImage
+    /// On-screen size of the cursor in points (target size = pointSize × scale).
+    let pointSize: CGSize
+    /// Rendered pixel size of `image`.
+    let pixelSize: CGSize
+    /// Hotspot in points, top-left origin within the glyph.
+    let hotspot: CGPoint
+}
+
+/// Immutable per-timeline overlay payload shared across every composed frame.
+struct OverlayPayload {
+    var cursorSamples: [CursorSample] = []
+    var clickSamples: [ClickSample] = []
+    /// Cursor name → glyph; falls back to "arrow".
+    var glyphs: [String: CursorGlyph] = [:]
+    /// Click ring image (square, centered circle stroke), origin (0,0).
+    var ring: CIImage?
+    var ringPixelSize: CGSize = .zero
 }
 
 /// Custom video compositor instruction carrying a `CompositorLayout` plus
@@ -41,6 +71,7 @@ final class StudioCompositionInstruction: NSObject, AVVideoCompositionInstructio
     let passthroughTrackID = kCMPersistentTrackID_Invalid
 
     let layout: CompositorLayout
+    let overlay: OverlayPayload
 
     /// Camera frame shape as a white-on-clear alpha mask, in PiP-local space.
     private(set) lazy var maskImage: CIImage? = makeMask()
@@ -49,9 +80,11 @@ final class StudioCompositionInstruction: NSObject, AVVideoCompositionInstructio
     /// Drop-shadow silhouette in PiP-local space (offset/blurred); nil if off.
     private(set) lazy var shadowImage: CIImage? = makeShadow()
 
-    init(timeRange: CMTimeRange, layout: CompositorLayout) {
+    init(timeRange: CMTimeRange, layout: CompositorLayout,
+         overlay: OverlayPayload = OverlayPayload()) {
         self.timeRange = timeRange
         self.layout = layout
+        self.overlay = overlay
         var ids: [NSValue] = [NSNumber(value: layout.screenTrackID)]
         if let cam = layout.cameraTrackID { ids.append(NSNumber(value: cam)) }
         self.requiredSourceTrackIDs = ids
@@ -165,6 +198,18 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 output = camera.composited(over: output)
             }
 
+            let now = request.compositionTime.seconds
+            // Click rings sit under the cursor; both above screen + camera.
+            if layout.clickFeedback {
+                for ring in clickRings(at: now, layout: layout, overlay: instruction.overlay) {
+                    output = ring.composited(over: output)
+                }
+            }
+            if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
+                                                           overlay: instruction.overlay) {
+                output = cursor.composited(over: output)
+            }
+
             output = output.cropped(to: CGRect(origin: .zero, size: layout.canvas))
             Self.ciContext.render(output, to: dst, bounds: output.extent,
                                   colorSpace: colorSpace)
@@ -217,6 +262,75 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         let pipCI = Self.flip(layout.pip, in: layout.canvas.height)
         return styled.transformed(by: CGAffineTransform(translationX: pipCI.minX,
                                                         y: pipCI.minY))
+    }
+
+    // MARK: - Cursor / click overlays
+
+    /// Screen-source pixel point → canvas pixel point (top-left origin), using
+    /// the same crop/scale the screen image gets.
+    private static func sourceToCanvas(_ p: CGPoint, layout: CompositorLayout) -> CGPoint {
+        let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
+        guard crop.width > 0, crop.height > 0 else { return p }
+        let sx = layout.canvas.width / crop.width
+        let sy = layout.canvas.height / crop.height
+        return CGPoint(x: (p.x - crop.minX) * sx, y: (p.y - crop.minY) * sy)
+    }
+
+    /// Canvas pixels per screen point (glyph sizing).
+    private static func cursorScale(_ layout: CompositorLayout) -> CGFloat {
+        let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
+        guard crop.width > 0 else { return layout.sourcePerPoint }
+        return (layout.canvas.width / crop.width) * layout.sourcePerPoint
+    }
+
+    private func cursorImage(at now: Double, layout: CompositorLayout,
+                             overlay: OverlayPayload) -> CIImage? {
+        guard let (srcP, name) = CursorOverlay.position(at: now, in: overlay.cursorSamples) else {
+            return nil
+        }
+        guard let glyph = overlay.glyphs[name] ?? overlay.glyphs["arrow"],
+              glyph.pixelSize.width > 0 else { return nil }
+        let scale = Self.cursorScale(layout)
+        // Glyph point-size → canvas px, applied to its rendered pixel image.
+        let s = (glyph.pointSize.width * scale) / glyph.pixelSize.width
+        let canvasP = Self.sourceToCanvas(srcP, layout: layout)
+        // Place the hotspot (points, top-left) at canvasP (top-left).
+        let topLeftX = canvasP.x - glyph.hotspot.x * scale
+        let topLeftY = canvasP.y - glyph.hotspot.y * scale
+        let drawnH = glyph.pixelSize.height * s
+        // Top-left → CI bottom-left.
+        let tx = topLeftX
+        let ty = layout.canvas.height - topLeftY - drawnH
+        return glyph.image
+            .transformed(by: CGAffineTransform(scaleX: s, y: s))
+            .transformed(by: CGAffineTransform(translationX: tx, y: ty))
+    }
+
+    /// One faded/scaled ring per click still inside its lifetime window.
+    private func clickRings(at now: Double, layout: CompositorLayout,
+                            overlay: OverlayPayload) -> [CIImage] {
+        guard let ring = overlay.ring, overlay.ringPixelSize.width > 0 else { return [] }
+        let maxRadius = layout.canvas.width * 0.035
+        var out: [CIImage] = []
+        for c in overlay.clickSamples {
+            let dt = now - c.t
+            guard dt >= 0, dt <= CursorOverlay.ringDuration else { continue }
+            let p = dt / CursorOverlay.ringDuration            // 0…1
+            let radius = maxRadius * (0.25 + 0.75 * p)          // expands
+            let alpha = 1.0 - p                                 // fades out
+            let s = (radius * 2) / overlay.ringPixelSize.width
+            let faded = ring.applyingFilter("CIColorMatrix", parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: CGFloat(alpha)),
+            ])
+            let canvasP = Self.sourceToCanvas(c.p, layout: layout)
+            let drawn = radius * 2
+            let tx = canvasP.x - drawn / 2
+            let ty = layout.canvas.height - canvasP.y - drawn / 2
+            out.append(faded
+                .transformed(by: CGAffineTransform(scaleX: s, y: s))
+                .transformed(by: CGAffineTransform(translationX: tx, y: ty)))
+        }
+        return out
     }
 
     /// Top-left rect → Core Image bottom-left rect, given the container height.

@@ -185,6 +185,27 @@ struct StudioView: View {
                     }
                 }
 
+                // Cursor / click overlay cluster.
+                HStack(spacing: 8) {
+                    Toggle(isOn: Binding(
+                        get: { model.showCursor },
+                        set: { model.setShowCursor($0) }
+                    )) {
+                        Image(systemName: "cursorarrow")
+                    }
+                    .toggleStyle(.button)
+                    .help("Show the recorded cursor")
+
+                    Toggle(isOn: Binding(
+                        get: { model.clickFeedback },
+                        set: { model.setClickFeedback($0) }
+                    )) {
+                        Image(systemName: "cursorarrow.click")
+                    }
+                    .toggleStyle(.button)
+                    .help("Show click feedback rings")
+                }
+
                 Button("Reveal Masters") { model.revealMastersInFinder() }
 
                 HStack(spacing: 8) { exportControls }
