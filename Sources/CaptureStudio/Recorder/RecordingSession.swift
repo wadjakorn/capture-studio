@@ -22,6 +22,11 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var lastBundleURL: URL?
     /// Non-fatal problems from the last recording (camera died, mic failed…).
     @Published private(set) var warnings: [String] = []
+    /// True while the 3-2-1 countdown is running (before writers flip on).
+    /// Drives the "Starting…" UI and blocks a double countdown.
+    @Published private(set) var counting = false
+
+    private var countdownTask: Task<Void, Never>?
 
     /// The live session, exposed so the app delegate can tear down on quit.
     /// There is only ever one.
@@ -187,6 +192,96 @@ final class RecordingSession: ObservableObject {
         guard isArmed || state == .arming else { return }
         await tearDownArmed()
         state = .idle
+    }
+
+    // MARK: - Shared toggle (popup button + global hotkey)
+
+    /// Hotkey entry point: resolves devices from the last-used selections in
+    /// AppSettings and toggles. `activateForPrompts` brings the app frontmost so
+    /// any camera/mic TCC dialog is visible when triggered while unfocused.
+    func toggleFromHotkey() async {
+        await toggle(displayID: AppSettings.lastDisplayID,
+                     cameraID: AppSettings.lastCameraID,
+                     micID: AppSettings.lastMicID,
+                     systemAudio: AppSettings.recordSystemAudio,
+                     activateForPrompts: true)
+    }
+
+    /// One action shared by the popup's primary button and the global hotkey.
+    /// Behavior depends on state and on whether a camera is selected:
+    /// - recording → stop
+    /// - armed (counting) → cancel the countdown / armed sources
+    /// - armed → countdown + begin (camera flow's second trigger)
+    /// - idle/failed → arm; screen-only goes straight to countdown + record,
+    ///   camera stays armed (preview shown) awaiting a second trigger
+    /// - arming/preparing/finishing → ignored (transient; natural debounce)
+    func toggle(displayID: CGDirectDisplayID?, cameraID: String?, micID: String?,
+                systemAudio: Bool, activateForPrompts: Bool) async {
+        switch state {
+        case .recording:
+            await stop()
+        case .armed where counting:
+            await cancelCountdownOrArming()
+        case .armed:
+            await startCountdownThenBegin(displayID: displayID)
+        case .idle, .failed:
+            await startFromIdle(displayID: displayID, cameraID: cameraID, micID: micID,
+                                systemAudio: systemAudio, activateForPrompts: activateForPrompts)
+        case .arming, .preparing, .finishing:
+            return
+        }
+    }
+
+    private func startFromIdle(displayID: CGDirectDisplayID?, cameraID: String?,
+                               micID: String?, systemAudio: Bool,
+                               activateForPrompts: Bool) async {
+        // Can't usefully prompt for screen recording from a hotkey — no-op.
+        guard Permissions.screenRecordingGranted() else { return }
+        guard let displayID else { return }
+
+        var camera = cameraID
+        var mic = micID
+        if camera != nil || mic != nil, activateForPrompts {
+            NSApp.activate(ignoringOtherApps: true)  // TCC dialog frontmost
+        }
+        if camera != nil, await !Permissions.requestCapture(.video) { camera = nil }
+        if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }
+
+        await arm(displayID: displayID, cameraID: camera, micID: mic, systemAudio: systemAudio)
+
+        // Screen-only has nothing to preview → record directly. Camera stays
+        // armed with the live preview, awaiting a second trigger / Record button.
+        if camera == nil, isArmed {
+            await startCountdownThenBegin(displayID: displayID)
+        }
+    }
+
+    /// Runs the countdown overlay then begins recording. Stored as a task so a
+    /// second trigger (or Cancel) can abort mid-countdown.
+    func startCountdownThenBegin(displayID: CGDirectDisplayID?) async {
+        guard isArmed, !counting else { return }
+        counting = true
+        let task = Task {
+            await CountdownOverlay.run(seconds: AppSettings.countdownSeconds,
+                                       displayID: displayID)
+            guard !Task.isCancelled else { return }
+            await self.beginRecording()
+        }
+        countdownTask = task
+        await task.value
+        counting = false
+        countdownTask = nil
+    }
+
+    /// Cancels an in-progress countdown (if any), then tears down the armed
+    /// sources back to idle.
+    func cancelCountdownOrArming() async {
+        if counting {
+            countdownTask?.cancel()
+            countdownTask = nil
+            counting = false
+        }
+        await cancelArming()
     }
 
     /// Stops warmed (never-finalized) recorders, closes preview, deletes bundle.

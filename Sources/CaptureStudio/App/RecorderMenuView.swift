@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import AppKit
+import KeyboardShortcuts
 
 struct RecorderMenuView: View {
     @EnvironmentObject private var session: RecordingSession
@@ -14,8 +15,6 @@ struct RecorderMenuView: View {
     @State private var systemAudioEnabled = AppSettings.recordSystemAudio
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
-    @State private var counting = false
-    @State private var countdownTask: Task<Void, Never>?
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -119,32 +118,21 @@ struct RecorderMenuView: View {
 
     private var armedView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(counting ? "Starting…" : "Sources ready", systemImage: "checkmark.circle")
+            Label(session.counting ? "Starting…" : "Sources ready", systemImage: "checkmark.circle")
                 .font(.callout)
-                .foregroundStyle(counting ? Color.secondary : Color.green)
+                .foregroundStyle(session.counting ? Color.secondary : Color.green)
             HStack {
                 Button {
-                    let displayID = selectedDisplayID
-                    counting = true
-                    countdownTask = Task {
-                        await CountdownOverlay.run(seconds: AppSettings.countdownSeconds,
-                                                   displayID: displayID)
-                        guard !Task.isCancelled else { return }
-                        await session.beginRecording()
-                        counting = false
-                    }
+                    Task { await session.startCountdownThenBegin(displayID: selectedDisplayID) }
                 } label: {
                     Label("Record", systemImage: "record.circle")
                         .frame(maxWidth: .infinity)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(counting)
+                .disabled(session.counting)
 
                 Button("Cancel") {
-                    countdownTask?.cancel()
-                    countdownTask = nil
-                    counting = false
-                    Task { await session.cancelArming() }
+                    Task { await session.cancelCountdownOrArming() }
                 }
                 .keyboardShortcut(.escape, modifiers: [])
             }
@@ -188,25 +176,30 @@ struct RecorderMenuView: View {
             }
 
             Button {
-                guard let displayID = selectedDisplayID else { return }
                 elapsed = 0
-                let cameraID = selectedCameraID
-                let micID = selectedMicID
-                let systemAudio = systemAudioEnabled
                 Task {
-                    var camera = cameraID
-                    var mic = micID
-                    if camera != nil, await !Permissions.requestCapture(.video) { camera = nil }
-                    if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }
-                    await session.arm(displayID: displayID, cameraID: camera,
-                                      micID: mic, systemAudio: systemAudio)
+                    await session.toggle(displayID: selectedDisplayID,
+                                         cameraID: selectedCameraID,
+                                         micID: selectedMicID,
+                                         systemAudio: systemAudioEnabled,
+                                         activateForPrompts: false)
                 }
             } label: {
-                Label("Preview", systemImage: "eye")
+                // Screen-only has nothing to preview → records directly.
+                Label(selectedCameraID == nil ? "Record" : "Preview",
+                      systemImage: selectedCameraID == nil ? "record.circle" : "eye")
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)
             .disabled(selectedDisplayID == nil)
+
+            HStack(spacing: 6) {
+                Image(systemName: "command")
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+                KeyboardShortcuts.Recorder("Hotkey:", name: .toggleRecording)
+            }
+            .font(.caption)
 
             Button("Refresh Devices") {
                 Task { await refreshDevices() }

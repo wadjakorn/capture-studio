@@ -4,6 +4,12 @@ import AppKit
 /// Best-effort teardown on quit: stop warmed sessions and drop an unfinalized
 /// (armed-but-not-recording) bundle so we don't leave orphan empty bundles.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Registers the global hotkey handler once. The @StateObject session is
+        // created before this fires, so RecordingSession.shared is set.
+        HotkeyManager.install()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { RecordingSession.shared?.tearDownForQuit() }
     }
