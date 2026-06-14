@@ -13,6 +13,9 @@ struct RecorderMenuView: View {
     @State private var microphones: [AVCaptureDevice] = []
     @State private var selectedMicID: String?
     @State private var systemAudioEnabled = AppSettings.recordSystemAudio
+    @State private var captureAreaEnabled = AppSettings.captureAreaEnabled
+    @State private var captureRegion: CGRect? = AppSettings.captureRegion
+    @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
 
@@ -58,6 +61,9 @@ struct RecorderMenuView: View {
         .onChange(of: selectedCameraID) { _, id in AppSettings.lastCameraID = id }
         .onChange(of: selectedMicID) { _, id in AppSettings.lastMicID = id }
         .onChange(of: systemAudioEnabled) { _, on in AppSettings.recordSystemAudio = on }
+        .onChange(of: captureAreaEnabled) { _, on in AppSettings.captureAreaEnabled = on }
+        .onChange(of: captureRegion) { _, r in AppSettings.captureRegion = r }
+        .onChange(of: captureRegionDisplayID) { _, id in AppSettings.captureRegionDisplayID = id }
         .onReceive(tick) { _ in
             if case .recording(let startedAt) = session.state {
                 elapsed = Date().timeIntervalSince(startedAt)
@@ -141,14 +147,20 @@ struct RecorderMenuView: View {
 
     private var idleView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            labeledPicker("Display", systemImage: "display") {
-                Picker("Display", selection: $selectedDisplayID) {
-                    ForEach(displays) { display in
-                        Text("\(display.name) (\(display.pixelWidth)×\(display.pixelHeight))")
-                            .tag(Optional(display.id))
+            // Area mode derives the display from where you drag; picker is for
+            // whole-display capture only.
+            if !captureAreaEnabled {
+                labeledPicker("Display", systemImage: "display") {
+                    Picker("Display", selection: $selectedDisplayID) {
+                        ForEach(displays) { display in
+                            Text("\(display.name) (\(display.pixelWidth)×\(display.pixelHeight))")
+                                .tag(Optional(display.id))
+                        }
                     }
                 }
             }
+
+            captureModeRow
 
             labeledPicker("Camera", systemImage: "video") {
                 Picker("Camera", selection: $selectedCameraID) {
@@ -177,11 +189,15 @@ struct RecorderMenuView: View {
 
             Button {
                 elapsed = 0
+                // Area mode records the dragged screen; full mode the picker's.
+                let region = captureAreaEnabled ? captureRegion : nil
+                let useDisplay = captureAreaEnabled ? captureRegionDisplayID : selectedDisplayID
                 Task {
-                    await session.toggle(displayID: selectedDisplayID,
+                    await session.toggle(displayID: useDisplay,
                                          cameraID: selectedCameraID,
                                          micID: selectedMicID,
                                          systemAudio: systemAudioEnabled,
+                                         region: region,
                                          activateForPrompts: false)
                 }
             } label: {
@@ -191,7 +207,9 @@ struct RecorderMenuView: View {
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(selectedDisplayID == nil)
+            .disabled(captureAreaEnabled
+                      ? (captureRegion == nil || captureRegionDisplayID == nil)
+                      : selectedDisplayID == nil)
 
             HStack(spacing: 6) {
                 Image(systemName: "command")
@@ -210,6 +228,48 @@ struct RecorderMenuView: View {
         }
     }
 
+    @ViewBuilder
+    private var captureModeRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "crop")
+                .frame(width: 16)
+                .foregroundStyle(.secondary)
+            Picker("Capture", selection: $captureAreaEnabled) {
+                Text("Full Display").tag(false)
+                Text("Area").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+
+        if captureAreaEnabled {
+            HStack(spacing: 6) {
+                Image(systemName: "selection.pin.in.out")
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+                Button("Select Area…") {
+                    Task {
+                        if let (r, did) = await AreaSelector.selectRegion() {
+                            captureRegion = r
+                            captureRegionDisplayID = did
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                if let r = captureRegion {
+                    Text("\(areaDisplayName) — \(Int(r.width)) × \(Int(r.height)) pt")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                } else {
+                    Text("Not set")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .font(.caption)
+        }
+    }
+
     private func labeledPicker(_ title: String, systemImage: String,
                                @ViewBuilder content: () -> some View) -> some View {
         HStack(spacing: 6) {
@@ -219,6 +279,11 @@ struct RecorderMenuView: View {
             content()
                 .labelsHidden()
         }
+    }
+
+    /// Name of the display the saved region was dragged on (for the Area readout).
+    private var areaDisplayName: String {
+        displays.first { $0.id == captureRegionDisplayID }?.name ?? "Unknown display"
     }
 
     private var formattedElapsed: String {

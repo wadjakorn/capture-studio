@@ -54,6 +54,9 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private let item: DisplayItem
     private let outputURL: URL
     private let systemAudioURL: URL?
+    /// Sub-rectangle to capture, in display-local points (top-left origin).
+    /// nil = whole display.
+    private let region: CGRect?
 
     private var stream: SCStream?
     private var writer: AVAssetWriter?
@@ -75,11 +78,12 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     var onStreamError: ((Error) -> Void)?
 
     init(display: SCDisplay, item: DisplayItem, outputURL: URL,
-         systemAudioURL: URL? = nil) {
+         systemAudioURL: URL? = nil, region: CGRect? = nil) {
         self.display = display
         self.item = item
         self.outputURL = outputURL
         self.systemAudioURL = systemAudioURL
+        self.region = region
     }
 
     func start() async throws {
@@ -90,7 +94,7 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             throw ScreenRecorderError.writerSetupFailed(error.localizedDescription)
         }
 
-        let capture = Self.captureSize(forWidth: item.pixelWidth, height: item.pixelHeight)
+        let capture = item.capturePixelSize(region: region)
         let bitrate = Int(Double(capture.width * capture.height) * Self.targetFPS * Self.bitsPerPixel)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.hevc,
@@ -129,6 +133,11 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         let config = SCStreamConfiguration()
         config.width = capture.width
         config.height = capture.height
+        // Crop to the selected region (display-local points). width/height are
+        // already the region's pixel size, so aspect matches — no distortion.
+        if let region {
+            config.sourceRect = region
+        }
         config.showsCursor = false
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.targetFPS))

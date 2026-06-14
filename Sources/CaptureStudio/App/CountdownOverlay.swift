@@ -4,7 +4,10 @@ import AppKit
 /// Click-through, screen-saver level, never steals focus.
 @MainActor
 enum CountdownOverlay {
-    static func run(seconds: Int, displayID: CGDirectDisplayID?) async {
+    /// `region` (display-local points, top-left origin) centers the overlay on
+    /// the captured area; nil centers it on the whole display.
+    static func run(seconds: Int, displayID: CGDirectDisplayID?,
+                    region: CGRect? = nil) async {
         guard seconds > 0 else { return }
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
@@ -13,9 +16,13 @@ enum CountdownOverlay {
         guard let screen else { return }
 
         let size: CGFloat = 200
+        // Region is top-left points within the display; NSScreen.frame is
+        // bottom-left global → flip Y for the region center.
+        let centerX = region.map { screen.frame.minX + $0.midX } ?? screen.frame.midX
+        let centerY = region.map { screen.frame.maxY - $0.midY } ?? screen.frame.midY
         let rect = NSRect(
-            x: screen.frame.midX - size / 2,
-            y: screen.frame.midY - size / 2,
+            x: centerX - size / 2,
+            y: centerY - size / 2,
             width: size, height: size
         )
         let panel = NSPanel(contentRect: rect,
