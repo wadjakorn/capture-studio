@@ -166,7 +166,7 @@ struct RecorderMenuView: View {
                 .foregroundStyle(session.counting ? Color.secondary : Color.green)
             HStack {
                 Button {
-                    Task { await session.startCountdownThenBegin(displayID: selectedDisplayID) }
+                    Task { await session.startCountdownThenBegin() }
                 } label: {
                     Label("Record", systemImage: "record.circle")
                         .frame(maxWidth: .infinity)
