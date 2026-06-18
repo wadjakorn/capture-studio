@@ -18,13 +18,21 @@ struct RecorderMenuView: View {
     @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
+    @State private var showDisplayMenu = false
+    @State private var showCameraMenu = false
+    @State private var showMicMenu = false
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Capture Studio")
-                .font(.headline)
+            HStack(spacing: 6) {
+                Image(systemName: isRecording ? "record.circle.fill" : "circle.dotted")
+                    .foregroundStyle(isRecording ? Color.red : Color.secondary)
+                    .font(.system(size: 13))
+                Text("Capture Studio")
+                    .font(.subheadline.weight(.medium))
+            }
 
             if !permissionGranted {
                 permissionView
@@ -43,12 +51,23 @@ struct RecorderMenuView: View {
             Divider()
 
             HStack {
-                Button("Open Recording…") { openRecordingPanel() }
-                Button("Recordings Folder") {
-                    NSWorkspace.shared.open(ProjectBundle.defaultRecordingsDirectory())
+                Button {
+                    openRecordingPanel()
+                } label: {
+                    Label("Open", systemImage: "folder.badge.plus")
                 }
                 Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
+                Button {
+                    NSWorkspace.shared.open(ProjectBundle.defaultRecordingsDirectory())
+                } label: {
+                    Label("Folder", systemImage: "folder")
+                }
+                Spacer()
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Label("Quit", systemImage: "power")
+                }
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -92,14 +111,32 @@ struct RecorderMenuView: View {
     private var recorderView: some View {
         switch session.state {
         case .recording:
-            VStack(alignment: .leading, spacing: 8) {
-                Label(formattedElapsed, systemImage: "record.circle.fill")
-                    .foregroundStyle(.red)
-                    .font(.title3.monospacedDigit())
-                Button("Stop Recording") {
-                    Task { await session.stop() }
+            VStack(spacing: 10) {
+                VStack(spacing: 2) {
+                    Text(formattedElapsed)
+                        .font(.system(size: 34, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.red)
+                    Text("Recording\(recordingTargetSuffix)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+
+                Button {
+                    Task { await session.stop() }
+                } label: {
+                    Label("Stop Recording", systemImage: "stop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .tint(.red)
                 .keyboardShortcut(.escape, modifiers: [])
+
+                Text("Press Esc to stop")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
             }
         case .arming:
             Label("Warming up…", systemImage: "hourglass")
@@ -147,35 +184,62 @@ struct RecorderMenuView: View {
 
     private var idleView: some View {
         VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Source")
+
+            captureModeRow
+
             // Area mode derives the display from where you drag; picker is for
             // whole-display capture only.
             if !captureAreaEnabled {
-                labeledPicker("Display", systemImage: "display") {
-                    Picker("Display", selection: $selectedDisplayID) {
-                        ForEach(displays) { display in
-                            Text("\(display.name) (\(display.pixelWidth)×\(display.pixelHeight))")
-                                .tag(Optional(display.id))
+                dropdown("display", selection: displayLabel, isPresented: $showDisplayMenu) {
+                    ForEach(displays) { display in
+                        pickRow("\(display.name) (\(display.pixelWidth)×\(display.pixelHeight))",
+                                selected: selectedDisplayID == display.id) {
+                            selectedDisplayID = display.id
+                            showDisplayMenu = false
                         }
                     }
                 }
             }
 
-            captureModeRow
+            HStack {
+                sectionHeader("Inputs")
+                Spacer()
+                Button {
+                    Task { await refreshDevices() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Refresh devices")
+            }
+            .padding(.top, 6)
 
-            labeledPicker("Camera", systemImage: "video") {
-                Picker("Camera", selection: $selectedCameraID) {
-                    Text("None").tag(String?.none)
-                    ForEach(cameras, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(Optional(device.uniqueID))
+            dropdown("video", selection: deviceLabel(cameras, selectedCameraID),
+                     isPresented: $showCameraMenu) {
+                pickRow("None", selected: selectedCameraID == nil) {
+                    selectedCameraID = nil
+                    showCameraMenu = false
+                }
+                ForEach(cameras, id: \.uniqueID) { device in
+                    pickRow(device.localizedName, selected: selectedCameraID == device.uniqueID) {
+                        selectedCameraID = device.uniqueID
+                        showCameraMenu = false
                     }
                 }
             }
 
-            labeledPicker("Microphone", systemImage: "mic") {
-                Picker("Microphone", selection: $selectedMicID) {
-                    Text("None").tag(String?.none)
-                    ForEach(microphones, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(Optional(device.uniqueID))
+            dropdown("mic", selection: deviceLabel(microphones, selectedMicID),
+                     isPresented: $showMicMenu) {
+                pickRow("None", selected: selectedMicID == nil) {
+                    selectedMicID = nil
+                    showMicMenu = false
+                }
+                ForEach(microphones, id: \.uniqueID) { device in
+                    pickRow(device.localizedName, selected: selectedMicID == device.uniqueID) {
+                        selectedMicID = device.uniqueID
+                        showMicMenu = false
                     }
                 }
             }
@@ -184,7 +248,12 @@ struct RecorderMenuView: View {
                 Image(systemName: "speaker.wave.2")
                     .frame(width: 16)
                     .foregroundStyle(.secondary)
+                Text("System Audio")
+                Spacer()
                 Toggle("System Audio", isOn: $systemAudioEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
             }
 
             Button {
@@ -198,34 +267,76 @@ struct RecorderMenuView: View {
                                          micID: selectedMicID,
                                          systemAudio: systemAudioEnabled,
                                          region: region,
-                                         activateForPrompts: false)
+                                         activateForPrompts: false,
+                                         previewFirst: true)
                 }
             } label: {
-                // Screen-only has nothing to preview → records directly.
-                Label(selectedCameraID == nil ? "Record" : "Preview",
-                      systemImage: selectedCameraID == nil ? "record.circle" : "eye")
+                // Every mode arms first (preview): camera shows its live preview,
+                // area shows the region outline, full-display just confirms.
+                Label("Preview", systemImage: "eye")
                     .frame(maxWidth: .infinity)
             }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
             .disabled(captureAreaEnabled
                       ? (captureRegion == nil || captureRegionDisplayID == nil)
                       : selectedDisplayID == nil)
+            .padding(.top, 4)
 
             HStack(spacing: 6) {
                 Image(systemName: "command")
                     .frame(width: 16)
                     .foregroundStyle(.secondary)
-                KeyboardShortcuts.Recorder("Hotkey:", name: .toggleRecording)
+                Text("Hotkey:")
+                Spacer()
+                KeyboardShortcuts.Recorder("", name: .toggleRecording)
             }
             .font(.caption)
-
-            Button("Refresh Devices") {
-                Task { await refreshDevices() }
-            }
-            .font(.caption)
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .padding(.top, 2)
         }
+    }
+
+    /// Full-width two-segment control. Native `.segmented` Picker hugs its
+    /// content and centers on macOS, so build it from buttons that each
+    /// expand to fill the container.
+    private var segmentedToggle: some View {
+        HStack(spacing: 2) {
+            segment("Full Display", on: false)
+            segment("Area", on: true)
+        }
+        .padding(2)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+        .frame(maxWidth: .infinity)
+    }
+
+    private func segment(_ title: String, on value: Bool) -> some View {
+        let selected = captureAreaEnabled == value
+        return Button {
+            captureAreaEnabled = value
+        } label: {
+            Text(title)
+                .font(.callout)
+                .fontWeight(selected ? .semibold : .regular)
+                .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+                .background(
+                    selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear),
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+                // Hit region must be the whole filled frame (incl. transparent
+                // padding), so put contentShape inside the label, last.
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .tracking(0.5)
     }
 
     @ViewBuilder
@@ -234,51 +345,113 @@ struct RecorderMenuView: View {
             Image(systemName: "crop")
                 .frame(width: 16)
                 .foregroundStyle(.secondary)
-            Picker("Capture", selection: $captureAreaEnabled) {
-                Text("Full Display").tag(false)
-                Text("Area").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            segmentedToggle
         }
+        .frame(maxWidth: .infinity)
 
         if captureAreaEnabled {
             HStack(spacing: 6) {
                 Image(systemName: "selection.pin.in.out")
                     .frame(width: 16)
                     .foregroundStyle(.secondary)
-                Button("Select Area…") {
+                Button {
                     Task {
                         if let (r, did) = await AreaSelector.selectRegion() {
                             captureRegion = r
                             captureRegionDisplayID = did
                         }
                     }
+                } label: {
+                    Text(captureRegion == nil ? "Select Area…" : "Reselect Area…")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 Spacer()
                 if let r = captureRegion {
-                    Text("\(areaDisplayName) — \(Int(r.width)) × \(Int(r.height)) pt")
-                        .foregroundStyle(.secondary)
+                    Text("\(areaDisplayName) · \(Int(r.width))×\(Int(r.height))")
                         .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
                 } else {
                     Text("Not set")
                         .foregroundStyle(.orange)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.orange.opacity(0.15), in: Capsule())
                 }
             }
             .font(.caption)
         }
     }
 
-    private func labeledPicker(_ title: String, systemImage: String,
-                               @ViewBuilder content: () -> some View) -> some View {
-        HStack(spacing: 6) {
+    /// Full-width dropdown: leading icon + a plain `Button` (which honors
+    /// `maxWidth: .infinity`, unlike a `Menu`/`.menu` Picker, both of which hug
+    /// their content on macOS). The choice list opens in a popover.
+    private func dropdown(_ systemImage: String, selection: String,
+                          isPresented: Binding<Bool>,
+                          @ViewBuilder content: () -> some View) -> some View {
+        let list = content()
+        return HStack(spacing: 6) {
             Image(systemName: systemImage)
                 .frame(width: 16)
                 .foregroundStyle(.secondary)
-            content()
-                .labelsHidden()
+            Button {
+                isPresented.wrappedValue.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text(selection).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .frame(maxWidth: .infinity)
+            .popover(isPresented: isPresented, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 0) {
+                    list
+                }
+                .padding(.vertical, 4)
+                .frame(minWidth: 220)
+            }
         }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// One selectable row inside a `dropdown` popover.
+    private func pickRow(_ title: String, selected: Bool,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark")
+                    .font(.caption.weight(.semibold))
+                    .opacity(selected ? 1 : 0)
+                Text(title)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Visible label for a device dropdown (camera/mic): selected name or "None".
+    private func deviceLabel(_ devices: [AVCaptureDevice], _ id: String?) -> String {
+        devices.first { $0.uniqueID == id }?.localizedName ?? "None"
+    }
+
+    /// Visible label for the display dropdown.
+    private var displayLabel: String {
+        guard let d = displays.first(where: { $0.id == selectedDisplayID }) else { return "Display" }
+        return "\(d.name) (\(d.pixelWidth)×\(d.pixelHeight))"
     }
 
     /// Name of the display the saved region was dragged on (for the Area readout).
@@ -289,6 +462,18 @@ struct RecorderMenuView: View {
     private var formattedElapsed: String {
         let total = Int(elapsed)
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private var isRecording: Bool {
+        if case .recording = session.state { return true }
+        return false
+    }
+
+    /// " · <display>" suffix shown under the recording timer, when known.
+    private var recordingTargetSuffix: String {
+        let id = captureAreaEnabled ? captureRegionDisplayID : selectedDisplayID
+        guard let name = displays.first(where: { $0.id == id })?.name else { return "" }
+        return " · \(name)"
     }
 
     private func openRecordingPanel() {
