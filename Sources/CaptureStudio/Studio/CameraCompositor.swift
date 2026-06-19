@@ -38,6 +38,13 @@ struct CompositorLayout {
     /// breakpoints instead of the static `pip`. nil = static placement.
     var cameraTimeline: CameraTimelineSpec?
 
+    /// On-screen text/caption blocks (rendered topmost). nil / empty = none.
+    var textTimeline: TextTimelineSpec?
+    /// A text block being edited or dragged live on the canvas, suppressed in
+    /// the composited preview so the moving SwiftUI overlay isn't doubled by a
+    /// stale baked copy. nil = render all active.
+    var suppressedTextBlockID: UUID?
+
     // Cursor / click overlays (composited from events.jsonl).
     var showCursor: Bool = false
     var clickFeedback: Bool = false
@@ -51,6 +58,13 @@ struct CompositorLayout {
 struct CameraTimelineSpec {
     var blocks: [CameraBlock]
     var home: CameraSample
+}
+
+/// The on-screen text/caption blocks for a composition. Array order is the
+/// z-order (later draws on top); the compositor renders all blocks active at the
+/// frame time.
+struct TextTimelineSpec {
+    var blocks: [TextBlock]
 }
 
 /// Frame-shape mask, optional border ring, and drop shadow for a camera PiP —
@@ -212,6 +226,11 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     private var cachedDecorations: CameraDecorations?
     private let decorationsLock = NSLock()
 
+    /// Rendered text images keyed by content+style+canvas (position excluded, so
+    /// a moved block reuses its render). A held caption renders once.
+    private var textCache: [TextCacheKey: CIImage] = [:]
+    private let textCacheLock = NSLock()
+
     let sourcePixelBufferAttributes: [String: any Sendable]? = [
         kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_32BGRA],
         kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -256,6 +275,17 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                            overlay: instruction.overlay) {
                 output = cursor.composited(over: output)
+            }
+
+            // Text/captions sit topmost. All blocks active at `now`, in array
+            // (z) order, except the one being edited live on the canvas.
+            if let spec = layout.textTimeline {
+                for block in TextTimeline.active(at: now, blocks: spec.blocks)
+                where block.id != layout.suppressedTextBlockID {
+                    if let text = textImage(block, canvas: layout.canvas) {
+                        output = text.composited(over: output)
+                    }
+                }
             }
 
             output = output.cropped(to: CGRect(origin: .zero, size: layout.canvas))
@@ -452,6 +482,69 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 .transformed(by: CGAffineTransform(translationX: tx, y: ty)))
         }
         return out
+    }
+
+    // MARK: - Text / caption overlays
+
+    /// Cache identity for a rendered text image: everything that affects the
+    /// pixels (content + style + canvas), but NOT position — a moved block keeps
+    /// its render. Begin/end and id are irrelevant to the pixels.
+    private struct TextCacheKey: Hashable {
+        let text: String
+        let fontName: String
+        let fontSize: Double
+        let fontWeight: TextWeight
+        let colorHex: String
+        let alignment: TextAlignmentH
+        let boxEnabled: Bool
+        let boxHex: String
+        let boxOpacity: Double
+        let strokeWidth: Double
+        let strokeHex: String
+        let shadow: Bool
+        let canvasW: Double
+        let canvasH: Double
+
+        init(_ b: TextBlock, canvas: CGSize) {
+            text = b.text; fontName = b.fontName; fontSize = b.fontSize
+            fontWeight = b.fontWeight; colorHex = b.colorHex; alignment = b.alignment
+            boxEnabled = b.boxEnabled; boxHex = b.boxHex; boxOpacity = b.boxOpacity
+            strokeWidth = b.strokeWidth; strokeHex = b.strokeHex; shadow = b.shadow
+            canvasW = canvas.width; canvasH = canvas.height
+        }
+    }
+
+    /// Rendered, positioned text image for a block, or nil if it has no visible
+    /// content. The render (content/style/canvas) is cached; the position
+    /// transform is applied per call.
+    private func textImage(_ block: TextBlock, canvas: CGSize) -> CIImage? {
+        guard !block.text.isEmpty, canvas.width > 1, canvas.height > 1 else { return nil }
+        let key = TextCacheKey(block, canvas: canvas)
+
+        let base: CIImage
+        textCacheLock.lock()
+        if let cached = textCache[key] {
+            base = cached
+            textCacheLock.unlock()
+        } else {
+            textCacheLock.unlock()
+            guard let cg = TextImageRenderer.image(block, canvas: canvas) else { return nil }
+            let rendered = CIImage(cgImage: cg)
+            textCacheLock.lock()
+            if textCache.count > 64 { textCache.removeAll() }   // bound memory
+            textCache[key] = rendered
+            base = rendered
+            textCacheLock.unlock()
+        }
+
+        // Center the image at (centerX, centerY) in top-left canvas coords, then
+        // map to Core Image's bottom-left space (cursor/click use the same flip).
+        let w = base.extent.width, h = base.extent.height
+        let topLeftX = CGFloat(block.centerX) * canvas.width - w / 2
+        let topLeftY = CGFloat(block.centerY) * canvas.height - h / 2
+        let tx = topLeftX
+        let ty = canvas.height - topLeftY - h
+        return base.transformed(by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
     }
 
     /// Top-left rect → Core Image bottom-left rect, given the container height.
