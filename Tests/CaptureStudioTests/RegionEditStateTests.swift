@@ -163,6 +163,28 @@ import CoreGraphics
         #expect(s.hitTest(CGPoint(x: 500, y: 500), handleRadius: 8) == nil)
     }
 
+    // MARK: isValid
+
+    @Test func isValidTrueWhenAtLeastMinSize() {
+        let s = state(CGRect(x: 0, y: 0, width: 20, height: 20))  // minSize == 20
+        #expect(s.isValid)
+    }
+
+    @Test func isValidFalseWhenNarrowerThanMinSize() {
+        let s = state(CGRect(x: 0, y: 0, width: 19, height: 200))
+        #expect(!s.isValid)
+    }
+
+    @Test func isValidFalseWhenShorterThanMinSize() {
+        let s = state(CGRect(x: 0, y: 0, width: 200, height: 19))
+        #expect(!s.isValid)
+    }
+
+    @Test func isValidFalseForZeroRect() {
+        let s = state(.zero)
+        #expect(!s.isValid)
+    }
+
     // MARK: AspectRatio table
 
     @Test func aspectRatioValuesCorrect() {

@@ -40,6 +40,10 @@ struct RegionEditState {
     var aspect: AspectRatio = .free
     var minSize: CGFloat = 20
 
+    /// True once the selection is at least `minSize` in both dimensions — the
+    /// threshold for committing it (drives the control bar and Start Record).
+    var isValid: Bool { rect.width >= minSize && rect.height >= minSize }
+
     // MARK: Draw
 
     /// Replace the selection with a fresh drag from `anchor` to `point`. With an
