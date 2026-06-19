@@ -107,10 +107,6 @@ struct TextTimelineLane: View {
         }
         .frame(width: bodyW, height: rowHeight, alignment: .leading)
         .offset(x: x0)
-        // Double-click opens the canvas editor.
-        .onTapGesture(count: 2) {
-            model.beginEditingText(block.id)
-        }
     }
 
     private func label(_ block: TextBlock) -> String {
@@ -143,7 +139,8 @@ struct TextTimelineLane: View {
                 }
             }
             .onEnded { _ in
-                if dragMoved { model.commitTextEdit() } else { model.selectTextBlock(block.id) }
+                // Tap (no drag) selects the block and opens its text input.
+                if dragMoved { model.commitTextEdit() } else { model.beginEditingText(block.id) }
                 dragMoved = false
             }
     }

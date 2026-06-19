@@ -52,6 +52,10 @@ final class StudioModel: ObservableObject {
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
     @Published var editingTextBlockID: UUID?
+    /// Set while a text block is being dragged on the canvas, so the compositor
+    /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
+    /// (no per-tick recomposite). Cleared on drop.
+    @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
@@ -628,13 +632,15 @@ final class StudioModel: ObservableObject {
         }
     }
 
-    /// Add an empty default text block at the playhead and select it.
+    /// Add an empty default text block at the playhead, select it, and open its
+    /// input so the user can type immediately.
     func addTextBlock() {
         let t = min(max(currentTime, 0), duration)
         let added = TextTimeline.add(textBlocks, atTime: t, width: Self.defaultTextWidth,
                                      duration: duration,
                                      template: TextBlock(begin: 0, end: 0))
         setTextBlocks(added.blocks, select: added.id)
+        editingTextBlockID = added.id
     }
 
     func removeTextBlock(_ id: UUID) {
@@ -665,20 +671,18 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    /// Open the canvas inline editor for a block: select it and suppress it in
-    /// the composited preview (drawn by the live overlay instead) so it isn't
-    /// rendered twice.
+    /// Open the text input popover for a block (select it and mark it editing).
+    /// The input is off-canvas, so the baked text stays visible and updates live
+    /// as the user types — no suppression needed.
     func beginEditingText(_ id: UUID) {
         selectTextBlock(id)
         editingTextBlockID = id
-        applyVideoComposition()
     }
 
-    /// Close the canvas inline editor: un-suppress the block and persist.
+    /// Close the text input popover and persist (text was applied live).
     func endEditingText() {
         guard editingTextBlockID != nil else { return }
         editingTextBlockID = nil
-        applyVideoComposition()
         saveEdit()
     }
 
@@ -700,6 +704,40 @@ final class StudioModel: ObservableObject {
             $0.centerX = min(max(0, x), 1)
             $0.centerY = min(max(0, y), 1)
         }
+    }
+
+    /// Begin a canvas position drag: select, close any open text input, and
+    /// suppress the baked copy (one recomposite) so the smooth SwiftUI overlay
+    /// drives motion.
+    func beginDraggingText(_ id: UUID) {
+        selectTextBlock(id)
+        editingTextBlockID = nil
+        draggingTextBlockID = id
+        applyVideoComposition()
+    }
+
+    /// Live position update during a drag — moves only the published model (the
+    /// overlay follows). No recomposite, so it stays smooth.
+    func dragTextPosition(x: Double, y: Double, for id: UUID) {
+        guard let i = textBlocks.firstIndex(where: { $0.id == id }) else { return }
+        textBlocks[i].centerX = min(max(0, x), 1)
+        textBlocks[i].centerY = min(max(0, y), 1)
+    }
+
+    /// End a canvas position drag: un-suppress, recomposite once at the final
+    /// position, and persist.
+    func endDraggingText() {
+        guard draggingTextBlockID != nil else { return }
+        draggingTextBlockID = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Deselect any text block (closing the inline editor / drag first).
+    func deselectText() {
+        if editingTextBlockID != nil { endEditingText() }
+        if draggingTextBlockID != nil { endDraggingText() }
+        selectedTextBlockID = nil
     }
 
     // MARK: Text z-order
@@ -1069,11 +1107,12 @@ final class StudioModel: ObservableObject {
             overlay.ringPixelSize = ringPixelSize
         }
 
-        // Text/caption blocks (rendered topmost). Skip the block being edited
-        // live on the canvas to avoid a doubled image.
+        // Text/caption blocks (rendered topmost). Suppress only the block being
+        // dragged (the smooth overlay drives motion); editing is off-canvas so
+        // its baked text stays visible and updates live.
         if !textBlocks.isEmpty {
             layout.textTimeline = TextTimelineSpec(blocks: textBlocks)
-            layout.editingTextBlockID = editingTextBlockID
+            layout.suppressedTextBlockID = draggingTextBlockID
         }
 
         let instruction = StudioCompositionInstruction(

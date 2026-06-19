@@ -62,237 +62,197 @@ struct StudioView: View {
             }
             if !model.textBlocks.isEmpty {
                 laneRow("textformat") { TextTimelineLane(model: model) }
+                    .popover(isPresented: Binding(
+                        get: { model.editingTextBlockID != nil },
+                        set: { if !$0 { model.endEditingText() } }
+                    ), arrowEdge: .top) {
+                        textEditorPopover
+                    }
             }
 
-            FlowLayout(hSpacing: 12, vSpacing: 8) {
-                // Playback cluster.
-                HStack(spacing: 8) {
-                    Button {
-                        model.togglePlay()
-                    } label: {
-                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
-                            .frame(width: 24)
-                    }
-                    .keyboardShortcut(.space, modifiers: [])
+            Divider().padding(.vertical, 2)
 
-                    Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(.secondary)
+            // Row 1 — transport + trim (left, wraps when narrow) and output
+            // pinned right.
+            HStack(alignment: .top, spacing: 12) {
+                FlowLayout(hSpacing: 8, vSpacing: 8) {
+                    toolGroup { transportControls }
+                    toolGroup { trimControls }
                 }
+                Spacer(minLength: 12)
+                toolGroup { outputControls }
+            }
 
-                // Trim cluster.
-                HStack(spacing: 8) {
-                    Button("Set In") { model.setTrimIn(model.currentTime) }
-                    Button("Set Out") { model.setTrimOut(model.currentTime) }
-                    Button("Reset") { model.resetTrim() }
-                    Text("Trim \(timecode(model.trimIn)) – \(timecode(model.trimOut))")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                // Volume cluster.
+            // Row 2 — editing tools, grouped; each group wraps intact.
+            FlowLayout(hSpacing: 8, vSpacing: 8) {
                 if model.hasSystemAudioTrack || model.hasMicTrack {
-                    HStack(spacing: 8) {
-                        if model.hasSystemAudioTrack {
-                            volumeSlider(
-                                systemImage: "speaker.wave.2",
-                                help: "System audio volume",
-                                value: Binding(
-                                    get: { model.systemVolume },
-                                    set: { model.setSystemVolume($0) }
-                                )
-                            )
-                        }
-                        if model.hasMicTrack {
-                            volumeSlider(
-                                systemImage: "mic",
-                                help: "Microphone volume (up to 300% to boost quiet voice)",
-                                value: Binding(
-                                    get: { model.micVolume },
-                                    set: { model.setMicVolume($0) }
-                                ),
-                                range: 0...3,
-                                showPercent: true
-                            )
-                        }
-                    }
+                    toolGroup { audioControls }
                 }
-
-                // Reframe cluster.
-                HStack(spacing: 8) {
-                    Menu {
-                        ForEach(CropAspect.allCases, id: \.self) { aspect in
-                            Button {
-                                model.setCropAspect(aspect)
-                            } label: {
-                                if model.cropAspect == aspect {
-                                    Label(aspect.displayName, systemImage: "checkmark")
-                                } else {
-                                    Text(aspect.displayName)
-                                }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "aspectratio")
-                    }
-                    .menuStyle(.button)
-                    .fixedSize()
-                    .help("Reframe aspect ratio")
-
-                    if model.cropActive {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus.magnifyingglass")
-                                .foregroundStyle(.secondary)
-                            Slider(value: Binding(
-                                get: { 1.2 - model.cropZoom },
-                                set: { model.setCropZoom(1.2 - $0) }
-                            ), in: 0.2...1.0) { editing in
-                                if !editing { model.commitCropEdit() }
-                            }
-                            .frame(width: 80)
-                            .controlSize(.small)
-                        }
-                        .help("Crop zoom — drag the video to pan")
-                    }
-                }
-
-                // Camera cluster.
+                toolGroup { reframeControls }
                 if model.hasCameraTrack {
-                    HStack(spacing: 8) {
-                        Toggle(isOn: Binding(
-                            get: { model.cameraVisible },
-                            set: { _ in model.toggleCamera() }
-                        )) {
-                            Image(systemName: "video.circle")
-                        }
-                        .toggleStyle(.button)
-                        .help("Show/hide camera overlay")
-
-                        if model.cameraVisible {
-                            HStack(spacing: 4) {
-                                Image(systemName: "person.crop.square")
-                                    .foregroundStyle(.secondary)
-                                Slider(value: Binding(
-                                    get: { model.cameraZoom },
-                                    set: { model.setCameraZoom($0) }
-                                ), in: 1.0...4.0) { editing in
-                                    if !editing { model.commitCameraEdit() }
-                                }
-                                .frame(width: 80)
-                                .controlSize(.small)
-                            }
-                            .help("Camera zoom — ⌥-drag the camera to pan")
-
-                            Button {
-                                showCameraStyle.toggle()
-                            } label: {
-                                Image(systemName: "paintbrush")
-                            }
-                            .help("Camera frame style")
-                            .popover(isPresented: $showCameraStyle,
-                                     arrowEdge: .bottom) {
-                                cameraStylePopover
-                            }
-                        }
-                    }
+                    toolGroup { cameraControls }
                 }
-
-                // Camera block (timeline) cluster.
-                if model.hasCameraTrack {
-                    HStack(spacing: 8) {
-                        Button { model.addBlock() } label: {
-                            Image(systemName: "plus.rectangle")
-                        }
-                        .help("Add a camera move block at the playhead")
-
-                        if model.cameraHasTimeline {
-                            Button {
-                                if let id = model.selectedBlockID { model.removeBlock(id) }
-                            } label: {
-                                Image(systemName: "minus.rectangle")
-                            }
-                            .disabled(model.selectedBlockID == nil)
-                            .help("Delete the selected block")
-
-                            if let block = model.selectedBlock {
-                                Button { model.toggleBlockVisible(block.id) } label: {
-                                    Image(systemName: block.visible ? "eye" : "eye.slash")
-                                }
-                                .help("Show or hide the camera in this block")
-                            }
-                        }
-                    }
-                }
-
-                // Text / caption cluster.
-                HStack(spacing: 8) {
-                    Button { model.addTextBlock() } label: {
-                        Image(systemName: "textformat")
-                    }
-                    .help("Add a text/caption block at the playhead")
-
-                    if model.selectedTextBlock != nil {
-                        Button {
-                            if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .help("Delete the selected text block")
-
-                        Button {
-                            if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
-                        } label: {
-                            Image(systemName: "arrow.down.square")
-                        }
-                        .help("Send the selected text backward")
-
-                        Button {
-                            if let id = model.selectedTextBlockID { model.bringTextForward(id) }
-                        } label: {
-                            Image(systemName: "arrow.up.square")
-                        }
-                        .help("Bring the selected text forward")
-
-                        Button {
-                            showTextStyle.toggle()
-                        } label: {
-                            Image(systemName: "paintbrush")
-                        }
-                        .help("Text style")
-                        .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
-                            textStylePopover
-                        }
-                    }
-                }
-
-                // Cursor / click overlay cluster.
-                HStack(spacing: 8) {
-                    Toggle(isOn: Binding(
-                        get: { model.showCursor },
-                        set: { model.setShowCursor($0) }
-                    )) {
-                        Image(systemName: "cursorarrow")
-                    }
-                    .toggleStyle(.button)
-                    .help("Show the recorded cursor")
-
-                    Toggle(isOn: Binding(
-                        get: { model.clickFeedback },
-                        set: { model.setClickFeedback($0) }
-                    )) {
-                        Image(systemName: "cursorarrow.click")
-                    }
-                    .toggleStyle(.button)
-                    .help("Show click feedback rings")
-                }
-
-                Button("Reveal Masters") { model.revealMastersInFinder() }
-
-                HStack(spacing: 8) { exportControls }
+                toolGroup { textControls }
+                toolGroup { cursorControls }
             }
         }
         .padding(12)
         .background(.bar)
+    }
+
+    /// A labelled cluster of related controls with a subtle rounded backing, so
+    /// groups read as units and wrap intact as the window resizes.
+    private func toolGroup<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        HStack(spacing: 8) { content() }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 8).fill(.quaternary.opacity(0.4)))
+    }
+
+    // MARK: - Control groups
+
+    @ViewBuilder private var transportControls: some View {
+        Button { model.togglePlay() } label: {
+            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").frame(width: 22)
+        }
+        .keyboardShortcut(.space, modifiers: [])
+        .help(model.isPlaying ? "Pause" : "Play")
+
+        Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
+            .font(.body.monospacedDigit())
+            .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder private var trimControls: some View {
+        Button("Set In") { model.setTrimIn(model.currentTime) }
+        Button("Set Out") { model.setTrimOut(model.currentTime) }
+        Button { model.resetTrim() } label: { Image(systemName: "arrow.uturn.backward") }
+            .help("Reset trim")
+        Text("\(timecode(model.trimIn)) – \(timecode(model.trimOut))")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder private var outputControls: some View {
+        Button { model.revealMastersInFinder() } label: {
+            Image(systemName: "folder")
+        }
+        .help("Reveal master files in Finder")
+        exportControls
+    }
+
+    @ViewBuilder private var audioControls: some View {
+        if model.hasSystemAudioTrack {
+            volumeSlider(systemImage: "speaker.wave.2", help: "System audio volume",
+                         value: Binding(get: { model.systemVolume },
+                                        set: { model.setSystemVolume($0) }))
+        }
+        if model.hasMicTrack {
+            volumeSlider(systemImage: "mic",
+                         help: "Microphone volume (up to 300% to boost quiet voice)",
+                         value: Binding(get: { model.micVolume },
+                                        set: { model.setMicVolume($0) }),
+                         range: 0...3, showPercent: true)
+        }
+    }
+
+    @ViewBuilder private var reframeControls: some View {
+        Menu {
+            ForEach(CropAspect.allCases, id: \.self) { aspect in
+                Button {
+                    model.setCropAspect(aspect)
+                } label: {
+                    if model.cropAspect == aspect {
+                        Label(aspect.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(aspect.displayName)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "aspectratio")
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .help("Reframe aspect ratio")
+
+        if model.cropActive {
+            HStack(spacing: 4) {
+                Image(systemName: "plus.magnifyingglass").foregroundStyle(.secondary)
+                Slider(value: Binding(get: { 1.2 - model.cropZoom },
+                                      set: { model.setCropZoom(1.2 - $0) }),
+                       in: 0.2...1.0) { editing in
+                    if !editing { model.commitCropEdit() }
+                }
+                .frame(width: 80)
+                .controlSize(.small)
+            }
+            .help("Crop zoom — drag the video to pan")
+        }
+    }
+
+    @ViewBuilder private var cameraControls: some View {
+        Toggle(isOn: Binding(get: { model.cameraVisible },
+                             set: { _ in model.toggleCamera() })) {
+            Image(systemName: "video.circle")
+        }
+        .toggleStyle(.button)
+        .help("Show/hide camera overlay")
+
+        if model.cameraVisible {
+            HStack(spacing: 4) {
+                Image(systemName: "person.crop.square").foregroundStyle(.secondary)
+                Slider(value: Binding(get: { model.cameraZoom },
+                                      set: { model.setCameraZoom($0) }),
+                       in: 1.0...4.0) { editing in
+                    if !editing { model.commitCameraEdit() }
+                }
+                .frame(width: 80)
+                .controlSize(.small)
+            }
+            .help("Camera zoom — ⌥-drag the camera to pan")
+
+            Button { showCameraStyle.toggle() } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .help("Camera frame & motion")
+            .popover(isPresented: $showCameraStyle, arrowEdge: .bottom) {
+                cameraStylePopover
+            }
+        }
+    }
+
+    @ViewBuilder private var textControls: some View {
+        Button { model.addTextBlock() } label: {
+            Image(systemName: "textformat")
+        }
+        .help("Add a text/caption block at the playhead")
+
+        if model.selectedTextBlock != nil {
+            Button { showTextStyle.toggle() } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .help("Edit text style, order, and delete")
+            .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
+                textStylePopover
+            }
+        }
+    }
+
+    @ViewBuilder private var cursorControls: some View {
+        Toggle(isOn: Binding(get: { model.showCursor },
+                             set: { model.setShowCursor($0) })) {
+            Image(systemName: "cursorarrow")
+        }
+        .toggleStyle(.button)
+        .help("Show the recorded cursor")
+
+        Toggle(isOn: Binding(get: { model.clickFeedback },
+                             set: { model.setClickFeedback($0) })) {
+            Image(systemName: "cursorarrow.click")
+        }
+        .toggleStyle(.button)
+        .help("Show click feedback rings")
     }
 
     private func volumeSlider(systemImage: String, help: String,
@@ -394,6 +354,33 @@ struct StudioView: View {
                     set: { model.setCameraShadowRadius($0) }
                 ), range: 0...1)
             }
+
+            Divider()
+
+            Text("Camera motion").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button { model.addBlock() } label: {
+                    Label("Add move", systemImage: "plus.rectangle")
+                }
+                .help("Add a camera move block at the playhead")
+
+                if model.cameraHasTimeline {
+                    Button {
+                        if let id = model.selectedBlockID { model.removeBlock(id) }
+                    } label: {
+                        Image(systemName: "minus.rectangle")
+                    }
+                    .disabled(model.selectedBlockID == nil)
+                    .help("Delete the selected move block")
+
+                    if let block = model.selectedBlock {
+                        Button { model.toggleBlockVisible(block.id) } label: {
+                            Image(systemName: block.visible ? "eye" : "eye.slash")
+                        }
+                        .help("Show or hide the camera in this block")
+                    }
+                }
+            }
         }
         .padding(14)
         .frame(width: 240)
@@ -437,6 +424,31 @@ struct StudioView: View {
         }
     }
 
+    // MARK: - Text input
+
+    /// The dedicated caption input, shown as a popover off the text lane when a
+    /// block is selected. Return / Esc / click-outside apply; Shift+Return adds
+    /// a newline. Text updates the preview live as you type.
+    @ViewBuilder
+    private var textEditorPopover: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Caption text").font(.caption).foregroundStyle(.secondary)
+            CaptionTextEditor(
+                text: Binding(
+                    get: { model.selectedTextBlock?.text ?? "" },
+                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
+                ),
+                onSubmit: { model.endEditingText() }
+            )
+            .frame(width: 280, height: 92)
+            .overlay(RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
+            Text("Return to apply · Shift+Return for a new line · Esc to apply")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(12)
+    }
+
     // MARK: - Text style
 
     /// Curated font families (Core Text resolves by family name; unknown names
@@ -451,6 +463,24 @@ struct StudioView: View {
         let block = model.selectedTextBlock
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Button {
+                        if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
+                    } label: { Image(systemName: "arrow.down.square") }
+                        .help("Send backward")
+                    Button {
+                        if let id = model.selectedTextBlockID { model.bringTextForward(id) }
+                    } label: { Image(systemName: "arrow.up.square") }
+                        .help("Bring forward")
+                    Spacer()
+                    Button(role: .destructive) {
+                        if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
+                    } label: { Image(systemName: "trash") }
+                        .help("Delete this text block")
+                }
+
+                Divider()
+
                 Picker("Font", selection: Binding(
                     get: { block?.fontName ?? "Helvetica" },
                     set: { model.setTextFontName($0) }
