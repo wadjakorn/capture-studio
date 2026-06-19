@@ -1,297 +1,269 @@
 import AppKit
 import SwiftUI
 
-/// Drag-to-select overlay (macOS-screenshot style). Dims **every** screen at once
-/// with a single overlay session; the user drags a rectangle on whichever screen
-/// they like. Unlike a one-shot screenshot, the selection **persists** after the
-/// drag: it can be moved, resized from eight handles, redrawn by dragging on empty
-/// space, or constrained to an aspect-ratio template. The screen the selection
-/// lands on **is** the capture display — derived from the drag, not chosen
-/// separately. Confirm with Return or the **Use Area** button; ESC / Cancel aborts.
-/// Returns the selection in **display-local points** (top-left origin within that
-/// display) together with its display id.
+/// Live, session-owned area-selection overlay. Dims **every** screen with a
+/// single overlay session; the user drags a rectangle on whichever screen they
+/// like and keeps editing it (move, resize from eight handles, redraw, or apply
+/// an aspect-ratio template) for as long as the overlay is up. The screen the
+/// selection lands on **is** the capture display. Unlike the old modal, there is
+/// no confirm button: every change is reported live via `onChange`, Return fires
+/// `onStart`, and ESC / right-click fires `onCancel`. The session decides what to
+/// do with those. Coordinates are reported in **display-local points** (top-left
+/// origin within that display) together with the display id.
 @MainActor
-enum AreaSelector {
-    /// Minimum selection size (points); a smaller drag is treated as a non-commit
-    /// so a stray click never produces a 1px region.
+final class AreaSelectionOverlay {
+    /// Minimum selection size (points); a smaller drag never qualifies as valid.
     static let minSize: CGFloat = 20
 
-    /// The single in-flight session, if any. A new `selectRegion` call dismisses
-    /// it first, so the dim overlay can never stack.
-    private static var active: Coordinator?
+    /// Fired on every drag/resize/aspect/screen change. `region`/`displayID` are
+    /// nil before the first qualifying selection exists.
+    var onChange: (_ region: CGRect?, _ displayID: CGDirectDisplayID?, _ valid: Bool) -> Void = { _, _, _ in }
+    /// ESC / right-click / cancelOperation.
+    var onCancel: () -> Void = {}
+    /// Return / keypad Enter — the session ignores it unless a valid region exists.
+    var onStart: () -> Void = {}
 
-    static func selectRegion() async -> (region: CGRect, displayID: CGDirectDisplayID)? {
-        // Guarantee a single overlay: tear down any session still on screen.
-        active?.cancel()
-        active = nil
-
-        let priorApp = NSWorkspace.shared.frontmostApplication
-
-        return await withCheckedContinuation { continuation in
-            let coordinator = Coordinator(continuation: continuation, priorApp: priorApp)
-            active = coordinator
-            coordinator.present(minSize: minSize)
-        }
-    }
-
-    /// In-flight drag, owned by the Coordinator.
     private enum DragMode {
         case draw(anchor: CGPoint)
         case move(last: CGPoint)
         case resize(Handle)
     }
 
-    /// Owns every screen's dim panel, the control bar, the edit state, and the
-    /// continuation — resolving exactly once. Also installs a shared key monitor
-    /// (only one panel can be key, so per-view key handling alone wouldn't catch
-    /// Return/ESC on the others).
-    @MainActor
-    final class Coordinator {
-        private var panels: [(panel: NSPanel, view: SelectionView, screen: NSScreen)] = []
-        private var controlPanel: NSPanel?
-        private let model = AreaControlModel()
-        private var continuation: CheckedContinuation<(region: CGRect, displayID: CGDirectDisplayID)?, Never>?
-        private let priorApp: NSRunningApplication?
-        private var keyMonitor: Any?
-        private var minSize: CGFloat = 20
+    private var panels: [(panel: NSPanel, view: SelectionView, screen: NSScreen)] = []
+    private var controlPanel: NSPanel?
+    private let model = AreaControlModel()
+    private var priorApp: NSRunningApplication?
+    private var keyMonitor: Any?
+    private let minSize = AreaSelectionOverlay.minSize
 
-        /// The committed selection (display-local top-left points) and the screen
-        /// it lives on. `nil` until the first qualifying drag.
-        private var state: RegionEditState?
-        private var activeScreen: NSScreen?
-        /// Aspect applied to new draws / resizes; mirrors the control bar choice.
-        private var aspect: AspectRatio = .free
-        private var dragMode: DragMode?
-        /// Snapshot before a redraw, restored if the new drag is too small.
-        private var preDrawState: RegionEditState?
-        private var preDrawScreen: NSScreen?
+    private var state: RegionEditState?
+    private var activeScreen: NSScreen?
+    private var aspect: AspectRatio = .free
+    private var dragMode: DragMode?
+    private var preDrawState: RegionEditState?
+    private var preDrawScreen: NSScreen?
 
-        private let handleRadius: CGFloat = 9
+    private let handleRadius: CGFloat = 9
 
-        init(continuation: CheckedContinuation<(region: CGRect, displayID: CGDirectDisplayID)?, Never>,
-             priorApp: NSRunningApplication?) {
-            self.continuation = continuation
-            self.priorApp = priorApp
-        }
+    // MARK: Presentation
 
-        // MARK: Presentation
+    func present(initialRegion: CGRect?, initialDisplayID: CGDirectDisplayID?) {
+        priorApp = NSWorkspace.shared.frontmostApplication
 
-        func present(minSize: CGFloat) {
-            self.minSize = minSize
-
-            for screen in NSScreen.screens {
-                let panel = NSPanel(contentRect: screen.frame,
-                                    styleMask: [.borderless, .nonactivatingPanel],
-                                    backing: .buffered, defer: false)
-                panel.level = .screenSaver
-                panel.isOpaque = false
-                panel.backgroundColor = .clear
-                panel.hasShadow = false
-                panel.ignoresMouseEvents = false
-                panel.acceptsMouseMovedEvents = true
-
-                let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
-                view.coordinator = self
-                view.screen = screen
-                panel.contentView = view
-                panel.orderFrontRegardless()
-                panels.append((panel, view, screen))
-            }
-
-            model.onPickAspect = { [weak self] in self?.pickAspect($0) }
-            model.onConfirm = { [weak self] in self?.confirm() }
-            model.onCancel = { [weak self] in self?.cancel() }
-            presentControlBar(on: NSScreen.main ?? NSScreen.screens.first)
-            refreshControlBar()
-
-            // Return confirms, ESC cancels — regardless of which panel is key.
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                switch event.keyCode {
-                case 53:            // Escape
-                    self?.cancel(); return nil
-                case 36, 76:        // Return, keypad Enter
-                    self?.confirm(); return nil
-                default:
-                    return event
-                }
-            }
-
-            NSApp.activate(ignoringOtherApps: true)
-            panels.first?.panel.makeKey()
-        }
-
-        private func presentControlBar(on screen: NSScreen?) {
-            let host = NSHostingView(rootView: AreaControlBar(model: model))
-            host.layoutSubtreeIfNeeded()
-            let size = host.fittingSize
-
-            let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+        for screen in NSScreen.screens {
+            let panel = NSPanel(contentRect: screen.frame,
                                 styleMask: [.borderless, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
-            // One level above the dim panels so it sits on top and receives clicks
-            // (same level → unreliable z-order, dim overlay swallows the mouse).
-            panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+            panel.level = .screenSaver
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.hasShadow = false
-            panel.contentView = host
-            controlPanel = panel
-            positionControlBar(on: screen)
+            panel.ignoresMouseEvents = false
+            panel.acceptsMouseMovedEvents = true
+
+            let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            view.coordinator = self
+            view.screen = screen
+            panel.contentView = view
             panel.orderFrontRegardless()
+            panels.append((panel, view, screen))
         }
 
-        private func positionControlBar(on screen: NSScreen?) {
-            guard let controlPanel, let screen else { return }
-            let size = controlPanel.frame.size
-            let x = screen.frame.midX - size.width / 2
-            let y = screen.frame.minY + 72
-            controlPanel.setFrameOrigin(CGPoint(x: x, y: y))
-        }
+        model.onPickAspect = { [weak self] in self?.pickAspect($0) }
 
-        // MARK: Selection access (for SelectionView rendering)
+        // Seed the saved region (if any) so the user starts from last time's box.
+        seed(region: initialRegion, displayID: initialDisplayID)
 
-        /// The selection to draw on `screen`, or nil if the selection lives
-        /// elsewhere (or doesn't exist yet).
-        func selection(on screen: NSScreen) -> RegionEditState? {
-            activeScreen === screen ? state : nil
-        }
+        presentControlBar(on: activeScreen ?? NSScreen.main ?? NSScreen.screens.first)
+        refreshControlBar()
+        emitChange()
 
-        func handleRadiusForDrawing() -> CGFloat { handleRadius }
-
-        // MARK: Gesture forwarding (points are screen-local, top-left, y-down)
-
-        func pointerDown(at point: CGPoint, on screen: NSScreen) {
-            // Switching screens drops the old selection — a region can't span
-            // displays, and the drag's screen is the capture display.
-            if activeScreen !== screen {
-                state = nil
-                activeScreen = screen
-                positionControlBar(on: screen)
-            }
-
-            if let current = state, let hit = current.hitTest(point, handleRadius: handleRadius) {
-                switch hit {
-                case .handle(let h): dragMode = .resize(h)
-                case .move: dragMode = .move(last: point)
-                }
-            } else {
-                startDraw(at: point, on: screen)
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            switch event.keyCode {
+            case 53:            // Escape
+                self?.onCancel(); return nil
+            case 36, 76:        // Return, keypad Enter
+                self?.onStart(); return nil
+            default:
+                return event
             }
         }
 
-        func pointerDragged(to point: CGPoint) {
-            switch dragMode {
-            case .draw(let anchor):
-                state?.drawFrom(anchor, to: point)
-            case .move(let last):
-                state?.move(by: CGSize(width: point.x - last.x, height: point.y - last.y))
-                dragMode = .move(last: point)
-            case .resize(let handle):
-                state?.resize(handle, to: point)
-            case nil:
-                break
-            }
-            redrawAll()
-            refreshControlBar()
-        }
+        NSApp.activate(ignoringOtherApps: true)
+        panels.first?.panel.makeKey()
+    }
 
-        func pointerUp() {
-            // A redraw that never reached the minimum size restores the prior
-            // selection (so a stray click doesn't wipe a good region).
-            if case .draw = dragMode, let s = state,
-               s.rect.width < minSize || s.rect.height < minSize {
-                state = preDrawState
-                activeScreen = preDrawScreen ?? activeScreen
-            }
-            dragMode = nil
-            preDrawState = nil
-            preDrawScreen = nil
-            redrawAll()
-            refreshControlBar()
-        }
+    /// Tear down all panels and the key monitor, restore prior focus. Idempotent.
+    func dismiss() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        for entry in panels { entry.panel.orderOut(nil) }
+        panels.removeAll()
+        controlPanel?.orderOut(nil)
+        controlPanel = nil
+        priorApp?.activate()
+        priorApp = nil
+    }
 
-        private func startDraw(at point: CGPoint, on screen: NSScreen) {
-            preDrawState = state
-            preDrawScreen = activeScreen
-            var fresh = RegionEditState(bounds: screen.frame.size,
-                                        rect: CGRect(origin: point, size: .zero),
-                                        aspect: aspect, minSize: minSize)
-            fresh.drawFrom(point, to: point)
-            state = fresh
+    /// Place `region` on the screen matching `displayID` as the starting box.
+    private func seed(region: CGRect?, displayID: CGDirectDisplayID?) {
+        guard let region, let displayID,
+              let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) else { return }
+        activeScreen = screen
+        state = RegionEditState(bounds: screen.frame.size, rect: region,
+                                aspect: .free, minSize: minSize)
+    }
+
+    private func presentControlBar(on screen: NSScreen?) {
+        let host = NSHostingView(rootView: AreaControlBar(model: model))
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                            styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        // One level above the dim panels so it sits on top and receives clicks.
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.contentView = host
+        controlPanel = panel
+        positionControlBar(on: screen)
+        panel.orderFrontRegardless()
+    }
+
+    private func positionControlBar(on screen: NSScreen?) {
+        guard let controlPanel, let screen else { return }
+        let size = controlPanel.frame.size
+        let x = screen.frame.midX - size.width / 2
+        let y = screen.frame.minY + 72
+        controlPanel.setFrameOrigin(CGPoint(x: x, y: y))
+    }
+
+    // MARK: Selection access (for SelectionView rendering)
+
+    /// The selection to draw on `screen`, or nil if the selection lives
+    /// elsewhere (or doesn't exist yet).
+    func selection(on screen: NSScreen) -> RegionEditState? {
+        activeScreen === screen ? state : nil
+    }
+
+    func handleRadiusForDrawing() -> CGFloat { handleRadius }
+
+    // MARK: Gesture forwarding (points are screen-local, top-left, y-down)
+
+    func pointerDown(at point: CGPoint, on screen: NSScreen) {
+        // Switching screens drops the old selection — a region can't span
+        // displays, and the drag's screen is the capture display.
+        if activeScreen !== screen {
+            state = nil
             activeScreen = screen
-            dragMode = .draw(anchor: point)
+            positionControlBar(on: screen)
         }
 
-        private func pickAspect(_ ratio: AspectRatio) {
-            aspect = ratio
-            if state != nil {
-                state?.applyAspect(ratio)
-            } else if ratio.value != nil,
-                      let screen = activeScreen ?? NSScreen.main ?? NSScreen.screens.first {
-                // No selection yet: materialize the ratio's default box centered on
-                // the screen so the chip immediately shows something to adjust.
-                activeScreen = screen
-                let size = screen.frame.size
-                var fresh = RegionEditState(bounds: size,
-                                            rect: CGRect(x: size.width / 2, y: size.height / 2,
-                                                         width: 0, height: 0),
-                                            aspect: ratio, minSize: minSize)
-                fresh.applyAspect(ratio)
-                state = fresh
-                positionControlBar(on: screen)
+        if let current = state, let hit = current.hitTest(point, handleRadius: handleRadius) {
+            switch hit {
+            case .handle(let h): dragMode = .resize(h)
+            case .move: dragMode = .move(last: point)
             }
-            redrawAll()
-            refreshControlBar()
+        } else {
+            startDraw(at: point, on: screen)
         }
+    }
 
-        // MARK: Refresh
-
-        private func redrawAll() {
-            for entry in panels { entry.view.needsDisplay = true }
+    func pointerDragged(to point: CGPoint) {
+        switch dragMode {
+        case .draw(let anchor):
+            state?.drawFrom(anchor, to: point)
+        case .move(let last):
+            state?.move(by: CGSize(width: point.x - last.x, height: point.y - last.y))
+            dragMode = .move(last: point)
+        case .resize(let handle):
+            state?.resize(handle, to: point)
+        case nil:
+            break
         }
+        redrawAll()
+        refreshControlBar()
+        emitChange()
+    }
 
-        private func refreshControlBar() {
-            model.aspect = aspect
-            if let r = state?.rect, r.width >= minSize, r.height >= minSize {
-                model.sizeText = "\(Int(r.width.rounded())) × \(Int(r.height.rounded()))"
-                model.canConfirm = true
-            } else {
-                model.sizeText = ""
-                model.canConfirm = false
-            }
+    func pointerUp() {
+        // A redraw that never reached the minimum size restores the prior
+        // selection (so a stray click doesn't wipe a good region).
+        if case .draw = dragMode, let s = state, !s.isValid {
+            state = preDrawState
+            activeScreen = preDrawScreen ?? activeScreen
         }
+        dragMode = nil
+        preDrawState = nil
+        preDrawScreen = nil
+        redrawAll()
+        refreshControlBar()
+        emitChange()
+    }
 
-        // MARK: Resolution
+    private func startDraw(at point: CGPoint, on screen: NSScreen) {
+        preDrawState = state
+        preDrawScreen = activeScreen
+        var fresh = RegionEditState(bounds: screen.frame.size,
+                                    rect: CGRect(origin: point, size: .zero),
+                                    aspect: aspect, minSize: minSize)
+        fresh.drawFrom(point, to: point)
+        state = fresh
+        activeScreen = screen
+        dragMode = .draw(anchor: point)
+    }
 
-        func confirm() {
-            guard let state, let screen = activeScreen,
-                  state.rect.width >= minSize, state.rect.height >= minSize,
-                  let displayID = screen.displayID else { return }
-            // state.rect is already display-local top-left points (the struct's
-            // coordinate space matches the screen's), so no flip is needed.
-            finish((region: state.rect, displayID: displayID))
+    private func pickAspect(_ ratio: AspectRatio) {
+        aspect = ratio
+        if state != nil {
+            state?.applyAspect(ratio)
+        } else if ratio.value != nil,
+                  let screen = activeScreen ?? NSScreen.main ?? NSScreen.screens.first {
+            // No selection yet: materialize the ratio's default box centered on
+            // the screen so the chip immediately shows something to adjust.
+            activeScreen = screen
+            let size = screen.frame.size
+            var fresh = RegionEditState(bounds: size,
+                                        rect: CGRect(x: size.width / 2, y: size.height / 2,
+                                                     width: 0, height: 0),
+                                        aspect: ratio, minSize: minSize)
+            fresh.applyAspect(ratio)
+            state = fresh
+            positionControlBar(on: screen)
         }
+        redrawAll()
+        refreshControlBar()
+        emitChange()
+    }
 
-        func cancel() { finish(nil) }
+    // MARK: Refresh
 
-        /// Resolve once: tear down everything, restore focus, resume the result.
-        private func finish(_ result: (region: CGRect, displayID: CGDirectDisplayID)?) {
-            guard continuation != nil else { return }
-            teardown()
-            priorApp?.activate()
-            continuation?.resume(returning: result)
-            continuation = nil
-            if AreaSelector.active === self { AreaSelector.active = nil }
+    private func redrawAll() {
+        for entry in panels { entry.view.needsDisplay = true }
+    }
+
+    private func refreshControlBar() {
+        model.aspect = aspect
+        if let s = state, s.isValid {
+            model.sizeText = "\(Int(s.rect.width.rounded())) × \(Int(s.rect.height.rounded()))"
+            model.valid = true
+        } else {
+            model.sizeText = ""
+            model.valid = false
         }
+    }
 
-        private func teardown() {
-            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-            keyMonitor = nil
-            for entry in panels { entry.panel.orderOut(nil) }
-            panels.removeAll()
-            controlPanel?.orderOut(nil)
-            controlPanel = nil
+    /// Report the live region + display + validity to the session.
+    private func emitChange() {
+        guard let state, let screen = activeScreen, let displayID = screen.displayID,
+              state.isValid else {
+            onChange(nil, nil, false)
+            return
         }
+        onChange(state.rect, displayID, true)
     }
 }
 
@@ -302,10 +274,10 @@ private extension NSScreen {
 }
 
 /// Renders the dim backdrop + the (optional) selection rect with eight handles and
-/// a W×H readout, and forwards mouse gestures to the Coordinator in screen-local,
+/// a W×H readout, and forwards mouse gestures to the overlay in screen-local,
 /// top-left, y-down points. Holds no selection state of its own.
 final class SelectionView: NSView {
-    weak var coordinator: AreaSelector.Coordinator?
+    weak var coordinator: AreaSelectionOverlay?
     var screen: NSScreen?
 
     override var isFlipped: Bool { false }
@@ -331,8 +303,8 @@ final class SelectionView: NSView {
         coordinator?.pointerUp()
     }
 
-    override func rightMouseDown(with event: NSEvent) { coordinator?.cancel() }
-    override func cancelOperation(_ sender: Any?) { coordinator?.cancel() }
+    override func rightMouseDown(with event: NSEvent) { coordinator?.onCancel() }
+    override func cancelOperation(_ sender: Any?) { coordinator?.onCancel() }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.black.withAlphaComponent(0.35).setFill()
