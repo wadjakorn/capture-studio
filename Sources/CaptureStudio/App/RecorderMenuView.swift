@@ -161,9 +161,16 @@ struct RecorderMenuView: View {
 
     private var armedView: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(session.counting ? "Starting…" : "Sources ready", systemImage: "checkmark.circle")
+            Label(armedHeader, systemImage: "checkmark.circle")
                 .font(.callout)
                 .foregroundStyle(session.counting ? Color.secondary : Color.green)
+
+            if let sz = session.armedAreaSize {
+                Text("\(Int(sz.width)) × \(Int(sz.height))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
             HStack {
                 Button {
                     Task { await session.startCountdownThenBegin() }
@@ -172,7 +179,7 @@ struct RecorderMenuView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(session.counting)
+                .disabled(session.counting || !session.canBeginArmed)
 
                 Button("Cancel") {
                     Task { await session.cancelCountdownOrArming() }
@@ -180,6 +187,12 @@ struct RecorderMenuView: View {
                 .keyboardShortcut(.escape, modifiers: [])
             }
         }
+    }
+
+    /// Armed-view header: interactive area nudges the user to adjust the box.
+    private var armedHeader: String {
+        if session.counting { return "Starting…" }
+        return captureAreaEnabled ? "Adjust area, then record" : "Sources ready"
     }
 
     private var idleView: some View {
@@ -258,9 +271,13 @@ struct RecorderMenuView: View {
 
             Button {
                 elapsed = 0
-                // Area mode records the dragged screen; full mode the picker's.
+                // Area mode seeds the saved region (editable live); full mode the picker's.
                 let region = captureAreaEnabled ? captureRegion : nil
-                let useDisplay = captureAreaEnabled ? captureRegionDisplayID : selectedDisplayID
+                // Seed display from the saved region; fall back to the picker so a
+                // never-set area still has a screen to open the overlay on.
+                let useDisplay = captureAreaEnabled
+                    ? (captureRegionDisplayID ?? selectedDisplayID)
+                    : selectedDisplayID
                 Task {
                     await session.toggle(displayID: useDisplay,
                                          cameraID: selectedCameraID,
@@ -268,20 +285,20 @@ struct RecorderMenuView: View {
                                          systemAudio: systemAudioEnabled,
                                          region: region,
                                          activateForPrompts: false,
-                                         previewFirst: true)
+                                         previewFirst: true,
+                                         interactiveArea: captureAreaEnabled)
                 }
             } label: {
-                // Every mode arms first (preview): camera shows its live preview,
-                // area shows the region outline, full-display just confirms.
-                Label("Preview", systemImage: "eye")
+                // Area mode opens the live selection overlay; full-display just
+                // arms a confirm-preview. Camera (if any) previews in both.
+                Label(captureAreaEnabled ? "Preview / Select Area" : "Preview",
+                      systemImage: captureAreaEnabled ? "crop" : "eye")
                     .frame(maxWidth: .infinity)
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled(captureAreaEnabled
-                      ? (captureRegion == nil || captureRegionDisplayID == nil)
-                      : selectedDisplayID == nil)
+            .disabled(captureAreaEnabled ? false : selectedDisplayID == nil)
             .padding(.top, 4)
 
             HStack(spacing: 6) {
@@ -354,18 +371,7 @@ struct RecorderMenuView: View {
                 Image(systemName: "selection.pin.in.out")
                     .frame(width: 16)
                     .foregroundStyle(.secondary)
-                Button {
-                    Task {
-                        if let (r, did) = await AreaSelector.selectRegion() {
-                            captureRegion = r
-                            captureRegionDisplayID = did
-                        }
-                    }
-                } label: {
-                    Text(captureRegion == nil ? "Select Area…" : "Reselect Area…")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                Text("Area")
                 Spacer()
                 if let r = captureRegion {
                     Text("\(areaDisplayName) · \(Int(r.width))×\(Int(r.height))")
@@ -376,10 +382,10 @@ struct RecorderMenuView: View {
                         .background(.quaternary, in: Capsule())
                 } else {
                     Text("Not set")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(.orange.opacity(0.15), in: Capsule())
+                        .background(.quaternary, in: Capsule())
                 }
             }
             .font(.caption)

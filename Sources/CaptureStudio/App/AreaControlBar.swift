@@ -6,12 +6,12 @@ import SwiftUI
 @MainActor
 final class AreaControlModel: ObservableObject {
     @Published var sizeText: String = ""
-    @Published var canConfirm: Bool = false
+    /// Selection is at least `minSize` in both dimensions (mirrors
+    /// `RegionEditState.isValid`). Reported to the session; not shown in the bar.
+    @Published var valid: Bool = false
     @Published var aspect: AspectRatio = .free
 
     var onPickAspect: (AspectRatio) -> Void = { _ in }
-    var onConfirm: () -> Void = {}
-    var onCancel: () -> Void = {}
 }
 
 /// Floating toolbar shown during area selection: aspect-ratio chips, a live size
@@ -35,13 +35,11 @@ struct AreaControlBar: View {
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(minWidth: 96, alignment: .leading)
 
-            Button("Cancel") { model.onCancel() }
-                .controlSize(.small)
+            Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
-            Button("Use Area") { model.onConfirm() }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canConfirm)
+            Text("Enter to record · Esc to cancel")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.6))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
