@@ -38,7 +38,7 @@ struct StudioView: View {
                     if model.cropActive {
                         CropPanOverlay(model: model)
                     }
-                    if model.hasCameraTrack && model.cameraVisible {
+                    if model.showsCameraOverlay {
                         CameraPipOverlay(model: model)
                     }
                 }
@@ -49,8 +49,13 @@ struct StudioView: View {
     }
 
     private var controlBar: some View {
-        VStack(spacing: 10) {
-            timeline
+        VStack(spacing: 8) {
+            // Stacked lanes share a fixed leading icon gutter so every track
+            // starts at the same x — keeping the playheads vertically aligned.
+            laneRow("display") { timeline }
+            if model.cameraHasTimeline {
+                laneRow("video.fill") { CameraTimelineLane(model: model) }
+            }
 
             FlowLayout(hSpacing: 12, vSpacing: 8) {
                 // Playback cluster.
@@ -180,6 +185,33 @@ struct StudioView: View {
                             .popover(isPresented: $showCameraStyle,
                                      arrowEdge: .bottom) {
                                 cameraStylePopover
+                            }
+                        }
+                    }
+                }
+
+                // Camera block (timeline) cluster.
+                if model.hasCameraTrack {
+                    HStack(spacing: 8) {
+                        Button { model.addBlock() } label: {
+                            Image(systemName: "plus.rectangle")
+                        }
+                        .help("Add a camera move block at the playhead")
+
+                        if model.cameraHasTimeline {
+                            Button {
+                                if let id = model.selectedBlockID { model.removeBlock(id) }
+                            } label: {
+                                Image(systemName: "minus.rectangle")
+                            }
+                            .disabled(model.selectedBlockID == nil)
+                            .help("Delete the selected block")
+
+                            if let block = model.selectedBlock {
+                                Button { model.toggleBlockVisible(block.id) } label: {
+                                    Image(systemName: block.visible ? "eye" : "eye.slash")
+                                }
+                                .help("Show or hide the camera in this block")
                             }
                         }
                     }
@@ -358,6 +390,19 @@ struct StudioView: View {
     }
 
     // MARK: - Timeline
+
+    /// One timeline lane: a fixed-width leading icon gutter + the track. Shared
+    /// by the main scrubber and the camera lane so their time axes line up.
+    private func laneRow<Track: View>(_ systemImage: String,
+                                      @ViewBuilder track: () -> Track) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            track()
+        }
+    }
 
     private var timeline: some View {
         GeometryReader { geo in

@@ -37,6 +37,14 @@ final class StudioModel: ObservableObject {
     @Published var cameraCenterX = 0.85
     @Published var cameraCenterY = 0.82
     @Published var cameraScale = 0.24
+    // Camera timeline. Empty = static placement (the fields above act as the
+    // "home" placement). Non-empty = blocks drive position/scale/visibility over
+    // time, easing from home / the previous block into each block. The selected
+    // block is the one the lane + PiP overlay edit. Persisted to edit.json.
+    @Published private(set) var cameraBlocks: [CameraBlock] = []
+    @Published var selectedBlockID: UUID?
+    /// Default width of a newly added block (seconds).
+    static let defaultBlockWidth = 0.5
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
     // 0–1 in the camera's own space. Persisted to edit.json.
     @Published var cameraZoom = 1.0
@@ -56,6 +64,37 @@ final class StudioModel: ObservableObject {
     @Published private(set) var cameraRotation = 0
 
     var cameraShown: Bool { cameraVisible && cameraTrackID != nil }
+    /// The camera has a block timeline driving it (vs. a static placement).
+    var cameraHasTimeline: Bool { cameraTrackID != nil && !cameraBlocks.isEmpty }
+    var selectedBlock: CameraBlock? {
+        guard let id = selectedBlockID else { return nil }
+        return cameraBlocks.first { $0.id == id }
+    }
+    /// The static "home" placement — the camera's resting state, held before the
+    /// first block and used as the first block's "from".
+    var cameraHome: CameraSample {
+        CameraSample(centerX: cameraCenterX, centerY: cameraCenterY,
+                     scale: cameraScale, opacity: cameraVisible ? 1 : 0)
+    }
+    /// Placement the PiP overlay shows + edits: the selected block's target when
+    /// the timeline is active, else the home placement.
+    var editingCameraSample: CameraSample {
+        if cameraHasTimeline, let b = selectedBlock {
+            return CameraSample(centerX: b.centerX, centerY: b.centerY,
+                                scale: b.scale, opacity: b.visible ? 1 : 0)
+        }
+        return cameraHome
+    }
+    /// Whether the interactive PiP box is shown. Static mode: while visible.
+    /// Timeline mode: a block is selected (edits its target), or nothing is
+    /// selected and the playhead sits before the first block (edits home).
+    var showsCameraOverlay: Bool {
+        guard hasCameraTrack else { return false }
+        guard cameraHasTimeline else { return cameraVisible }
+        if selectedBlock != nil { return true }
+        if let first = cameraBlocks.first, currentTime < first.begin { return true }
+        return false
+    }
     /// Camera feed size after the 90° orientation step — width/height swapped
     /// at 90/270 so PiP aspect and feed crop track the rotated content.
     var cameraOrientedSize: CGSize? {
@@ -137,6 +176,7 @@ final class StudioModel: ObservableObject {
     /// cursor/click overlay (layer instructions can't draw per-frame motion).
     var needsCompositor: Bool {
         cameraNeedsCompositor
+            || cameraHasTimeline
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
     }
@@ -213,6 +253,7 @@ final class StudioModel: ObservableObject {
             cropCenterX = min(max(0, edit.cropCenterX), 1)
             cropCenterY = min(max(0, edit.cropCenterY), 1)
             cropZoom = min(max(0.2, edit.cropZoom), 1)
+            cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             applyVideoComposition()
             applyAudioMix()
 
@@ -410,10 +451,13 @@ final class StudioModel: ObservableObject {
 
     // MARK: - Camera PiP
 
-    /// PiP rect in render-space pixels for the current camera settings.
+    /// PiP rect in render-space pixels for the placement the overlay edits
+    /// (selected breakpoint when on the timeline, else the static placement).
     var cameraPipRect: CGRect? {
         guard let cameraOrientedSize, renderSize.width > 0 else { return nil }
-        return pipRect(in: renderSize, cameraSize: cameraOrientedSize)
+        let s = editingCameraSample
+        return pipRect(in: renderSize, cameraSize: cameraOrientedSize,
+                       centerX: s.centerX, centerY: s.centerY, scale: s.scale)
     }
 
     /// PiP rect for an arbitrary canvas — settings are normalized, so the
@@ -421,13 +465,19 @@ final class StudioModel: ObservableObject {
     /// PiP height keys off the visible feed crop's aspect so the camera fills
     /// the frame without distortion when zoomed/panned.
     private func pipRect(in canvas: CGSize, cameraSize: CGSize) -> CGRect {
-        let width = canvas.width * cameraScale
+        pipRect(in: canvas, cameraSize: cameraSize, centerX: cameraCenterX,
+                centerY: cameraCenterY, scale: cameraScale)
+    }
+
+    private func pipRect(in canvas: CGSize, cameraSize: CGSize,
+                         centerX: Double, centerY: Double, scale: Double) -> CGRect {
+        let width = canvas.width * scale
         let cropSize = cameraCropRectInFeed?.size ?? cameraSize
         let aspect = cropSize.height > 0 ? cropSize.width / cropSize.height : 1
         let height = aspect > 0 ? width / aspect : width
         return CGRect(
-            x: cameraCenterX * canvas.width - width / 2,
-            y: cameraCenterY * canvas.height - height / 2,
+            x: centerX * canvas.width - width / 2,
+            y: centerY * canvas.height - height / 2,
             width: width, height: height
         )
     }
@@ -451,6 +501,110 @@ final class StudioModel: ObservableObject {
 
     /// Persist camera PiP settings; call at gesture end, not per drag tick.
     func commitCameraEdit() {
+        saveEdit()
+    }
+
+    /// Live PiP move during overlay drag → the selected block's target when on
+    /// the timeline, else the home placement.
+    func dragCameraCenter(x: Double, y: Double) {
+        let cx = min(max(x, 0), 1)
+        let cy = min(max(y, 0), 1)
+        if cameraHasTimeline, let id = selectedBlockID,
+           let i = cameraBlocks.firstIndex(where: { $0.id == id }) {
+            cameraBlocks[i].centerX = cx
+            cameraBlocks[i].centerY = cy
+        } else {
+            cameraCenterX = cx
+            cameraCenterY = cy
+        }
+        applyVideoComposition()
+    }
+
+    /// Live PiP resize during overlay drag → selected block's target or home.
+    func dragCameraScale(_ value: Double) {
+        let s = min(max(value, 0.08), 0.8)
+        if cameraHasTimeline, let id = selectedBlockID,
+           let i = cameraBlocks.firstIndex(where: { $0.id == id }) {
+            cameraBlocks[i].scale = s
+        } else {
+            cameraScale = s
+        }
+        applyVideoComposition()
+    }
+
+    // MARK: - Camera timeline (blocks)
+
+    /// Camera state sampled at `t` from the current blocks + home.
+    private func sampledCameraState(at t: Double) -> CameraSample {
+        CameraTimeline.sample(at: t, blocks: cameraBlocks, home: cameraHome)
+    }
+
+    /// Add a block at the playhead, taking the camera's current look as its
+    /// target so nothing jumps until the user edits it. Home (the static
+    /// placement) covers the time before the first block, so no seeding needed.
+    func addBlock() {
+        let t = min(max(currentTime, 0), duration)
+        let placement = sampledCameraState(at: t)
+        let added = CameraTimeline.add(cameraBlocks, atTime: t,
+                                       width: Self.defaultBlockWidth,
+                                       duration: duration, placement: placement)
+        setBlocks(added.blocks, select: added.id)
+    }
+
+    /// Live begin-edge drag; persist with `commitBlockEdit`.
+    func moveBlockBegin(_ id: UUID, toTime: Double) {
+        cameraBlocks = CameraTimeline.moveBegin(cameraBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live end-edge drag; persist with `commitBlockEdit`.
+    func moveBlockEnd(_ id: UUID, toTime: Double) {
+        cameraBlocks = CameraTimeline.moveEnd(cameraBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live whole-block drag (keeps width); persist with `commitBlockEdit`.
+    func moveBlock(_ id: UUID, toBegin: Double) {
+        cameraBlocks = CameraTimeline.moveBlock(cameraBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitBlockEdit() {
+        saveEdit()
+    }
+
+    func removeBlock(_ id: UUID) {
+        let list = CameraTimeline.remove(cameraBlocks, id: id)
+        setBlocks(list, select: selectedBlockID == id ? nil : selectedBlockID)
+    }
+
+    func toggleBlockVisible(_ id: UUID) {
+        guard let i = cameraBlocks.firstIndex(where: { $0.id == id }) else { return }
+        cameraBlocks[i].visible.toggle()
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Select a block and park the playhead at its settled (end) state so the
+    /// preview shows exactly what the overlay edits. Pass nil to deselect.
+    func selectBlock(_ id: UUID?) {
+        selectedBlockID = id
+        if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
+            seek(to: min(b.end, duration))
+        }
+    }
+
+    /// Replace the block list. Adding the first / removing the last flips the
+    /// compositor on/off (and the preview canvas cap), so refresh the player
+    /// item when `needsCompositor` changes, like the camera-style path.
+    private func setBlocks(_ list: [CameraBlock], select id: UUID?) {
+        let was = needsCompositor
+        cameraBlocks = list
+        selectedBlockID = id
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
         saveEdit()
     }
 
@@ -644,7 +798,7 @@ final class StudioModel: ObservableObject {
               let screenTrack = composition.track(withTrackID: screenTrackID) else {
             return nil
         }
-        let cameraShown = cameraVisible && cameraTrackID != nil
+        let cameraShown = cameraTrackID != nil && (cameraVisible || cameraHasTimeline)
         guard cameraShown || cropActive || needsCompositor else { return nil }
         let canvas = canvasOverride ?? renderSize
         guard canvas.width > 0 else { return nil }
@@ -721,17 +875,21 @@ final class StudioModel: ObservableObject {
         if cameraTrackID != nil, let oriented = cameraOrientedSize {
             let pip = pipRect(in: canvas, cameraSize: oriented)
             let feedCrop = cameraCropRectInFeed ?? CGRect(origin: .zero, size: oriented)
-            let minSide = min(pip.width, pip.height)
             layout.feedSize = oriented
             layout.feedCrop = feedCrop
             layout.pip = pip
             layout.shape = cameraShape
-            layout.cornerRadiusPx = cameraCornerRadius * minSide / 2
-            layout.borderWidthPx = cameraBorderWidth * pip.width
+            layout.cornerRadiusFrac = CGFloat(cameraCornerRadius)
+            layout.borderWidthFrac = CGFloat(cameraBorderWidth)
             layout.borderColor = Self.cgColor(hex: cameraBorderHex)
             layout.shadow = cameraShadow
             layout.shadowRadius = CGFloat(cameraShadowRadius)
             layout.cameraQuarterTurns = cameraRotation / 90
+            // Time-varying camera: hand the compositor the blocks so it can
+            // place + fade the PiP per frame, easing from the home placement.
+            if cameraHasTimeline {
+                layout.cameraTimeline = CameraTimelineSpec(blocks: cameraBlocks, home: cameraHome)
+            }
         } else {
             layout.cameraTrackID = nil
         }
@@ -888,7 +1046,8 @@ final class StudioModel: ObservableObject {
             cropAspect: cropAspect,
             cropCenterX: cropCenterX,
             cropCenterY: cropCenterY,
-            cropZoom: cropZoom
+            cropZoom: cropZoom,
+            cameraBlocks: cameraBlocks
         )
         try? bundle.writeEdit(edit)
     }

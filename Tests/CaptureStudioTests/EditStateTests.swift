@@ -192,4 +192,25 @@ import Foundation
         let json = String(data: data, encoding: .utf8)!
         #expect(!json.contains("trimOut"))
     }
+
+    @Test func cameraBlocksRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let blocks = [
+            CameraBlock(begin: 0, end: 1, visible: true, centerX: 0.2, centerY: 0.3, scale: 0.25),
+            CameraBlock(begin: 4.5, end: 5.2, visible: false, centerX: 0.8, centerY: 0.7, scale: 0.4),
+        ]
+        let edit = EditState(cameraBlocks: blocks)
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().cameraBlocks == blocks)
+    }
+
+    @Test func legacyEditJSONDefaultsBlocksEmpty() throws {
+        let json = #"{"schemaVersion":1,"trimIn":2.0}"#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.cameraBlocks.isEmpty)
+    }
 }
