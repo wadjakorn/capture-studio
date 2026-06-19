@@ -56,21 +56,20 @@ struct CameraPipOverlay: View {
                     .gesture(resizeGesture(viewScale: viewScale, pipView: pipView))
             }
         }
-        .allowsHitTesting(model.cameraVisible && model.hasCameraTrack)
+        .allowsHitTesting(model.showsCameraOverlay)
     }
 
     private func moveGesture(viewScale: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
                 if dragStartCenter == nil {
-                    dragStartCenter = CGPoint(x: model.cameraCenterX, y: model.cameraCenterY)
+                    let s = model.editingCameraSample
+                    dragStartCenter = CGPoint(x: s.centerX, y: s.centerY)
                 }
                 guard let start = dragStartCenter else { return }
                 let dx = Double(value.translation.width / viewScale) / model.renderSize.width
                 let dy = Double(value.translation.height / viewScale) / model.renderSize.height
-                model.cameraCenterX = min(max(start.x + dx, 0), 1)
-                model.cameraCenterY = min(max(start.y + dy, 0), 1)
-                model.applyVideoComposition()
+                model.dragCameraCenter(x: start.x + dx, y: start.y + dy)
             }
             .onEnded { _ in
                 dragStartCenter = nil
@@ -81,12 +80,11 @@ struct CameraPipOverlay: View {
     private func resizeGesture(viewScale: CGFloat, pipView: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
-                if resizeStartScale == nil { resizeStartScale = model.cameraScale }
+                if resizeStartScale == nil { resizeStartScale = model.editingCameraSample.scale }
                 guard let start = resizeStartScale else { return }
                 let dw = Double(value.translation.width / viewScale) / model.renderSize.width
                 // Dragging the corner outward grows width; center stays put.
-                model.cameraScale = min(max(start + dw * 2, 0.08), 0.8)
-                model.applyVideoComposition()
+                model.dragCameraScale(start + dw * 2)
             }
             .onEnded { _ in
                 resizeStartScale = nil

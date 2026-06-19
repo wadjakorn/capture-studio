@@ -69,6 +69,33 @@ enum CameraAspect: String, Codable, CaseIterable, Equatable {
     }
 }
 
+/// One camera transition span on the screen-track timeline. The camera eases
+/// from the previous block's settled placement (or the static "home" placement
+/// for the first block) into this block's placement over `[begin, end]`, then
+/// holds it until the next block. `begin == end` is a hard cut. Blocks never
+/// overlap (camera is a single instance). Position/scale match the static
+/// `cameraCenterX/Y` / `cameraScale` units; `visible` drives a show/hide fade.
+struct CameraBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var visible: Bool
+    var centerX: Double
+    var centerY: Double
+    var scale: Double
+
+    init(id: UUID = UUID(), begin: Double, end: Double, visible: Bool,
+         centerX: Double, centerY: Double, scale: Double) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.visible = visible
+        self.centerX = centerX
+        self.centerY = centerY
+        self.scale = scale
+    }
+}
+
 /// Studio edit state persisted as edit.json inside the bundle.
 /// All edits are metadata — master files are never mutated.
 struct EditState: Codable, Equatable {
@@ -121,6 +148,11 @@ struct EditState: Codable, Equatable {
     var cropCenterX: Double = 0.5
     var cropCenterY: Double = 0.5
     var cropZoom: Double = 1.0
+    /// Camera timeline. Empty = static placement (the `camera*` fields above
+    /// drive everything, exactly as before, and serve as the "home" placement).
+    /// Non-empty = blocks drive position/scale/visibility over time, easing
+    /// from home / the previous block into each block over its span.
+    var cameraBlocks: [CameraBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
@@ -134,7 +166,8 @@ struct EditState: Codable, Equatable {
          micVolume: Double = 1.0, systemVolume: Double = 1.0,
          showCursor: Bool = true, clickFeedback: Bool = false,
          cropAspect: CropAspect = .original, cropCenterX: Double = 0.5,
-         cropCenterY: Double = 0.5, cropZoom: Double = 1.0) {
+         cropCenterY: Double = 0.5, cropZoom: Double = 1.0,
+         cameraBlocks: [CameraBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
@@ -160,6 +193,7 @@ struct EditState: Codable, Equatable {
         self.cropCenterX = cropCenterX
         self.cropCenterY = cropCenterY
         self.cropZoom = cropZoom
+        self.cameraBlocks = cameraBlocks
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -196,6 +230,7 @@ struct EditState: Codable, Equatable {
         cropCenterX = try c.decodeIfPresent(Double.self, forKey: .cropCenterX) ?? 0.5
         cropCenterY = try c.decodeIfPresent(Double.self, forKey: .cropCenterY) ?? 0.5
         cropZoom = try c.decodeIfPresent(Double.self, forKey: .cropZoom) ?? 1.0
+        cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
     }
 }
 
