@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import CoreGraphics
+import CoreText
 import Metal
 
 /// Geometry + styling for one composed frame. All rects are in top-left
@@ -38,6 +39,12 @@ struct CompositorLayout {
     /// breakpoints instead of the static `pip`. nil = static placement.
     var cameraTimeline: CameraTimelineSpec?
 
+    /// On-screen text/caption blocks (rendered topmost). nil / empty = none.
+    var textTimeline: TextTimelineSpec?
+    /// The text block currently edited live on the canvas, suppressed in the
+    /// composited preview so it isn't drawn twice. nil = render all active.
+    var editingTextBlockID: UUID?
+
     // Cursor / click overlays (composited from events.jsonl).
     var showCursor: Bool = false
     var clickFeedback: Bool = false
@@ -51,6 +58,13 @@ struct CompositorLayout {
 struct CameraTimelineSpec {
     var blocks: [CameraBlock]
     var home: CameraSample
+}
+
+/// The on-screen text/caption blocks for a composition. Array order is the
+/// z-order (later draws on top); the compositor renders all blocks active at the
+/// frame time.
+struct TextTimelineSpec {
+    var blocks: [TextBlock]
 }
 
 /// Frame-shape mask, optional border ring, and drop shadow for a camera PiP —
@@ -212,6 +226,11 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     private var cachedDecorations: CameraDecorations?
     private let decorationsLock = NSLock()
 
+    /// Rendered text images keyed by content+style+canvas (position excluded, so
+    /// a moved block reuses its render). A held caption renders once.
+    private var textCache: [TextCacheKey: CIImage] = [:]
+    private let textCacheLock = NSLock()
+
     let sourcePixelBufferAttributes: [String: any Sendable]? = [
         kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_32BGRA],
         kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -256,6 +275,17 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                            overlay: instruction.overlay) {
                 output = cursor.composited(over: output)
+            }
+
+            // Text/captions sit topmost. All blocks active at `now`, in array
+            // (z) order, except the one being edited live on the canvas.
+            if let spec = layout.textTimeline {
+                for block in TextTimeline.active(at: now, blocks: spec.blocks)
+                where block.id != layout.editingTextBlockID {
+                    if let text = textImage(block, canvas: layout.canvas) {
+                        output = text.composited(over: output)
+                    }
+                }
             }
 
             output = output.cropped(to: CGRect(origin: .zero, size: layout.canvas))
@@ -452,6 +482,178 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 .transformed(by: CGAffineTransform(translationX: tx, y: ty)))
         }
         return out
+    }
+
+    // MARK: - Text / caption overlays
+
+    /// Cache identity for a rendered text image: everything that affects the
+    /// pixels (content + style + canvas), but NOT position — a moved block keeps
+    /// its render. Begin/end and id are irrelevant to the pixels.
+    private struct TextCacheKey: Hashable {
+        let text: String
+        let fontName: String
+        let fontSize: Double
+        let fontWeight: TextWeight
+        let colorHex: String
+        let alignment: TextAlignmentH
+        let boxEnabled: Bool
+        let boxHex: String
+        let boxOpacity: Double
+        let strokeWidth: Double
+        let strokeHex: String
+        let shadow: Bool
+        let canvasW: Double
+        let canvasH: Double
+
+        init(_ b: TextBlock, canvas: CGSize) {
+            text = b.text; fontName = b.fontName; fontSize = b.fontSize
+            fontWeight = b.fontWeight; colorHex = b.colorHex; alignment = b.alignment
+            boxEnabled = b.boxEnabled; boxHex = b.boxHex; boxOpacity = b.boxOpacity
+            strokeWidth = b.strokeWidth; strokeHex = b.strokeHex; shadow = b.shadow
+            canvasW = canvas.width; canvasH = canvas.height
+        }
+    }
+
+    /// Rendered, positioned text image for a block, or nil if it has no visible
+    /// content. The render (content/style/canvas) is cached; the position
+    /// transform is applied per call.
+    private func textImage(_ block: TextBlock, canvas: CGSize) -> CIImage? {
+        guard !block.text.isEmpty, canvas.width > 1, canvas.height > 1 else { return nil }
+        let key = TextCacheKey(block, canvas: canvas)
+
+        let base: CIImage
+        textCacheLock.lock()
+        if let cached = textCache[key] {
+            base = cached
+            textCacheLock.unlock()
+        } else {
+            textCacheLock.unlock()
+            guard let rendered = Self.renderText(block, canvas: canvas) else { return nil }
+            textCacheLock.lock()
+            if textCache.count > 64 { textCache.removeAll() }   // bound memory
+            textCache[key] = rendered
+            base = rendered
+            textCacheLock.unlock()
+        }
+
+        // Center the image at (centerX, centerY) in top-left canvas coords, then
+        // map to Core Image's bottom-left space (cursor/click use the same flip).
+        let w = base.extent.width, h = base.extent.height
+        let topLeftX = CGFloat(block.centerX) * canvas.width - w / 2
+        let topLeftY = CGFloat(block.centerY) * canvas.height - h / 2
+        let tx = topLeftX
+        let ty = canvas.height - topLeftY - h
+        return base.transformed(by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
+    }
+
+    /// Draw a text block to a CIImage via Core Text — off-main-thread safe (no
+    /// AppKit / SwiftUI), which matters because this runs on the compositor
+    /// queue and the app is built with Command Line Tools only.
+    private static func renderText(_ block: TextBlock, canvas: CGSize) -> CIImage? {
+        let fontSize = max(1, CGFloat(block.fontSize) * canvas.height)
+        let font = ctFont(name: block.fontName, size: fontSize, weight: block.fontWeight)
+
+        var alignment: CTTextAlignment = {
+            switch block.alignment {
+            case .leading: return .left
+            case .center: return .center
+            case .trailing: return .right
+            }
+        }()
+        let paragraph = withUnsafeMutablePointer(to: &alignment) { ptr -> CTParagraphStyle in
+            var setting = CTParagraphStyleSetting(spec: .alignment,
+                                                  valueSize: MemoryLayout<CTTextAlignment>.size,
+                                                  value: ptr)
+            return CTParagraphStyleCreate(&setting, 1)
+        }
+
+        var attrs: [NSAttributedString.Key: Any] = [
+            .init(kCTFontAttributeName as String): font,
+            .init(kCTForegroundColorAttributeName as String): cgColor(hex: block.colorHex, alpha: 1),
+            .init(kCTParagraphStyleAttributeName as String): paragraph,
+        ]
+        if block.strokeWidth > 0 {
+            // Negative width = fill + stroke; magnitude is a percent of font size.
+            attrs[.init(kCTStrokeWidthAttributeName as String)] = -Double(block.strokeWidth) * 100
+            attrs[.init(kCTStrokeColorAttributeName as String)] = cgColor(hex: block.strokeHex, alpha: 1)
+        }
+        let attr = NSAttributedString(string: block.text, attributes: attrs)
+
+        let maxWidth = canvas.width * 0.9
+        let framesetter = CTFramesetterCreateWithAttributedString(attr as CFAttributedString)
+        let full = CFRange(location: 0, length: attr.length)
+        let fit = CTFramesetterSuggestFrameSizeWithConstraints(
+            framesetter, full, nil,
+            CGSize(width: maxWidth, height: .greatestFiniteMagnitude), nil)
+        let textW = ceil(fit.width), textH = ceil(fit.height)
+        guard textW > 0, textH > 0 else { return nil }
+
+        let boxPadX = block.boxEnabled ? fontSize * 0.4 : 0
+        let boxPadY = block.boxEnabled ? fontSize * 0.25 : 0
+        let pad = ceil(max(block.shadow ? fontSize * 0.25 : 0,
+                           CGFloat(block.strokeWidth) * fontSize)) + 2
+        let contentW = textW + boxPadX * 2
+        let contentH = textH + boxPadY * 2
+        let imgW = Int((contentW + pad * 2).rounded())
+        let imgH = Int((contentH + pad * 2).rounded())
+        guard imgW > 0, imgH > 0,
+              let ctx = CGContext(data: nil, width: imgW, height: imgH,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+
+        if block.boxEnabled {
+            let boxRect = CGRect(x: pad, y: pad, width: contentW, height: contentH)
+            let radius = min(boxPadY, fontSize * 0.2)
+            ctx.setFillColor(cgColor(hex: block.boxHex,
+                                     alpha: CGFloat(min(max(0, block.boxOpacity), 1))))
+            ctx.addPath(CGPath(roundedRect: boxRect, cornerWidth: radius,
+                               cornerHeight: radius, transform: nil))
+            ctx.fillPath()
+        }
+        if block.shadow {
+            ctx.setShadow(offset: CGSize(width: 0, height: -max(1, fontSize * 0.04)),
+                          blur: max(1, fontSize * 0.08),
+                          color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.6))
+        }
+
+        let textRect = CGRect(x: pad + boxPadX, y: pad + boxPadY, width: textW, height: textH)
+        let frame = CTFramesetterCreateFrame(framesetter, full,
+                                             CGPath(rect: textRect, transform: nil), nil)
+        CTFrameDraw(frame, ctx)
+
+        return ctx.makeImage().map { CIImage(cgImage: $0) }
+    }
+
+    /// CTFont for a family name + size + weight. Falls back to a system font if
+    /// the family is unknown (CTFont never returns nil here).
+    private static func ctFont(name: String, size: CGFloat, weight: TextWeight) -> CTFont {
+        let w: CGFloat
+        switch weight {
+        case .regular: w = 0
+        case .medium: w = 0.23
+        case .semibold: w = 0.3
+        case .bold: w = 0.4
+        }
+        let attrs: [CFString: Any] = [
+            kCTFontFamilyNameAttribute: name,
+            kCTFontTraitsAttribute: [kCTFontWeightTrait: w],
+        ]
+        let desc = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+        return CTFontCreateWithFontDescriptor(desc, size, nil)
+    }
+
+    /// Parses "#RRGGBB" (or "RRGGBB") with an explicit alpha; falls back to white.
+    private static func cgColor(hex: String, alpha: CGFloat) -> CGColor {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else {
+            return CGColor(red: 1, green: 1, blue: 1, alpha: alpha)
+        }
+        return CGColor(red: CGFloat((v >> 16) & 0xFF) / 255,
+                       green: CGFloat((v >> 8) & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: alpha)
     }
 
     /// Top-left rect → Core Image bottom-left rect, given the container height.

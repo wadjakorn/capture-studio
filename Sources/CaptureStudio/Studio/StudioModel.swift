@@ -45,6 +45,15 @@ final class StudioModel: ObservableObject {
     @Published var selectedBlockID: UUID?
     /// Default width of a newly added block (seconds).
     static let defaultBlockWidth = 0.5
+    // Text/caption timeline. Multiple instances, MAY overlap in time; array
+    // order is the z-order (later = on top) and is never re-sorted. The selected
+    // block is the one the lane + style bar + canvas overlay edit; the editing
+    // block is the one with its inline canvas editor open. Persisted to edit.json.
+    @Published private(set) var textBlocks: [TextBlock] = []
+    @Published var selectedTextBlockID: UUID?
+    @Published var editingTextBlockID: UUID?
+    /// Default width of a newly added text block (seconds).
+    static let defaultTextWidth = 3.0
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
     // 0–1 in the camera's own space. Persisted to edit.json.
     @Published var cameraZoom = 1.0
@@ -69,6 +78,10 @@ final class StudioModel: ObservableObject {
     var selectedBlock: CameraBlock? {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
+    }
+    var selectedTextBlock: TextBlock? {
+        guard let id = selectedTextBlockID else { return nil }
+        return textBlocks.first { $0.id == id }
     }
     /// The static "home" placement — the camera's resting state, held before the
     /// first block and used as the first block's "from".
@@ -177,6 +190,7 @@ final class StudioModel: ObservableObject {
     var needsCompositor: Bool {
         cameraNeedsCompositor
             || cameraHasTimeline
+            || !textBlocks.isEmpty
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
     }
@@ -254,6 +268,8 @@ final class StudioModel: ObservableObject {
             cropCenterY = min(max(0, edit.cropCenterY), 1)
             cropZoom = min(max(0.2, edit.cropZoom), 1)
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
+            // Stored verbatim — array order is the z-order, never re-sorted.
+            textBlocks = edit.textBlocks
             applyVideoComposition()
             applyAudioMix()
 
@@ -585,10 +601,153 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    // MARK: - Text timeline (captions)
+
+    /// Replace the text-block list (preserving its array order = z-order). Adding
+    /// the first / removing the last flips the compositor on/off, so refresh the
+    /// player item when `needsCompositor` changes, mirroring `setBlocks`.
+    private func setTextBlocks(_ list: [TextBlock], select id: UUID?) {
+        let was = needsCompositor
+        textBlocks = list
+        selectedTextBlockID = id
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Select a text block (clears any camera-block selection) and park the
+    /// playhead inside its span so the preview shows it. Pass nil to deselect.
+    func selectTextBlock(_ id: UUID?) {
+        selectedTextBlockID = id
+        if id != nil { selectedBlockID = nil }
+        if let id, let b = textBlocks.first(where: { $0.id == id }),
+           !(b.begin <= currentTime && currentTime < b.end) {
+            seek(to: min(b.begin, duration))
+        }
+    }
+
+    /// Add an empty default text block at the playhead and select it.
+    func addTextBlock() {
+        let t = min(max(currentTime, 0), duration)
+        let added = TextTimeline.add(textBlocks, atTime: t, width: Self.defaultTextWidth,
+                                     duration: duration,
+                                     template: TextBlock(begin: 0, end: 0))
+        setTextBlocks(added.blocks, select: added.id)
+    }
+
+    func removeTextBlock(_ id: UUID) {
+        let list = TextTimeline.remove(textBlocks, id: id)
+        if editingTextBlockID == id { editingTextBlockID = nil }
+        setTextBlocks(list, select: selectedTextBlockID == id ? nil : selectedTextBlockID)
+    }
+
+    /// Live begin-edge drag; persist with `commitTextEdit`.
+    func moveTextBlockBegin(_ id: UUID, toTime: Double) {
+        textBlocks = TextTimeline.moveBegin(textBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live end-edge drag; persist with `commitTextEdit`.
+    func moveTextBlockEnd(_ id: UUID, toTime: Double) {
+        textBlocks = TextTimeline.moveEnd(textBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live whole-block drag (keeps width); persist with `commitTextEdit`.
+    func moveTextBlock(_ id: UUID, toBegin: Double) {
+        textBlocks = TextTimeline.moveBlock(textBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitTextEdit() {
+        saveEdit()
+    }
+
+    /// Open the canvas inline editor for a block: select it and suppress it in
+    /// the composited preview (drawn by the live overlay instead) so it isn't
+    /// rendered twice.
+    func beginEditingText(_ id: UUID) {
+        selectTextBlock(id)
+        editingTextBlockID = id
+        applyVideoComposition()
+    }
+
+    /// Close the canvas inline editor: un-suppress the block and persist.
+    func endEditingText() {
+        guard editingTextBlockID != nil else { return }
+        editingTextBlockID = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Mutate one block in place (preserves array order / z-order) and refresh
+    /// the preview live. Does NOT persist — call `commitTextEdit` at gesture /
+    /// edit end, mirroring the camera drag/commit split.
+    private func updateTextBlock(_ id: UUID, _ mutate: (inout TextBlock) -> Void) {
+        guard let i = textBlocks.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&textBlocks[i])
+        applyVideoComposition()
+    }
+
+    func setText(_ text: String, for id: UUID) {
+        updateTextBlock(id) { $0.text = text }
+    }
+
+    func setTextPosition(x: Double, y: Double, for id: UUID) {
+        updateTextBlock(id) {
+            $0.centerX = min(max(0, x), 1)
+            $0.centerY = min(max(0, y), 1)
+        }
+    }
+
+    // MARK: Text z-order
+
+    func bringTextForward(_ id: UUID) {
+        setTextBlocks(TextTimeline.bringForward(textBlocks, id: id), select: selectedTextBlockID)
+    }
+
+    func sendTextBackward(_ id: UUID) {
+        setTextBlocks(TextTimeline.sendBackward(textBlocks, id: id), select: selectedTextBlockID)
+    }
+
+    func moveTextToFront(_ id: UUID) {
+        setTextBlocks(TextTimeline.moveToFront(textBlocks, id: id), select: selectedTextBlockID)
+    }
+
+    func moveTextToBack(_ id: UUID) {
+        setTextBlocks(TextTimeline.moveToBack(textBlocks, id: id), select: selectedTextBlockID)
+    }
+
+    // MARK: Text style (operate on the selected block)
+
+    /// Mutate the selected text block live. Discrete edits pass `commit: true`
+    /// to persist immediately; slider drags pass `false` and persist on end via
+    /// `commitTextEdit`.
+    private func updateSelectedText(commit: Bool, _ mutate: (inout TextBlock) -> Void) {
+        guard let id = selectedTextBlockID else { return }
+        updateTextBlock(id, mutate)
+        if commit { saveEdit() }
+    }
+
+    func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
+    func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
+    func setTextWeight(_ w: TextWeight) { updateSelectedText(commit: true) { $0.fontWeight = w } }
+    func setTextColorHex(_ hex: String) { updateSelectedText(commit: true) { $0.colorHex = hex } }
+    func setTextAlignment(_ a: TextAlignmentH) { updateSelectedText(commit: true) { $0.alignment = a } }
+    func setTextBoxEnabled(_ on: Bool) { updateSelectedText(commit: true) { $0.boxEnabled = on } }
+    func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true) { $0.boxHex = hex } }
+    func setTextBoxOpacity(_ v: Double) { updateSelectedText(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
+    func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
+    func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
+    func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
+
     /// Select a block and park the playhead at its settled (end) state so the
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
+        if id != nil { selectedTextBlockID = nil }   // camera vs text: one selection at a time
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
@@ -910,6 +1069,13 @@ final class StudioModel: ObservableObject {
             overlay.ringPixelSize = ringPixelSize
         }
 
+        // Text/caption blocks (rendered topmost). Skip the block being edited
+        // live on the canvas to avoid a doubled image.
+        if !textBlocks.isEmpty {
+            layout.textTimeline = TextTimelineSpec(blocks: textBlocks)
+            layout.editingTextBlockID = editingTextBlockID
+        }
+
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),
             layout: layout,
@@ -1047,7 +1213,8 @@ final class StudioModel: ObservableObject {
             cropCenterX: cropCenterX,
             cropCenterY: cropCenterY,
             cropZoom: cropZoom,
-            cameraBlocks: cameraBlocks
+            cameraBlocks: cameraBlocks,
+            textBlocks: textBlocks
         )
         try? bundle.writeEdit(edit)
     }

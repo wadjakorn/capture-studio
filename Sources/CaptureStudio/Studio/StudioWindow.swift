@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var showCameraStyle = false
+    @State private var showTextStyle = false
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -41,6 +42,9 @@ struct StudioView: View {
                     if model.showsCameraOverlay {
                         CameraPipOverlay(model: model)
                     }
+                    if model.selectedTextBlock != nil {
+                        TextCanvasOverlay(model: model)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -55,6 +59,9 @@ struct StudioView: View {
             laneRow("display") { timeline }
             if model.cameraHasTimeline {
                 laneRow("video.fill") { CameraTimelineLane(model: model) }
+            }
+            if !model.textBlocks.isEmpty {
+                laneRow("textformat") { TextTimelineLane(model: model) }
             }
 
             FlowLayout(hSpacing: 12, vSpacing: 8) {
@@ -213,6 +220,47 @@ struct StudioView: View {
                                 }
                                 .help("Show or hide the camera in this block")
                             }
+                        }
+                    }
+                }
+
+                // Text / caption cluster.
+                HStack(spacing: 8) {
+                    Button { model.addTextBlock() } label: {
+                        Image(systemName: "textformat")
+                    }
+                    .help("Add a text/caption block at the playhead")
+
+                    if model.selectedTextBlock != nil {
+                        Button {
+                            if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .help("Delete the selected text block")
+
+                        Button {
+                            if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
+                        } label: {
+                            Image(systemName: "arrow.down.square")
+                        }
+                        .help("Send the selected text backward")
+
+                        Button {
+                            if let id = model.selectedTextBlockID { model.bringTextForward(id) }
+                        } label: {
+                            Image(systemName: "arrow.up.square")
+                        }
+                        .help("Bring the selected text forward")
+
+                        Button {
+                            showTextStyle.toggle()
+                        } label: {
+                            Image(systemName: "paintbrush")
+                        }
+                        .help("Text style")
+                        .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
+                            textStylePopover
                         }
                     }
                 }
@@ -385,6 +433,125 @@ struct StudioView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Slider(value: value, in: range) { editing in
                 if !editing { model.commitCameraEdit() }
+            }
+        }
+    }
+
+    // MARK: - Text style
+
+    /// Curated font families (Core Text resolves by family name; unknown names
+    /// fall back to the system font).
+    private static let fontFamilies = [
+        "Helvetica", "Helvetica Neue", "Arial", "Avenir Next",
+        "Georgia", "Futura", "Menlo", "Times New Roman",
+    ]
+
+    @ViewBuilder
+    private var textStylePopover: some View {
+        let block = model.selectedTextBlock
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Font", selection: Binding(
+                    get: { block?.fontName ?? "Helvetica" },
+                    set: { model.setTextFontName($0) }
+                )) {
+                    ForEach(Self.fontFamilies, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+
+                Picker("Weight", selection: Binding(
+                    get: { block?.fontWeight ?? .semibold },
+                    set: { model.setTextWeight($0) }
+                )) {
+                    ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+
+                Picker("Align", selection: Binding(
+                    get: { block?.alignment ?? .center },
+                    set: { model.setTextAlignment($0) }
+                )) {
+                    Image(systemName: "text.alignleft").tag(TextAlignmentH.leading)
+                    Image(systemName: "text.aligncenter").tag(TextAlignmentH.center)
+                    Image(systemName: "text.alignright").tag(TextAlignmentH.trailing)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+
+                styleSliderText("Size", value: Binding(
+                    get: { block?.fontSize ?? 0.06 },
+                    set: { model.setTextFontSize($0) }
+                ), range: 0.02...0.2)
+
+                textColorRow("Color", hex: block?.colorHex ?? "#FFFFFF") {
+                    model.setTextColorHex($0)
+                }
+
+                Toggle("Background box", isOn: Binding(
+                    get: { block?.boxEnabled ?? false },
+                    set: { model.setTextBoxEnabled($0) }
+                ))
+                if block?.boxEnabled == true {
+                    textColorRow("Box color", hex: block?.boxHex ?? "#000000") {
+                        model.setTextBoxHex($0)
+                    }
+                    styleSliderText("Box opacity", value: Binding(
+                        get: { block?.boxOpacity ?? 0.5 },
+                        set: { model.setTextBoxOpacity($0) }
+                    ), range: 0...1)
+                }
+
+                styleSliderText("Outline", value: Binding(
+                    get: { block?.strokeWidth ?? 0 },
+                    set: { model.setTextStrokeWidth($0) }
+                ), range: 0...0.2)
+                if (block?.strokeWidth ?? 0) > 0 {
+                    textColorRow("Outline color", hex: block?.strokeHex ?? "#000000") {
+                        model.setTextStrokeHex($0)
+                    }
+                }
+
+                Toggle("Shadow", isOn: Binding(
+                    get: { block?.shadow ?? true },
+                    set: { model.setTextShadow($0) }
+                ))
+            }
+            .padding(14)
+        }
+        .frame(width: 248)
+        .frame(maxHeight: 420)
+    }
+
+    private func styleSliderText(_ title: String, value: Binding<Double>,
+                                 range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Slider(value: value, in: range) { editing in
+                if !editing { model.commitTextEdit() }
+            }
+        }
+    }
+
+    /// Preset swatches + custom picker for a text color field.
+    private func textColorRow(_ title: String, hex: String,
+                              set: @escaping (String) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                ForEach(Self.borderPresets, id: \.self) { h in
+                    let selected = h.caseInsensitiveCompare(hex) == .orderedSame
+                    Circle()
+                        .fill(Color(hexString: h))
+                        .frame(width: 18, height: 18)
+                        .overlay(Circle().strokeBorder(.secondary.opacity(0.4), lineWidth: 0.5))
+                        .overlay(Circle().strokeBorder(Color.accentColor,
+                                                       lineWidth: selected ? 2.5 : 0).padding(-2))
+                        .onTapGesture { set(h) }
+                }
+                ColorPicker("", selection: Binding(
+                    get: { Color(hexString: hex) },
+                    set: { set($0.hexString()) }
+                ), supportsOpacity: false)
+                .labelsHidden()
             }
         }
     }

@@ -96,6 +96,127 @@ struct CameraBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// Text/caption font weight. Unknown raw strings (future versions) decode as
+/// `semibold`.
+enum TextWeight: String, Codable, CaseIterable, Equatable {
+    case regular, medium, semibold, bold
+
+    var displayName: String {
+        switch self {
+        case .regular: return "Regular"
+        case .medium: return "Medium"
+        case .semibold: return "Semibold"
+        case .bold: return "Bold"
+        }
+    }
+}
+
+/// Horizontal text alignment within a multi-line block. Unknown raw strings
+/// (future versions) decode as `center`.
+enum TextAlignmentH: String, Codable, CaseIterable, Equatable {
+    case leading, center, trailing
+}
+
+/// Where a text block came from. `manual` is hand-authored; the others are
+/// reserved for the auto-caption feature so generated lines drop into the same
+/// model. Unknown raw strings (future versions) decode as `manual`.
+enum TextSource: String, Codable, CaseIterable, Equatable {
+    case manual, systemAudio, microphone
+}
+
+/// One on-screen text/caption instance with a `[begin, end)` span. Unlike
+/// `CameraBlock`, text blocks MAY overlap in time — many can be active at once —
+/// and there is no single-instance constraint. Z-order is the array order in
+/// `EditState.textBlocks` (a later element draws on top). Position is the text
+/// center, normalized 0–1 in render space (top-left origin), matching the
+/// camera placement units. `fontSize` is a fraction of the canvas HEIGHT and
+/// `strokeWidth` a fraction of `fontSize`, so a block looks identical at preview
+/// size and full export resolution. `begin == end` is inert (never rendered).
+struct TextBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var text: String
+    var centerX: Double
+    var centerY: Double
+    // Style.
+    var fontName: String
+    var fontSize: Double
+    var fontWeight: TextWeight
+    var colorHex: String
+    var alignment: TextAlignmentH
+    var boxEnabled: Bool
+    var boxHex: String
+    var boxOpacity: Double
+    var strokeWidth: Double
+    var strokeHex: String
+    var shadow: Bool
+    // Forward-compat: distinguishes hand-authored vs. auto-generated captions.
+    var source: TextSource
+
+    init(id: UUID = UUID(), begin: Double, end: Double, text: String = "",
+         centerX: Double = 0.5, centerY: Double = 0.85,
+         fontName: String = "Helvetica", fontSize: Double = 0.06,
+         fontWeight: TextWeight = .semibold, colorHex: String = "#FFFFFF",
+         alignment: TextAlignmentH = .center, boxEnabled: Bool = false,
+         boxHex: String = "#000000", boxOpacity: Double = 0.5,
+         strokeWidth: Double = 0, strokeHex: String = "#000000",
+         shadow: Bool = true, source: TextSource = .manual) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.text = text
+        self.centerX = centerX
+        self.centerY = centerY
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.fontWeight = fontWeight
+        self.colorHex = colorHex
+        self.alignment = alignment
+        self.boxEnabled = boxEnabled
+        self.boxHex = boxHex
+        self.boxOpacity = boxOpacity
+        self.strokeWidth = strokeWidth
+        self.strokeHex = strokeHex
+        self.shadow = shadow
+        self.source = source
+    }
+
+    /// An empty 3 s block at `atTime`, clamped to the clip, centered lower-third.
+    static func makeDefault(at atTime: Double, duration: Double) -> TextBlock {
+        let begin = min(max(0, atTime), max(0, duration))
+        let end = min(begin + 3, max(begin, duration))
+        return TextBlock(begin: begin, end: end)
+    }
+
+    // Custom decode so bundles missing newer fields (or carrying an unknown
+    // future enum value) still load with sensible defaults, mirroring EditState.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        begin = try c.decodeIfPresent(Double.self, forKey: .begin) ?? 0
+        end = try c.decodeIfPresent(Double.self, forKey: .end) ?? 0
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        centerX = try c.decodeIfPresent(Double.self, forKey: .centerX) ?? 0.5
+        centerY = try c.decodeIfPresent(Double.self, forKey: .centerY) ?? 0.85
+        fontName = try c.decodeIfPresent(String.self, forKey: .fontName) ?? "Helvetica"
+        fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize) ?? 0.06
+        let weightRaw = try c.decodeIfPresent(String.self, forKey: .fontWeight)
+        fontWeight = weightRaw.flatMap(TextWeight.init(rawValue:)) ?? .semibold
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#FFFFFF"
+        let alignRaw = try c.decodeIfPresent(String.self, forKey: .alignment)
+        alignment = alignRaw.flatMap(TextAlignmentH.init(rawValue:)) ?? .center
+        boxEnabled = try c.decodeIfPresent(Bool.self, forKey: .boxEnabled) ?? false
+        boxHex = try c.decodeIfPresent(String.self, forKey: .boxHex) ?? "#000000"
+        boxOpacity = try c.decodeIfPresent(Double.self, forKey: .boxOpacity) ?? 0.5
+        strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
+        strokeHex = try c.decodeIfPresent(String.self, forKey: .strokeHex) ?? "#000000"
+        shadow = try c.decodeIfPresent(Bool.self, forKey: .shadow) ?? true
+        let sourceRaw = try c.decodeIfPresent(String.self, forKey: .source)
+        source = sourceRaw.flatMap(TextSource.init(rawValue:)) ?? .manual
+    }
+}
+
 /// Studio edit state persisted as edit.json inside the bundle.
 /// All edits are metadata — master files are never mutated.
 struct EditState: Codable, Equatable {
@@ -153,6 +274,10 @@ struct EditState: Codable, Equatable {
     /// Non-empty = blocks drive position/scale/visibility over time, easing
     /// from home / the previous block into each block over its span.
     var cameraBlocks: [CameraBlock] = []
+    /// On-screen text/caption blocks. Empty = no text. Blocks MAY overlap in
+    /// time (unlike `cameraBlocks`); render / z-order is the array order here
+    /// (later element = on top), so this is never re-sorted on store.
+    var textBlocks: [TextBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
@@ -167,7 +292,7 @@ struct EditState: Codable, Equatable {
          showCursor: Bool = true, clickFeedback: Bool = false,
          cropAspect: CropAspect = .original, cropCenterX: Double = 0.5,
          cropCenterY: Double = 0.5, cropZoom: Double = 1.0,
-         cameraBlocks: [CameraBlock] = []) {
+         cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
@@ -194,6 +319,7 @@ struct EditState: Codable, Equatable {
         self.cropCenterY = cropCenterY
         self.cropZoom = cropZoom
         self.cameraBlocks = cameraBlocks
+        self.textBlocks = textBlocks
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -231,6 +357,7 @@ struct EditState: Codable, Equatable {
         cropCenterY = try c.decodeIfPresent(Double.self, forKey: .cropCenterY) ?? 0.5
         cropZoom = try c.decodeIfPresent(Double.self, forKey: .cropZoom) ?? 1.0
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
+        textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
     }
 }
 
