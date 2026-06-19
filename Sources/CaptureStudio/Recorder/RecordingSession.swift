@@ -46,6 +46,11 @@ final class RecordingSession: ObservableObject {
     /// Region being recorded (display-local points), stashed at arm time so the
     /// countdown overlay can center on it. nil = full display.
     private var armedRegion: CGRect?
+    /// Display the recording is armed on, stashed at arm time. The countdown must
+    /// target this — NOT a displayID re-derived from the UI at the second trigger,
+    /// which can drift to another screen (the region stays display-2 but the param
+    /// arrives as display-3). Pairs with `armedRegion`.
+    private var armedDisplayID: CGDirectDisplayID?
 
     var isRecording: Bool {
         if case .recording = state { return true }
@@ -162,6 +167,7 @@ final class RecordingSession: ObservableObject {
             self.screenRecorder = screen
             self.displayInfo = item.displayInfo(region: region)
             self.armedRegion = region
+            self.armedDisplayID = displayID
             state = .armed
             Log.recorder.info("armed: \(bundle.url.lastPathComponent, privacy: .public)")
         } catch {
@@ -263,7 +269,7 @@ final class RecordingSession: ObservableObject {
         case .armed where counting:
             await cancelCountdownOrArming()
         case .armed:
-            await startCountdownThenBegin(displayID: displayID)
+            await startCountdownThenBegin()
         case .idle, .failed:
             await startFromIdle(displayID: displayID, cameraID: cameraID, micID: micID,
                                 systemAudio: systemAudio, region: region,
@@ -300,19 +306,22 @@ final class RecordingSession: ObservableObject {
         // a second trigger — for area mode this is the user's chance to check the
         // region outline before capture starts.
         if camera == nil, !previewFirst, isArmed {
-            await startCountdownThenBegin(displayID: displayID)
+            await startCountdownThenBegin()
         }
     }
 
     /// Runs the countdown overlay then begins recording. Stored as a task so a
     /// second trigger (or Cancel) can abort mid-countdown.
-    func startCountdownThenBegin(displayID: CGDirectDisplayID?) async {
+    func startCountdownThenBegin() async {
         guard isArmed, !counting else { return }
         counting = true
         // Preview's over — drop the dim before the countdown / recording shows.
         dimOverlay?.close()
         dimOverlay = nil
+        // Target the armed display + region (the recording's own target), not a
+        // UI-derived displayID that can point at the wrong screen.
         let region = armedRegion
+        let displayID = armedDisplayID
         let task = Task {
             await CountdownOverlay.run(seconds: AppSettings.countdownSeconds,
                                        displayID: displayID, region: region)
@@ -357,6 +366,7 @@ final class RecordingSession: ObservableObject {
         micRecorder = nil
         displayInfo = nil
         armedRegion = nil
+        armedDisplayID = nil
     }
 
     /// Stops all recorders, finalizes files, writes meta.json LAST
@@ -438,6 +448,7 @@ final class RecordingSession: ObservableObject {
         self.micRecorder = nil
         self.displayInfo = nil
         self.armedRegion = nil
+        self.armedDisplayID = nil
     }
 
     func resetFailure() {

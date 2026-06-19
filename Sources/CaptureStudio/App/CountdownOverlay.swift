@@ -33,6 +33,11 @@ enum CountdownOverlay {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.ignoresMouseEvents = true
+        // Recording runs with another app frontmost (area mode reactivates the
+        // prior app), so the panel must stay visible while CaptureStudio is
+        // inactive — same opt-out the region-outline / dim overlays use.
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
         container.wantsLayer = true
