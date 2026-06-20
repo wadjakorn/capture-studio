@@ -79,6 +79,9 @@ final class StudioModel: ObservableObject {
     var cameraShown: Bool { cameraVisible && cameraTrackID != nil }
     /// The camera has a block timeline driving it (vs. a static placement).
     var cameraHasTimeline: Bool { cameraTrackID != nil && !cameraBlocks.isEmpty }
+    /// The camera lane is shown only when the camera is visible *and* has a
+    /// block timeline. Toggling the camera off hides the lane (blocks retained).
+    var showsCameraTimeline: Bool { cameraVisible && cameraHasTimeline }
     var selectedBlock: CameraBlock? {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
@@ -107,6 +110,7 @@ final class StudioModel: ObservableObject {
     /// selected and the playhead sits before the first block (edits home).
     var showsCameraOverlay: Bool {
         guard hasCameraTrack else { return false }
+        guard cameraVisible else { return false }
         guard cameraHasTimeline else { return cameraVisible }
         if selectedBlock != nil { return true }
         if let first = cameraBlocks.first, currentTime < first.begin { return true }
@@ -571,6 +575,25 @@ final class StudioModel: ObservableObject {
         setBlocks(added.blocks, select: added.id)
     }
 
+    /// The block whose span strictly contains the playhead, if any. Used to
+    /// gate hide-block insertion (no overlapping blocks).
+    var blockAtPlayhead: CameraBlock? {
+        cameraBlocks.first { $0.begin <= currentTime && currentTime < $0.end }
+    }
+
+    /// Insert a "temporary hide" block at the playhead — a zero-opacity
+    /// placement so `CameraTimeline.add` produces a `visible == false` block,
+    /// fading the camera out over the block. Caller gates on `blockAtPlayhead`.
+    func addHideBlock() {
+        let t = min(max(currentTime, 0), duration)
+        var placement = sampledCameraState(at: t)
+        placement.opacity = 0
+        let added = CameraTimeline.add(cameraBlocks, atTime: t,
+                                       width: Self.defaultBlockWidth,
+                                       duration: duration, placement: placement)
+        setBlocks(added.blocks, select: added.id)
+    }
+
     /// Live begin-edge drag; persist with `commitBlockEdit`.
     func moveBlockBegin(_ id: UUID, toTime: Double) {
         cameraBlocks = CameraTimeline.moveBegin(cameraBlocks, id: id, toTime: toTime, duration: duration)
@@ -995,7 +1018,7 @@ final class StudioModel: ObservableObject {
               let screenTrack = composition.track(withTrackID: screenTrackID) else {
             return nil
         }
-        let cameraShown = cameraTrackID != nil && (cameraVisible || cameraHasTimeline)
+        let cameraShown = cameraTrackID != nil && cameraVisible
         guard cameraShown || cropActive || needsCompositor else { return nil }
         let canvas = canvasOverride ?? renderSize
         guard canvas.width > 0 else { return nil }
