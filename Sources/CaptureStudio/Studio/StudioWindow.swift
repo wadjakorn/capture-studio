@@ -57,7 +57,7 @@ struct StudioView: View {
             // Stacked lanes share a fixed leading icon gutter so every track
             // starts at the same x — keeping the playheads vertically aligned.
             laneRow("display") { timeline }
-            if model.cameraHasTimeline {
+            if model.showsCameraTimeline {
                 laneRow("video.fill") { CameraTimelineLane(model: model) }
             }
             if !model.textBlocks.isEmpty {
@@ -199,43 +199,51 @@ struct StudioView: View {
         .toggleStyle(.button)
         .help("Show/hide camera overlay")
 
-        if model.cameraVisible {
-            HStack(spacing: 4) {
-                Image(systemName: "person.crop.square").foregroundStyle(.secondary)
-                Slider(value: Binding(get: { model.cameraZoom },
-                                      set: { model.setCameraZoom($0) }),
-                       in: 1.0...4.0) { editing in
-                    if !editing { model.commitCameraEdit() }
-                }
-                .frame(width: 80)
-                .controlSize(.small)
-            }
-            .help("Camera zoom — ⌥-drag the camera to pan")
-
-            Button { showCameraStyle.toggle() } label: {
-                Image(systemName: "slider.horizontal.3")
-            }
-            .help("Camera frame & motion")
-            .popover(isPresented: $showCameraStyle, arrowEdge: .bottom) {
-                cameraStylePopover
-            }
+        // Style dropdown — all global camera config (zoom + frame style).
+        Button { showCameraStyle.toggle() } label: {
+            Image(systemName: "slider.horizontal.3")
         }
+        .disabled(!model.cameraVisible)
+        .help("Camera style — zoom, frame & shape")
+        .popover(isPresented: $showCameraStyle, arrowEdge: .bottom) {
+            cameraStylePopover
+        }
+
+        // Motion action group — add / delete / hide camera blocks.
+        Button { model.addBlock() } label: {
+            Label("Add move", systemImage: "plus.rectangle")
+        }
+        .disabled(!model.cameraVisible)
+        .help("Add a camera move block at the playhead")
+
+        Button {
+            if let id = model.selectedBlockID { model.removeBlock(id) }
+        } label: {
+            Image(systemName: "minus.rectangle")
+        }
+        .disabled(!model.cameraVisible || model.selectedBlockID == nil)
+        .help("Delete the selected move block")
+
+        Button { model.addHideBlock() } label: {
+            Image(systemName: "eye.slash")
+        }
+        .disabled(!model.cameraVisible || model.blockAtPlayhead != nil)
+        .help("Insert a temporary hide-camera block at the playhead")
     }
 
     @ViewBuilder private var textControls: some View {
         Button { model.addTextBlock() } label: {
-            Image(systemName: "textformat")
+            Image(systemName: "text.badge.plus")
         }
         .help("Add a text/caption block at the playhead")
 
-        if model.selectedTextBlock != nil {
-            Button { showTextStyle.toggle() } label: {
-                Image(systemName: "slider.horizontal.3")
-            }
-            .help("Edit text style, order, and delete")
-            .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
-                textStylePopover
-            }
+        Button { showTextStyle.toggle() } label: {
+            Image(systemName: "slider.horizontal.3")
+        }
+        .disabled(model.selectedTextBlock == nil)
+        .help("Edit text style, order, and delete")
+        .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
+            textStylePopover
         }
     }
 
@@ -288,6 +296,15 @@ struct StudioView: View {
 
     private var cameraStylePopover: some View {
         VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Zoom").font(.caption).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { model.cameraZoom },
+                                      set: { model.setCameraZoom($0) }),
+                       in: 1.0...4.0) { editing in
+                    if !editing { model.commitCameraEdit() }
+                }
+            }
+
             Picker("Shape", selection: Binding(
                 get: { model.cameraShape },
                 set: { model.setCameraShape($0) }
@@ -353,33 +370,6 @@ struct StudioView: View {
                     get: { model.cameraShadowRadius },
                     set: { model.setCameraShadowRadius($0) }
                 ), range: 0...1)
-            }
-
-            Divider()
-
-            Text("Camera motion").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Button { model.addBlock() } label: {
-                    Label("Add move", systemImage: "plus.rectangle")
-                }
-                .help("Add a camera move block at the playhead")
-
-                if model.cameraHasTimeline {
-                    Button {
-                        if let id = model.selectedBlockID { model.removeBlock(id) }
-                    } label: {
-                        Image(systemName: "minus.rectangle")
-                    }
-                    .disabled(model.selectedBlockID == nil)
-                    .help("Delete the selected move block")
-
-                    if let block = model.selectedBlock {
-                        Button { model.toggleBlockVisible(block.id) } label: {
-                            Image(systemName: block.visible ? "eye" : "eye.slash")
-                        }
-                        .help("Show or hide the camera in this block")
-                    }
-                }
             }
         }
         .padding(14)
@@ -547,7 +537,7 @@ struct StudioView: View {
             }
             .padding(14)
         }
-        .frame(width: 248)
+        .frame(width: 280)
         .frame(maxHeight: 420)
     }
 
@@ -566,7 +556,7 @@ struct StudioView: View {
                               set: @escaping (String) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
+            FlowLayout(hSpacing: 6, vSpacing: 6) {
                 ForEach(Self.borderPresets, id: \.self) { h in
                     let selected = h.caseInsensitiveCompare(hex) == .orderedSame
                     Circle()

@@ -157,6 +157,15 @@ import Foundation
         #expect(second.blocks[1].end == 9)
     }
 
+    @Test func addWithZeroOpacityPlacementMakesHiddenBlock() {
+        let hidden = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 0)
+        let r = CameraTimeline.add([], atTime: 5, width: 2, duration: 30, placement: hidden)
+        #expect(r.blocks.count == 1)
+        #expect(r.blocks[0].visible == false)
+        #expect(r.blocks[0].begin == 5)
+        #expect(r.blocks[0].end == 7)
+    }
+
     @Test func addClampsToDuration() {
         let placement = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 1)
         let r = CameraTimeline.add([], atTime: 29, width: 2, duration: 30, placement: placement)
