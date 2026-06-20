@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import UniformTypeIdentifiers
 
 struct StudioView: View {
@@ -34,8 +35,31 @@ struct StudioView: View {
     private var editorView: some View {
         VStack(spacing: 0) {
             if let player = model.player {
+                canvas(player: player)
+            }
+            controlBar
+        }
+        // Esc deselects any selected block (the text input owns Esc while open).
+        .background {
+            if model.editingTextBlockID == nil {
+                Button("") { model.deselectAll() }
+                    .keyboardShortcut(.cancelAction).opacity(0)
+            }
+        }
+    }
+
+    /// Preview canvas: the player + editing overlays, wrapped in a view-only
+    /// pan/zoom transform (for inspecting high-res frames) with a transparent
+    /// scroll/pinch/middle-drag catcher on top and a reset badge.
+    private func canvas(player: AVPlayer) -> some View {
+        GeometryReader { geo in
+            ZStack {
                 ZStack {
                     PlayerView(player: player)
+                    // Click empty canvas to deselect.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.deselectAll() }
                     if model.cropActive {
                         CropPanOverlay(model: model)
                     }
@@ -46,9 +70,38 @@ struct StudioView: View {
                         TextCanvasOverlay(model: model)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scaleEffect(model.canvasZoom)
+                .offset(x: model.canvasPanX, y: model.canvasPanY)
+
+                // Trackpad/mouse pan + zoom — transparent to clicks.
+                CanvasEventCatcher(model: model)
             }
-            controlBar
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .overlay(alignment: .topTrailing) { zoomBadge }
+            .onChange(of: geo.size, initial: true) { _, size in
+                model.setCanvasViewSize(size)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Zoom indicator + reset, shown only while the canvas is zoomed in.
+    @ViewBuilder private var zoomBadge: some View {
+        if model.canvasZoomed {
+            Button { model.resetCanvasView() } label: {
+                HStack(spacing: 4) {
+                    Text("\(Int((model.canvasZoom * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.thinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Reset zoom (fit)")
+            .padding(8)
         }
     }
 

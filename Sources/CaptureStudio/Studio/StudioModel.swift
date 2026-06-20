@@ -148,6 +148,20 @@ final class StudioModel: ObservableObject {
     @Published var cropZoom = 1.0
     var cropActive: Bool { cropAspect != .original }
 
+    // Canvas inspection view — a view-only pan/zoom of the whole preview for
+    // inspecting high-res frames. NEVER persisted and never affects the
+    // composited/exported output. `canvasZoom` 1 = fit; pan is a view-point
+    // offset of the scaled canvas, clamped so content edges can't be dragged
+    // past the container edges.
+    @Published var canvasZoom: CGFloat = 1
+    @Published var canvasPanX: CGFloat = 0
+    @Published var canvasPanY: CGFloat = 0
+    /// Live size of the preview canvas view (set by `StudioView`); used to
+    /// clamp the pan offset against the fitted content size.
+    private(set) var canvasViewSize: CGSize = .zero
+    /// Whether the canvas is zoomed past fit (drives the reset badge + pan).
+    var canvasZoomed: Bool { canvasZoom > 1.001 }
+
     /// Screen master natural size (source space for the crop).
     private(set) var sourceSize: CGSize = .zero
     /// Output canvas: crop output size when reframing, else the source size.
@@ -761,6 +775,64 @@ final class StudioModel: ObservableObject {
         if editingTextBlockID != nil { endEditingText() }
         if draggingTextBlockID != nil { endDraggingText() }
         selectedTextBlockID = nil
+    }
+
+    /// Clear every selection — camera block and text block — so the canvas has
+    /// nothing selected. Backs the empty-canvas tap and the Esc key.
+    func deselectAll() {
+        deselectText()
+        selectedBlockID = nil
+    }
+
+    // MARK: Canvas pan/zoom (inspection only)
+
+    private static let maxCanvasZoom: CGFloat = 8
+
+    /// Aspect-fit size of the render canvas inside the live view bounds.
+    private func canvasFitSize() -> CGSize {
+        let content = renderSize, c = canvasViewSize
+        guard content.width > 0, content.height > 0, c.width > 0, c.height > 0
+        else { return .zero }
+        let s = min(c.width / content.width, c.height / content.height)
+        return CGSize(width: content.width * s, height: content.height * s)
+    }
+
+    /// Clamp the pan offset so the zoomed content can't be dragged past the
+    /// view edges (and snaps to 0 once it no longer overflows).
+    private func clampCanvasPan() {
+        let fit = canvasFitSize()
+        let overflowX = max(0, (fit.width * canvasZoom - canvasViewSize.width) / 2)
+        let overflowY = max(0, (fit.height * canvasZoom - canvasViewSize.height) / 2)
+        canvasPanX = min(max(canvasPanX, -overflowX), overflowX)
+        canvasPanY = min(max(canvasPanY, -overflowY), overflowY)
+    }
+
+    /// Multiply the canvas zoom (center-anchored), clamped to [1, max].
+    func zoomCanvas(by factor: CGFloat) {
+        guard factor.isFinite, factor > 0 else { return }
+        canvasZoom = min(max(canvasZoom * factor, 1), Self.maxCanvasZoom)
+        clampCanvasPan()
+    }
+
+    /// Pan the zoomed canvas by a view-point delta (no-op at fit).
+    func panCanvas(by delta: CGSize) {
+        guard canvasZoomed else { return }
+        canvasPanX += delta.width
+        canvasPanY += delta.height
+        clampCanvasPan()
+    }
+
+    /// Reset the inspection view back to fit.
+    func resetCanvasView() {
+        canvasZoom = 1
+        canvasPanX = 0
+        canvasPanY = 0
+    }
+
+    /// Track the live view size (e.g. window resize) and re-clamp the pan.
+    func setCanvasViewSize(_ size: CGSize) {
+        canvasViewSize = size
+        clampCanvasPan()
     }
 
     // MARK: Text z-order
