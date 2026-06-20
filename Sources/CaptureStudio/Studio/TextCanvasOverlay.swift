@@ -20,7 +20,7 @@ struct TextCanvasOverlay: View {
                 // Tap empty canvas to deselect (present only while selected).
                 Color.clear
                     .contentShape(Rectangle())
-                    .onTapGesture { model.deselectText() }
+                    .onTapGesture { model.deselectAll() }
 
                 if let block = activeSelectedBlock, model.renderSize.width > 0 {
                     let videoRect = aspectFitRect(model.renderSize, in: geo.size)
@@ -45,13 +45,12 @@ struct TextCanvasOverlay: View {
                 }
             }
             .coordinateSpace(name: space)   // stable frame for the move drag
-            // Esc / Return deselect, but only when the text input is closed (it
-            // owns those keys while open).
+            // Return deselects the text block (Esc is handled globally by the
+            // editor), but only when the text input is closed — it owns those
+            // keys while open.
             .background {
                 if model.editingTextBlockID == nil {
-                    Button("") { model.deselectText() }
-                        .keyboardShortcut(.cancelAction).opacity(0)
-                    Button("") { model.deselectText() }
+                    Button("") { model.deselectAll() }
                         .keyboardShortcut(.return, modifiers: []).opacity(0)
                 }
             }
