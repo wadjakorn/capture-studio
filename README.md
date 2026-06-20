@@ -12,7 +12,10 @@ A free, open-source macOS screen recorder and simple editor — built as a [Scre
 - **System audio** — captures what your Mac is playing (excluding the app itself)
 - **Preview-then-record** — warm up all sources (camera spin-up, etc.) and confirm a live camera preview *before* the countdown, so the counter marks a near-instant start
 - **Global hotkey** — user-configurable shortcut toggles recording from anywhere (off by default); reuses the last device/region selections without opening the popup
-- **Studio editor** — opens automatically after recording: preview, trim in/out, per-source volume sliders (system audio vs mic), camera overlay styling, cursor/click overlays, and reframe crop (Original/9:16/1:1/4:5/16:9/4:3)
+- **Text & captions** — add styled text overlays (font, weight, color, alignment, optional background box and stroke) with their own timeline; blocks may overlap so several can show at once. Each block has a `[begin, end)` span you drag on a timeline lane, position by dragging on the canvas, and edit inline
+- **Camera timeline** — show/hide the camera overlay over time as `CameraBlock` segments on a dedicated lane, instead of an all-or-nothing toggle
+- **Canvas inspection** — pan and zoom the editor canvas while inspecting; click empty space or press Esc to deselect
+- **Studio editor** — opens automatically after recording: preview, trim in/out, per-source volume sliders (system audio vs mic), camera overlay styling, camera/text timelines, cursor/click overlays, and reframe crop (Original/9:16/1:1/4:5/16:9/4:3)
 - **Export** — 1080p, 4K, or source resolution MP4; reframed output follows the chosen crop aspect
 - **Non-destructive** — recordings are `.capturestudio` bundles; master files are never modified, all edits are metadata (`edit.json`)
 
@@ -63,6 +66,7 @@ My Recording.capturestudio/
 ├── system.m4a       # if system audio enabled
 ├── events.jsonl     # cursor positions (60 Hz), clicks, scrolls
 └── edit.json        # editor state: trim, volumes, camera overlay + styling + rotation,
+                     #   camera visibility timeline (CameraBlocks), text/caption blocks,
                      #   reframe crop, cursor/click-feedback toggles
 ```
 
