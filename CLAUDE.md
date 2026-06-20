@@ -9,7 +9,7 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
   swift-testing `0.12.0` (exact) and KeyboardShortcuts `1.10.0` (exact). Later
   versions need the `#Preview` macro plugin / Testing interop libs CLT lacks. Do
   not bump these.
-- `swift build` / `swift test` (currently 45 tests — keep them green).
+- `swift build` / `swift test` (currently 109 tests — keep them green).
 - `scripts/build-app.sh [debug|release]` → packages `dist/CaptureStudio.app`.
   Signs with the local `Capture Studio Dev` cert if present (keeps TCC grants
   across rebuilds), else ad-hoc.
@@ -24,8 +24,14 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
 - `Sources/CaptureStudio/Recorder/` — capture: screen/camera/mic recorders,
   device discovery, event tracking, `RecordingSession` orchestrator.
 - `Sources/CaptureStudio/Studio/` — editor: `StudioModel` (state), `StudioWindow`
-  (UI), `CameraCompositor` (per-frame Core Image render — cursor/click/camera),
+  (UI), `CameraCompositor` (per-frame Core Image render — cursor/click/camera/text),
   `Exporter`, crop math.
+  - Text/captions: `TextBlock` overlays with `[begin, end)` spans; `TextTimeline` +
+    `TextTimelineLane` (timeline editing), `TextImageRenderer` (rasterize to layer),
+    `TextCanvasOverlay` (on-canvas drag/select), `CaptionTextEditor` (inline edit).
+  - Camera timeline: `CameraBlock` visibility segments edited via `CameraTimeline` +
+    `CameraTimelineLane`.
+  - Canvas inspection: `CanvasEventCatcher` handles pan/zoom and click/Esc deselect.
 - `Sources/CaptureStudio/ProjectBundle/` — on-disk `.capturestudio` format:
   `Meta`, `EditState`, `Events`, `ProjectBundle`.
 - `Tests/CaptureStudioTests/` — swift-testing; pure helpers (crop math, event
