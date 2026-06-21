@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
@@ -60,7 +61,7 @@ struct StudioView: View {
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture { model.deselectAll() }
-                    if model.cropActive {
+                    if model.cropPannable {
                         CropPanOverlay(model: model)
                     }
                     if model.showsCameraOverlay {
@@ -69,6 +70,8 @@ struct StudioView: View {
                     if model.selectedTextBlock != nil {
                         TextCanvasOverlay(model: model)
                     }
+                    // Topmost: reels safe-area guide (studio-only).
+                    ReelsSafeAreaOverlay(model: model)
                 }
                 .scaleEffect(model.canvasZoom)
                 .offset(x: model.canvasPanX, y: model.canvasPanY)
@@ -229,7 +232,15 @@ struct StudioView: View {
         .fixedSize()
         .help("Reframe aspect ratio")
 
-        if model.cropActive {
+        Toggle(isOn: Binding(get: { model.templateGuideVisible },
+                             set: { model.templateGuideVisible = $0 })) {
+            Image(systemName: "rectangle.dashed")
+        }
+        .toggleStyle(.button)
+        .disabled(model.cropAspect != .nineBySixteenTemplate)
+        .help("Toggle reels safe-area guide")
+
+        if model.cropPannable {
             HStack(spacing: 4) {
                 Image(systemName: "plus.magnifyingglass").foregroundStyle(.secondary)
                 Slider(value: Binding(get: { 1.2 - model.cropZoom },
@@ -241,6 +252,69 @@ struct StudioView: View {
                 .controlSize(.small)
             }
             .help("Crop zoom — drag the video to pan")
+        }
+
+        if model.cropAspect.isFit {
+            backgroundControls
+        }
+    }
+
+    /// Letterbox-bar background controls, shown only in template/fit mode:
+    /// pick Black / Blur / Photo, a blur-amount slider, and a delete button.
+    @ViewBuilder private var backgroundControls: some View {
+        Menu {
+            Button { model.setCanvasBackground(.black) } label: {
+                if model.canvasBackground == .black {
+                    Label("Black", systemImage: "checkmark")
+                } else { Text("Black") }
+            }
+            Button { model.setCanvasBackground(.blur) } label: {
+                if model.canvasBackground == .blur {
+                    Label("Blur", systemImage: "checkmark")
+                } else { Text("Blur") }
+            }
+            Button { pickBackgroundImage() } label: {
+                if model.canvasBackground == .image {
+                    Label("Photo…", systemImage: "checkmark")
+                } else { Text("Photo…") }
+            }
+        } label: {
+            Image(systemName: "photo.artframe")
+        }
+        .menuStyle(.button)
+        .fixedSize()
+        .help("Background fill for the letterbox bars")
+
+        if model.canvasBackground == .blur {
+            HStack(spacing: 4) {
+                Image(systemName: "drop").foregroundStyle(.secondary)
+                Slider(value: Binding(get: { model.canvasBackgroundBlur },
+                                      set: { model.setCanvasBackgroundBlur($0) }),
+                       in: 0...0.2) { editing in
+                    if !editing { model.commitCanvasBackgroundBlur() }
+                }
+                .frame(width: 80)
+                .controlSize(.small)
+            }
+            .help("Background blur amount")
+        }
+
+        if model.canvasBackground == .image {
+            Button(role: .destructive) { model.deleteBackgroundImage() } label: {
+                Image(systemName: "trash")
+            }
+            .help("Remove background photo")
+        }
+    }
+
+    /// Pick an image file and set it as the canvas background.
+    private func pickBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            model.uploadBackgroundImage(from: url)
         }
     }
 

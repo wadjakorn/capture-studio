@@ -146,7 +146,40 @@ final class StudioModel: ObservableObject {
     @Published var cropCenterX = 0.5
     @Published var cropCenterY = 0.5
     @Published var cropZoom = 1.0
-    var cropActive: Bool { cropAspect != .original }
+
+    /// A non-source output canvas is in play (any reframe — crop OR fit).
+    var hasReframeCanvas: Bool { cropAspect != .original }
+
+    /// User can pan/zoom the reframe (crop in cover aspects, fitted content in
+    /// fit/template mode). True for any reframe aspect.
+    var cropPannable: Bool { hasReframeCanvas }
+
+    /// Canvas pixels per source pixel for the current preview placement — fit
+    /// placement scale in template mode, crop fill scale otherwise. Drives the
+    /// drag-to-pan gesture conversion.
+    var screenDrawScale: CGFloat {
+        guard renderSize.width > 0, sourceSize.width > 0 else { return 1 }
+        if cropAspect.isFit {
+            let s0 = min(renderSize.width / sourceSize.width,
+                         renderSize.height / sourceSize.height)
+            return s0 / min(max(CGFloat(cropZoom), 0.2), 1.0)
+        }
+        if let crop = cropRectInSource, crop.width > 0 { return renderSize.width / crop.width }
+        return 1
+    }
+
+    /// Studio-only reels safe-area guide visibility. Ephemeral (never persisted,
+    /// never exported); auto-on when the template aspect is selected.
+    @Published var templateGuideVisible = false
+
+    // Background behind the fitted video in template/fit mode (letterbox bars).
+    // Persisted to edit.json. The photo file lives in the bundle; its name is
+    // `canvasBackgroundImage`, loaded into `backgroundCIImage` for rendering.
+    @Published private(set) var canvasBackground: CanvasBackground = .black
+    @Published var canvasBackgroundBlur = 0.03
+    @Published private(set) var canvasBackgroundImage: String?
+    /// Loaded background photo (EXIF-oriented), cached. nil = none.
+    private var backgroundCIImage: CIImage?
 
     // Canvas inspection view — a view-only pan/zoom of the whole preview for
     // inspecting high-res frames. NEVER persisted and never affects the
@@ -169,7 +202,7 @@ final class StudioModel: ObservableObject {
     /// capped to a 1080-class short side so CI compositing stays smooth;
     /// export still rebuilds at full resolution.
     var renderSize: CGSize {
-        if cropActive { return previewCanvasSize }
+        if hasReframeCanvas { return previewCanvasSize }
         if needsCompositor { return Self.cappedPreviewSize(sourceSize) }
         return sourceSize
     }
@@ -215,6 +248,7 @@ final class StudioModel: ObservableObject {
             || !textBlocks.isEmpty
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
+            || (cropAspect.isFit && canvasBackground != .black)
     }
 
     private var screenTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
@@ -289,6 +323,10 @@ final class StudioModel: ObservableObject {
             cropCenterX = min(max(0, edit.cropCenterX), 1)
             cropCenterY = min(max(0, edit.cropCenterY), 1)
             cropZoom = min(max(0.2, edit.cropZoom), 1)
+            canvasBackground = edit.canvasBackground
+            canvasBackgroundBlur = min(max(0, edit.canvasBackgroundBlur), 0.2)
+            canvasBackgroundImage = edit.canvasBackgroundImage
+            loadBackgroundImage()
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
@@ -1013,13 +1051,15 @@ final class StudioModel: ObservableObject {
 
     /// Current crop rect in screen-source pixels; nil when not reframing.
     var cropRectInSource: CGRect? {
-        guard let ratio = cropAspect.ratio, sourceSize.width > 0 else { return nil }
+        guard let ratio = cropAspect.ratio, !cropAspect.isFit,
+              sourceSize.width > 0 else { return nil }
         return CropMath.cropRect(source: sourceSize, ratio: ratio, zoom: cropZoom,
                                  centerX: cropCenterX, centerY: cropCenterY)
     }
 
     func setCropAspect(_ aspect: CropAspect) {
         cropAspect = aspect
+        templateGuideVisible = (aspect == .nineBySixteenTemplate)
         cropCenterX = 0.5
         cropCenterY = 0.5
         cropZoom = 1.0
@@ -1028,9 +1068,23 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    /// Live crop pan during drag; clamps so the crop stays inside the source.
+    /// Live pan during drag; clamps so no gap shows. In fit/template mode the
+    /// fitted content pans (letterboxed axis stays centered); in cover aspects
+    /// the crop stays inside the source.
     func setCropCenter(x: Double, y: Double) {
-        guard let ratio = cropAspect.ratio, sourceSize.width > 0 else { return }
+        guard sourceSize.width > 0, hasReframeCanvas else { return }
+        if cropAspect.isFit {
+            let canvas = renderSize
+            let s0 = min(canvas.width / sourceSize.width, canvas.height / sourceSize.height)
+            let s = s0 / min(max(CGFloat(cropZoom), 0.2), 1.0)
+            cropCenterX = Self.clampFitCenter(drawn: sourceSize.width * s,
+                                              canvas: canvas.width, raw: x)
+            cropCenterY = Self.clampFitCenter(drawn: sourceSize.height * s,
+                                              canvas: canvas.height, raw: y)
+            applyVideoComposition()
+            return
+        }
+        guard let ratio = cropAspect.ratio else { return }
         let maxFit = CropMath.maxFitSize(source: sourceSize, ratio: ratio)
         let size = CGSize(width: maxFit.width * cropZoom, height: maxFit.height * cropZoom)
         let c = CropMath.clampedCenter(source: sourceSize, cropSize: size,
@@ -1038,6 +1092,17 @@ final class StudioModel: ObservableObject {
         cropCenterX = c.x
         cropCenterY = c.y
         applyVideoComposition()
+    }
+
+    /// Valid normalized center on one axis for fit-mode pan, allowing motion on
+    /// both axes (a smaller, letterboxed axis pans through its bars; a larger
+    /// axis pans within its overflow). The range keeps the content flush with
+    /// the canvas edges; an exactly-canvas-sized axis collapses to 0.5.
+    private static func clampFitCenter(drawn: CGFloat, canvas: CGFloat, raw: Double) -> Double {
+        guard drawn > 0, drawn != canvas else { return 0.5 }
+        let a = canvas / (2 * drawn)
+        let lo = Double(min(a, 1 - a)), hi = Double(max(a, 1 - a))
+        return min(max(raw, lo), hi)
     }
 
     /// Live crop zoom during slider drag; re-clamps the center for the new size.
@@ -1049,6 +1114,60 @@ final class StudioModel: ObservableObject {
     /// Persist crop settings; call at gesture end, not per drag tick.
     func commitCropEdit() {
         saveEdit()
+    }
+
+    // MARK: - Canvas background (template/fit mode)
+
+    /// Switch the letterbox background fill. Toggling to/from `.black` may engage
+    /// or disengage the compositor, so route through `applyOverlayChange`.
+    func setCanvasBackground(_ bg: CanvasBackground) {
+        applyOverlayChange { canvasBackground = bg }
+        saveEdit()
+    }
+
+    /// Live blur amount during slider drag (fraction of canvas width). Bg is
+    /// already on the compositor path when `.blur`, so just recompose.
+    func setCanvasBackgroundBlur(_ value: Double) {
+        canvasBackgroundBlur = min(max(0, value), 0.2)
+        applyVideoComposition()
+    }
+
+    /// Persist the blur value; call at slider-drag end, not per tick.
+    func commitCanvasBackgroundBlur() {
+        saveEdit()
+    }
+
+    /// Copy an uploaded photo into the bundle and switch the background to it.
+    func uploadBackgroundImage(from url: URL) {
+        do {
+            let name = try bundle.writeBackgroundImage(from: url)
+            canvasBackgroundImage = name
+            loadBackgroundImage()
+            applyOverlayChange { canvasBackground = .image }
+            saveEdit()
+        } catch {
+            Log.studio.error("background image upload failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Remove the uploaded photo and revert the background to black.
+    func deleteBackgroundImage() {
+        bundle.deleteBackgroundImages()
+        canvasBackgroundImage = nil
+        backgroundCIImage = nil
+        applyOverlayChange { canvasBackground = .black }
+        saveEdit()
+    }
+
+    /// (Re)load the uploaded photo into a cached CIImage; on a missing file drop
+    /// the reference and fall back to black so render never shows an empty bg.
+    private func loadBackgroundImage() {
+        guard let name = canvasBackgroundImage else { backgroundCIImage = nil; return }
+        backgroundCIImage = CIImage(contentsOf: bundle.backgroundImageURL(name))
+        if backgroundCIImage == nil {
+            canvasBackgroundImage = nil
+            if canvasBackground == .image { canvasBackground = .black }
+        }
     }
 
     /// Preview output canvas when reframing (1080-class; export may rebuild
@@ -1091,7 +1210,7 @@ final class StudioModel: ObservableObject {
             return nil
         }
         let cameraShown = cameraTrackID != nil && cameraVisible
-        guard cameraShown || cropActive || needsCompositor else { return nil }
+        guard cameraShown || hasReframeCanvas || needsCompositor else { return nil }
         let canvas = canvasOverride ?? renderSize
         guard canvas.width > 0 else { return nil }
 
@@ -1126,7 +1245,23 @@ final class StudioModel: ObservableObject {
         }
 
         let screenLayer = AVMutableVideoCompositionLayerInstruction(assetTrack: screenTrack)
-        if let crop = cropRectInSource, crop.width > 0 {
+        if cropAspect.isFit {
+            // Contain: scale source to fit the canvas at the current zoom/pan,
+            // letterboxed; renderSize's default black background fills the bars.
+            let place = CropMath.fitPlacement(source: sourceSize, canvas: canvas,
+                                              zoom: CGFloat(cropZoom),
+                                              centerX: CGFloat(cropCenterX),
+                                              centerY: CGFloat(cropCenterY))
+            if place.width > 0, sourceSize.width > 0 {
+                let s = place.width / sourceSize.width
+                screenLayer.setTransform(
+                    CGAffineTransform(scaleX: s, y: s)
+                        .concatenating(CGAffineTransform(translationX: place.minX,
+                                                         y: place.minY)),
+                    at: .zero
+                )
+            }
+        } else if let crop = cropRectInSource, crop.width > 0 {
             // Scale so the crop fills the canvas, then shift its origin to 0.
             let s = canvas.width / crop.width
             screenLayer.setTransform(
@@ -1163,6 +1298,16 @@ final class StudioModel: ObservableObject {
             screenTrackID: screenTrackID,
             cameraTrackID: cameraTrackID
         )
+        // Fit/template placement (canvas px, top-left): the whole source scaled
+        // to fit at the current zoom/pan. nil = cover/crop placement.
+        if cropAspect.isFit {
+            layout.screenFit = CropMath.fitPlacement(source: sourceSize, canvas: canvas,
+                                                     zoom: CGFloat(cropZoom),
+                                                     centerX: CGFloat(cropCenterX),
+                                                     centerY: CGFloat(cropCenterY))
+            layout.background = canvasBackground
+            layout.backgroundBlurRadius = CGFloat(canvasBackgroundBlur) * canvas.width
+        }
         // Camera styling only when a (styled) camera is actually shown.
         if cameraTrackID != nil, let oriented = cameraOrientedSize {
             let pip = pipRect(in: canvas, cameraSize: oriented)
@@ -1201,6 +1346,7 @@ final class StudioModel: ObservableObject {
             overlay.ring = ringImage
             overlay.ringPixelSize = ringPixelSize
         }
+        if layout.background == .image { overlay.backgroundImage = backgroundCIImage }
 
         // Text/caption blocks (rendered topmost). Suppress only the block being
         // dragged (the smooth overlay drives motion); editing is off-canvas so
@@ -1347,6 +1493,9 @@ final class StudioModel: ObservableObject {
             cropCenterX: cropCenterX,
             cropCenterY: cropCenterY,
             cropZoom: cropZoom,
+            canvasBackground: canvasBackground,
+            canvasBackgroundBlur: canvasBackgroundBlur,
+            canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
             textBlocks: textBlocks
         )
@@ -1368,7 +1517,7 @@ final class StudioModel: ObservableObject {
         // canvas and the session preset is quality-only.
         let videoComposition: AVMutableVideoComposition?
         let avPresetOverride: String?
-        if cropActive {
+        if hasReframeCanvas {
             videoComposition = buildVideoComposition(canvasOverride: exportCanvasSize(for: preset))
             avPresetOverride = AVAssetExportPresetHighestQuality
         } else {
@@ -1410,6 +1559,11 @@ final class StudioModel: ObservableObject {
         case .uhd4K:
             return canvasSize(shortSide: 2160) ?? sourceSize
         case .source:
+            if cropAspect.isFit {
+                let longSide = max(sourceSize.width, sourceSize.height)
+                let shortSide = (longSide * 9.0 / 16.0 / 2).rounded() * 2
+                return canvasSize(shortSide: shortSide) ?? sourceSize
+            }
             guard let crop = cropRectInSource else { return sourceSize }
             return CGSize(width: (crop.width / 2).rounded(.down) * 2,
                           height: (crop.height / 2).rounded(.down) * 2)

@@ -11,6 +11,15 @@ struct CompositorLayout {
     var sourceSize: CGSize
     /// Screen crop in source pixels; nil = use the whole source.
     var screenCrop: CGRect?
+    /// Fit/letterbox placement of the whole source in canvas px (top-left), at
+    /// the current zoom/pan, for the "9:16 with template" aspect. nil = cover /
+    /// crop placement (`screenCrop`). When set, `screenCrop` is nil.
+    var screenFit: CGRect?
+    /// Background fill behind the fitted video (only meaningful when `screenFit`
+    /// is set / bars exist). `.image` uses `OverlayPayload.backgroundImage`.
+    var background: CanvasBackground = .black
+    /// Blur radius in canvas pixels for `background == .blur`.
+    var backgroundBlurRadius: CGFloat = 0
 
     var screenTrackID: CMPersistentTrackID
     var cameraTrackID: CMPersistentTrackID?
@@ -171,6 +180,9 @@ struct OverlayPayload {
     /// Click ring image (square, centered circle stroke), origin (0,0).
     var ring: CIImage?
     var ringPixelSize: CGSize = .zero
+    /// Uploaded canvas-background photo (origin (0,0), y-up), for
+    /// `CompositorLayout.background == .image`. nil = fall back to black.
+    var backgroundImage: CIImage?
 }
 
 /// Custom video compositor instruction carrying a `CompositorLayout` plus
@@ -256,7 +268,8 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 request.finish(with: CompositorError.noFrame)
                 return
             }
-            var output = screenCanvasImage(screenBuf, layout: layout)
+            var output = screenCanvasImage(screenBuf, layout: layout,
+                                           backgroundImage: instruction.overlay.backgroundImage)
             let now = request.compositionTime.seconds
 
             if let cameraID = layout.cameraTrackID,
@@ -297,9 +310,22 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
 
     // MARK: - Frame building
 
-    private func screenCanvasImage(_ buffer: CVPixelBuffer,
-                                   layout: CompositorLayout) -> CIImage {
+    private func screenCanvasImage(_ buffer: CVPixelBuffer, layout: CompositorLayout,
+                                   backgroundImage: CIImage?) -> CIImage {
         let image = CIImage(cvPixelBuffer: buffer)
+        if let place = layout.screenFit {
+            // Contain (letterbox) the whole source at the fit placement, over the
+            // configured background fill (black / blurred video / photo).
+            guard place.width > 0, layout.sourceSize.width > 0 else { return image }
+            let s = place.width / layout.sourceSize.width
+            let ty = layout.canvas.height - place.maxY    // top-left → CI bottom-left
+            let fitted = image
+                .transformed(by: CGAffineTransform(scaleX: s, y: s)
+                    .concatenating(CGAffineTransform(translationX: place.minX, y: ty)))
+                .cropped(to: CGRect(origin: .zero, size: layout.canvas))
+            let bg = backgroundFill(video: image, layout: layout, image: backgroundImage)
+            return fitted.composited(over: bg)
+        }
         let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
         guard crop.width > 0 else { return image }
         let cropCI = Self.flip(crop, in: layout.sourceSize.height)
@@ -308,6 +334,38 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
         return image.cropped(to: cropCI).transformed(by: t)
             .cropped(to: CGRect(origin: .zero, size: layout.canvas))
+    }
+
+    /// Opaque full-canvas background fill behind the fitted video (the letterbox
+    /// bars): solid black, the main video blurred to cover, or the uploaded photo
+    /// cover-filled. All centered and cropped to the canvas.
+    private func backgroundFill(video: CIImage, layout: CompositorLayout,
+                                image: CIImage?) -> CIImage {
+        let canvasRect = CGRect(origin: .zero, size: layout.canvas)
+        let black = CIImage(color: .black).cropped(to: canvasRect)
+        switch layout.background {
+        case .black:
+            return black
+        case .blur:
+            let fill = CropMath.aspectFillRect(layout.sourceSize, in: layout.canvas)
+            guard fill.width > 0, layout.sourceSize.width > 0 else { return black }
+            let s = fill.width / layout.sourceSize.width
+            let covered = video.transformed(by: CGAffineTransform(scaleX: s, y: s)
+                .concatenating(CGAffineTransform(translationX: fill.minX, y: fill.minY)))
+            return covered.clampedToExtent()
+                .applyingFilter("CIGaussianBlur",
+                                parameters: [kCIInputRadiusKey: layout.backgroundBlurRadius])
+                .cropped(to: canvasRect)
+        case .image:
+            guard let image, image.extent.width > 0 else { return black }
+            let fill = CropMath.aspectFillRect(image.extent.size, in: layout.canvas)
+            let s = fill.width / image.extent.width
+            let covered = image.transformed(by: CGAffineTransform(scaleX: s, y: s)
+                .concatenating(CGAffineTransform(translationX: fill.minX - image.extent.minX * s,
+                                                 y: fill.minY - image.extent.minY * s)))
+            // Over black so any transparent pixels still read as a filled bg.
+            return covered.cropped(to: canvasRect).composited(over: black)
+        }
     }
 
     private func cameraImage(_ buffer: CVPixelBuffer, at now: Double,
@@ -417,21 +475,29 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
 
     // MARK: - Cursor / click overlays
 
-    /// Screen-source pixel point → canvas pixel point (top-left origin), using
-    /// the same crop/scale the screen image gets.
-    private static func sourceToCanvas(_ p: CGPoint, layout: CompositorLayout) -> CGPoint {
+    /// The uniform scale + top-left origin (canvas px) the full source maps into,
+    /// for either fit (letterbox) or cover (crop) placement. Cursor/click
+    /// overlays ride this so they land on the screen content, not the raw canvas.
+    private static func screenPlacement(_ layout: CompositorLayout) -> (scale: CGFloat, origin: CGPoint) {
+        if let place = layout.screenFit {
+            let s = layout.sourceSize.width > 0 ? place.width / layout.sourceSize.width : 1
+            return (s, place.origin)
+        }
         let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
-        guard crop.width > 0, crop.height > 0 else { return p }
-        let sx = layout.canvas.width / crop.width
-        let sy = layout.canvas.height / crop.height
-        return CGPoint(x: (p.x - crop.minX) * sx, y: (p.y - crop.minY) * sy)
+        let s = crop.width > 0 ? layout.canvas.width / crop.width : 1
+        return (s, CGPoint(x: -crop.minX * s, y: -crop.minY * s))
+    }
+
+    /// Screen-source pixel point → canvas pixel point (top-left origin), using
+    /// the same scale/offset the screen image gets.
+    private static func sourceToCanvas(_ p: CGPoint, layout: CompositorLayout) -> CGPoint {
+        let pl = screenPlacement(layout)
+        return CGPoint(x: pl.origin.x + p.x * pl.scale, y: pl.origin.y + p.y * pl.scale)
     }
 
     /// Canvas pixels per screen point (glyph sizing).
     private static func cursorScale(_ layout: CompositorLayout) -> CGFloat {
-        let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
-        guard crop.width > 0 else { return layout.sourcePerPoint }
-        return (layout.canvas.width / crop.width) * layout.sourcePerPoint
+        screenPlacement(layout).scale * layout.sourcePerPoint
     }
 
     private func cursorImage(at now: Double, layout: CompositorLayout,

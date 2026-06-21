@@ -56,4 +56,32 @@ struct ProjectBundle {
     func loadMeta() throws -> ProjectMeta {
         try Self.jsonDecoder().decode(ProjectMeta.self, from: Data(contentsOf: metaURL))
     }
+
+    // MARK: - Canvas background image
+
+    /// URL of a background image file (kept inside the bundle so it travels with
+    /// the project). `name` is the file name stored in `EditState`.
+    func backgroundImageURL(_ name: String) -> URL {
+        url.appendingPathComponent(name)
+    }
+
+    /// Copy an uploaded image into the bundle as `background.<ext>`, replacing
+    /// any previous one. Returns the file name to persist in `EditState`.
+    func writeBackgroundImage(from source: URL) throws -> String {
+        let ext = source.pathExtension.isEmpty ? "png" : source.pathExtension.lowercased()
+        let name = "background.\(ext)"
+        let dest = url.appendingPathComponent(name)
+        deleteBackgroundImages()          // clear any prior file (extension may differ)
+        try FileManager.default.copyItem(at: source, to: dest)
+        return name
+    }
+
+    /// Remove every `background.*` file in the bundle.
+    func deleteBackgroundImages() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: url,
+                     includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.lastPathComponent.hasPrefix("background.") {
+            try? FileManager.default.removeItem(at: f)
+        }
+    }
 }

@@ -6,6 +6,7 @@ import Foundation
 enum CropAspect: String, Codable, CaseIterable, Equatable {
     case original
     case nineBySixteen = "9:16"
+    case nineBySixteenTemplate = "9:16 with template"
     case square = "1:1"
     case fourByFive = "4:5"
     case sixteenByNine = "16:9"
@@ -15,7 +16,7 @@ enum CropAspect: String, Codable, CaseIterable, Equatable {
     var ratio: Double? {
         switch self {
         case .original: return nil
-        case .nineBySixteen: return 9.0 / 16.0
+        case .nineBySixteen, .nineBySixteenTemplate: return 9.0 / 16.0
         case .square: return 1.0
         case .fourByFive: return 4.0 / 5.0
         case .sixteenByNine: return 16.0 / 9.0
@@ -23,8 +24,28 @@ enum CropAspect: String, Codable, CaseIterable, Equatable {
         }
     }
 
+    /// Contain (fit/letterbox) the source instead of cover (crop). Only the
+    /// template aspect fits; every other aspect crops to fill.
+    var isFit: Bool { self == .nineBySixteenTemplate }
+
     var displayName: String {
         self == .original ? "Original" : rawValue
+    }
+}
+
+/// Background fill behind the fitted video in "9:16 with template" (fit) mode —
+/// what shows in the letterbox bars. `black` is the default; `blur` blurs the
+/// main video to fill the canvas; `image` shows the uploaded photo (cover-fill).
+/// Unknown raw strings (future versions) decode as `black`.
+enum CanvasBackground: String, Codable, CaseIterable, Equatable {
+    case black, blur, image
+
+    var displayName: String {
+        switch self {
+        case .black: return "Black"
+        case .blur: return "Blur"
+        case .image: return "Photo"
+        }
     }
 }
 
@@ -269,6 +290,13 @@ struct EditState: Codable, Equatable {
     var cropCenterX: Double = 0.5
     var cropCenterY: Double = 0.5
     var cropZoom: Double = 1.0
+    /// Background behind the fitted video in template/fit mode (letterbox bars).
+    /// `canvasBackgroundBlur` is the blur radius as a fraction of canvas width;
+    /// `canvasBackgroundImage` is the photo's file name inside the bundle (nil =
+    /// none). Bundles written before these fields decode as black / 0.03 / nil.
+    var canvasBackground: CanvasBackground = .black
+    var canvasBackgroundBlur: Double = 0.03
+    var canvasBackgroundImage: String? = nil
     /// Camera timeline. Empty = static placement (the `camera*` fields above
     /// drive everything, exactly as before, and serve as the "home" placement).
     /// Non-empty = blocks drive position/scale/visibility over time, easing
@@ -292,6 +320,9 @@ struct EditState: Codable, Equatable {
          showCursor: Bool = true, clickFeedback: Bool = false,
          cropAspect: CropAspect = .original, cropCenterX: Double = 0.5,
          cropCenterY: Double = 0.5, cropZoom: Double = 1.0,
+         canvasBackground: CanvasBackground = .black,
+         canvasBackgroundBlur: Double = 0.03,
+         canvasBackgroundImage: String? = nil,
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
@@ -318,6 +349,9 @@ struct EditState: Codable, Equatable {
         self.cropCenterX = cropCenterX
         self.cropCenterY = cropCenterY
         self.cropZoom = cropZoom
+        self.canvasBackground = canvasBackground
+        self.canvasBackgroundBlur = canvasBackgroundBlur
+        self.canvasBackgroundImage = canvasBackgroundImage
         self.cameraBlocks = cameraBlocks
         self.textBlocks = textBlocks
     }
@@ -356,6 +390,10 @@ struct EditState: Codable, Equatable {
         cropCenterX = try c.decodeIfPresent(Double.self, forKey: .cropCenterX) ?? 0.5
         cropCenterY = try c.decodeIfPresent(Double.self, forKey: .cropCenterY) ?? 0.5
         cropZoom = try c.decodeIfPresent(Double.self, forKey: .cropZoom) ?? 1.0
+        let bgRaw = try c.decodeIfPresent(String.self, forKey: .canvasBackground)
+        canvasBackground = bgRaw.flatMap(CanvasBackground.init(rawValue:)) ?? .black
+        canvasBackgroundBlur = try c.decodeIfPresent(Double.self, forKey: .canvasBackgroundBlur) ?? 0.03
+        canvasBackgroundImage = try c.decodeIfPresent(String.self, forKey: .canvasBackgroundImage)
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
     }
