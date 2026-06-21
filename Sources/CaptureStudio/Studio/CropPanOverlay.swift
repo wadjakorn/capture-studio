@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// Drag-to-pan for the reframe crop. The preview is WYSIWYG — the player
-/// already shows the cropped canvas — so dragging the video pans the crop
-/// underneath it (content follows the cursor). Sits below CameraPipOverlay
-/// in the ZStack so PiP drags win hit-testing.
+/// Drag-to-pan for the reframe. The preview is WYSIWYG — the player already
+/// shows the reframed canvas — so dragging the video pans the crop (cover
+/// aspects) or the fitted content (fit/template mode) underneath it (content
+/// follows the cursor). Sits below CameraPipOverlay in the ZStack so PiP drags
+/// win hit-testing.
 struct CropPanOverlay: View {
     @ObservedObject var model: StudioModel
 
@@ -11,12 +12,12 @@ struct CropPanOverlay: View {
 
     var body: some View {
         GeometryReader { geo in
-            if model.cropActive, model.renderSize.width > 0,
-               let crop = model.cropRectInSource, crop.width > 0 {
+            if model.cropPannable, model.renderSize.width > 0, model.sourceSize.width > 0 {
                 let videoRect = CropMath.aspectFitRect(model.renderSize, in: geo.size)
                 let viewScale = videoRect.width / model.renderSize.width
-                // View px → canvas px → source px.
-                let viewToSource = crop.width / model.renderSize.width / viewScale
+                let drawScale = model.screenDrawScale
+                // View px → source px (drag delta → crop/fit center delta).
+                let viewToSource = drawScale > 0 ? 1 / (drawScale * viewScale) : 0
 
                 Color.clear
                     .contentShape(Rectangle())
@@ -25,7 +26,7 @@ struct CropPanOverlay: View {
                     .gesture(panGesture(viewToSource: viewToSource))
             }
         }
-        .allowsHitTesting(model.cropActive)
+        .allowsHitTesting(model.cropPannable)
     }
 
     private func panGesture(viewToSource: CGFloat) -> some Gesture {
