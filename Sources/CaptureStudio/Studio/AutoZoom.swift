@@ -54,14 +54,17 @@ enum AutoZoomTrack {
             let target = max(1, block.scale ?? config.defaultScale)
             let ramp = min(config.ramp, span / 2)
             // Per-block sensitivity → ignore-zone + settle delay + pan gentleness.
-            let (deadzoneFrac, dwell, smoothing) = tuning(block.sensitivity ?? config.defaultSensitivity)
+            let (deadzoneFrac, dwell, smoothTime) = tuning(block.sensitivity ?? config.defaultSensitivity)
             let deadzonePx = deadzoneFrac * sourceSize.width
-            let alpha = 1 - exp(-config.step / max(smoothing, 1e-4))
 
             // Seed the smoothed focus on the cursor at the block start.
             var focus = cursorPoint(at: block.begin, in: cursorSamples) ?? center
             var restPos = focus
             var restElapsed = 0.0
+            // Pan velocity (px/s) carried by the critically-damped easing, so the
+            // pan accelerates and decelerates smoothly instead of starting at full
+            // speed. Resets per block (each block starts at rest).
+            var velX = 0.0, velY = 0.0
 
             var t = block.begin
             while t < block.end - 1e-9 {
@@ -81,10 +84,14 @@ enum AutoZoomTrack {
                 let settled = restElapsed >= dwell
                 let beyond = hypot(restPos.x - focus.x, restPos.y - focus.y) > deadzonePx
                 let aim = (settled && beyond) ? restPos : focus
-                focus.x += (aim.x - focus.x) * alpha
-                focus.y += (aim.y - focus.y) * alpha
-                focus.x = min(max(focus.x, 0), sourceSize.width)
-                focus.y = min(max(focus.y, 0), sourceSize.height)
+                // Critically-damped ease: smooth acceleration into the pan and
+                // smooth deceleration out of it, with no overshoot.
+                focus.x = smoothDamp(focus.x, aim.x, &velX, smoothTime: smoothTime, dt: config.step)
+                focus.y = smoothDamp(focus.y, aim.y, &velY, smoothTime: smoothTime, dt: config.step)
+                if focus.x < 0 { focus.x = 0; velX = 0 }
+                else if focus.x > sourceSize.width { focus.x = sourceSize.width; velX = 0 }
+                if focus.y < 0 { focus.y = 0; velY = 0 }
+                else if focus.y > sourceSize.height { focus.y = sourceSize.height; velY = 0 }
 
                 out.append(ZoomKeyframe(t: t, scale: scale,
                                         focusX: focus.x, focusY: focus.y))
@@ -123,8 +130,10 @@ enum AutoZoomTrack {
     // MARK: - Helpers
 
     /// Map a 0…1 sensitivity to the follow knobs. Low sensitivity = large
-    /// ignore-zone (fraction of source width), long settle delay, and heavy
-    /// smoothing (slow pan); high = no ignore-zone, no delay, light smoothing.
+    /// ignore-zone (fraction of source width), long settle delay, and a long
+    /// `smoothing` (slow, gentle pan); high = no ignore-zone, no delay, short
+    /// `smoothing` (fast pan). `smoothing` is the critically-damped easing's
+    /// approximate time-to-target in seconds (see `smoothDamp`).
     static func tuning(_ s: Double) -> (deadzone: Double, dwell: Double, smoothing: Double) {
         let c = min(max(s, 0), 1)
         return (deadzone: 0.10 * (1 - c),
@@ -147,6 +156,23 @@ enum AutoZoomTrack {
     private static func smoothstep(_ x: Double) -> Double {
         let c = min(max(x, 0), 1)
         return c * c * (3 - 2 * c)
+    }
+
+    /// Critically-damped smoothing toward `target` (Game Programming Gems /
+    /// Unity `SmoothDamp`). Carries `velocity` across calls so the value eases
+    /// into motion and eases out of it with no overshoot. `smoothTime` is the
+    /// approximate time to reach the target.
+    private static func smoothDamp(_ current: Double, _ target: Double,
+                                   _ velocity: inout Double,
+                                   smoothTime: Double, dt: Double) -> Double {
+        let st = max(smoothTime, 1e-4)
+        let omega = 2 / st
+        let x = omega * dt
+        let exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+        let change = current - target
+        let temp = (velocity + omega * change) * dt
+        velocity = (velocity - omega * temp) * exp
+        return target + (change + temp) * exp
     }
 
     /// Cursor position at `t` (source px), linearly interpolated; nil if empty.
