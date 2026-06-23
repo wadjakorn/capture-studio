@@ -63,6 +63,21 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Subtitle states for the loader gate while importing/removing.
+    enum SubtitleState: Equatable { case idle, applying, removing }
+    /// Imported subtitle track (nil = none, lane hidden). Cues are read-only;
+    /// `style` is the one shared, user-configured look applied to every cue.
+    /// Persisted to edit.json; the `.srt` file lives in the bundle.
+    @Published private(set) var subtitles: SubtitleTrack?
+    /// Loader gate: import/remove run off the main actor so the UI never blocks.
+    @Published private(set) var subtitleState: SubtitleState = .idle
+    /// The subtitle track is selected for configuration (mutually exclusive with
+    /// camera-block and text-block selection).
+    @Published var subtitleSelected = false
+    /// Set while dragging the subtitle position box on the canvas, so the
+    /// compositor suppresses the baked subtitles and the smooth overlay drives
+    /// motion. Cleared on drop.
+    @Published private(set) var draggingSubtitle = false
     /// Frames-per-second of the preview/export video composition. The seek that
     /// reveals a selected caption must align to this grid (see
     /// `TextTimeline.firstVisibleTime`), so it is the single source of truth for
@@ -124,6 +139,17 @@ final class StudioModel: ObservableObject {
     var selectedTextBlock: TextBlock? {
         guard let id = selectedTextBlockID else { return nil }
         return textBlocks.first { $0.id == id }
+    }
+    /// The subtitle lane shows only when a track with at least one cue exists.
+    var showsSubtitleTimeline: Bool {
+        guard let s = subtitles else { return false }
+        return !s.cues.isEmpty
+    }
+    /// Cues shifted by the track offset and clamped to the clip — exactly what
+    /// renders. Empty when there is no track or every cue falls outside the clip.
+    var effectiveSubtitleCues: [SubtitleCue] {
+        guard let s = subtitles else { return [] }
+        return SubtitleTimeline.effective(s.cues, offset: s.offset, duration: duration)
     }
     /// The static "home" placement — the camera's resting state, held before the
     /// first block and used as the first block's "from".
@@ -281,6 +307,7 @@ final class StudioModel: ObservableObject {
         cameraNeedsCompositor
             || cameraHasTimeline
             || !textBlocks.isEmpty
+            || showsSubtitleTimeline
             || !zoomBlocks.isEmpty
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
@@ -366,6 +393,16 @@ final class StudioModel: ObservableObject {
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
+            // Keep cues raw; the offset is applied at consumption. A track whose
+            // cues all fall outside the clip (after offset) loads as no subtitles
+            // (the .srt file is left in the bundle).
+            if let track = edit.subtitles {
+                let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
+                                                           duration: duration)
+                subtitles = surviving.isEmpty ? nil
+                    : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
+                                    cues: track.cues, offset: track.offset)
+            }
             zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
             applyVideoComposition()
             applyAudioMix()
@@ -753,7 +790,7 @@ final class StudioModel: ObservableObject {
     /// inside its span so the preview shows the zoom.
     func selectZoomBlock(_ id: UUID?) {
         selectedZoomBlockID = id
-        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil }
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false }
         if let id, let b = zoomBlocks.first(where: { $0.id == id }) {
             seek(to: min((b.begin + b.end) / 2, duration))
         }
@@ -848,7 +885,7 @@ final class StudioModel: ObservableObject {
     func selectTextBlock(_ id: UUID?) {
         if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil; selectedZoomBlockID = nil }
+        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -962,6 +999,9 @@ final class StudioModel: ObservableObject {
     func deselectAll() {
         deselectText()
         selectedBlockID = nil
+        selectedZoomBlockID = nil
+        if draggingSubtitle { endDraggingSubtitle() }
+        subtitleSelected = false
     }
 
     // MARK: Canvas pan/zoom (inspection only)
@@ -1058,11 +1098,159 @@ final class StudioModel: ObservableObject {
     func setTextBoxWidth(_ v: Double) { updateSelectedText(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
     func setTextAutoWrap(_ on: Bool) { updateSelectedText(commit: true) { $0.autoWrap = on } }
 
+    // MARK: - Subtitles
+
+    /// Import an `.srt`: copy it into the bundle and parse its cues (stored raw;
+    /// the track offset is applied at consumption), then show the subtitle lane.
+    /// Runs off the main actor with a loader. Replacing an existing track
+    /// preserves the current style and offset. No-op while already busy.
+    func importSubtitles(from url: URL) {
+        guard subtitleState == .idle else { return }
+        subtitleState = .applying
+        let bundle = self.bundle
+        let duration = self.duration
+        let existingStyle = subtitles?.style
+        let existingOffset = subtitles?.offset ?? 0
+        Task { @MainActor in
+            let track: SubtitleTrack? = await Task.detached {
+                guard let name = try? bundle.writeSubtitleFile(from: url) else { return nil }
+                let fileURL = bundle.subtitleFileURL(name)
+                let raw: String
+                if let data = try? Data(contentsOf: fileURL) {
+                    raw = String(data: data, encoding: .utf8)
+                        ?? String(data: data, encoding: .isoLatin1)
+                        ?? ""
+                } else {
+                    raw = ""
+                }
+                let parsed = SubtitleParser.parse(raw)
+                guard !SubtitleTimeline.effective(parsed, offset: existingOffset,
+                                                  duration: duration).isEmpty else { return nil }
+                return SubtitleTrack(srtFilename: name,
+                                     style: existingStyle ?? SubtitleStyle(),
+                                     cues: parsed, offset: existingOffset)
+            }.value
+
+            guard let track else {
+                bundle.deleteSubtitleFile()
+                subtitleState = .idle
+                Log.studio.error("subtitle import failed or produced no cues")
+                return
+            }
+            subtitles = track
+            subtitleSelected = true
+            selectedTextBlockID = nil
+            selectedBlockID = nil
+            selectedZoomBlockID = nil
+            refreshPlayerItemForCanvasChange()
+            applyVideoComposition()
+            saveEdit()
+            subtitleState = .idle
+        }
+    }
+
+    /// Remove the subtitle track + its `.srt` and hide the lane. Loader-gated.
+    func removeSubtitles() {
+        guard subtitleState == .idle, subtitles != nil else { return }
+        subtitleState = .removing
+        let bundle = self.bundle
+        Task { @MainActor in
+            await Task.detached { bundle.deleteSubtitleFile() }.value
+            subtitles = nil
+            subtitleSelected = false
+            draggingSubtitle = false
+            refreshPlayerItemForCanvasChange()
+            applyVideoComposition()
+            saveEdit()
+            subtitleState = .idle
+        }
+    }
+
+    /// Select the subtitle track for configuration (clears camera/text
+    /// selection); pass false to deselect.
+    func selectSubtitles(_ on: Bool) {
+        subtitleSelected = on
+        if on {
+            selectedTextBlockID = nil
+            selectedBlockID = nil
+            selectedZoomBlockID = nil
+        }
+    }
+
+    func commitSubtitleEdit() { saveEdit() }
+
+    /// Mutate the shared subtitle style live (applies to every cue). Discrete
+    /// edits commit immediately; slider drags pass `commit: false` and persist on
+    /// end via `commitSubtitleEdit`.
+    private func updateSubtitleStyle(commit: Bool, _ mutate: (inout SubtitleStyle) -> Void) {
+        guard subtitles != nil else { return }
+        mutate(&subtitles!.style)
+        applyVideoComposition()
+        if commit { saveEdit() }
+    }
+
+    func setSubtitleFontName(_ name: String) { updateSubtitleStyle(commit: true) { $0.fontName = name } }
+    func setSubtitleFontSize(_ v: Double) { updateSubtitleStyle(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
+    func setSubtitleWeight(_ w: TextWeight) { updateSubtitleStyle(commit: true) { $0.fontWeight = w } }
+    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.colorHex = hex } }
+    func setSubtitleAlignment(_ a: TextAlignmentH) { updateSubtitleStyle(commit: true) { $0.alignment = a } }
+    func setSubtitleBoxEnabled(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.boxEnabled = on } }
+    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.boxHex = hex } }
+    func setSubtitleBoxOpacity(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
+    func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
+    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
+    func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
+    func setSubtitleBoxWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
+
+    /// Shift every cue by `seconds` (added to begin/end). Clamped to a finite
+    /// guard range — intentionally NOT tied to `duration`, so a begin-trim larger
+    /// than the trimmed clip can still be corrected. Recomposites + saves.
+    /// A discrete control (stepper / formatted field), so it always commits —
+    /// unlike the `commit: false` slider setters; do not wrap it in a deferred
+    /// commit path.
+    func setSubtitleOffset(_ seconds: Double) {
+        guard subtitles != nil else { return }
+        subtitles!.offset = min(max(-86_400, seconds), 86_400)
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Align cue #1 (the smallest raw `begin`) to the current playhead.
+    func setSubtitleOffsetFromPlayhead() {
+        guard let cues = subtitles?.cues, let minBegin = cues.map(\.begin).min() else { return }
+        setSubtitleOffset(currentTime - minBegin)
+    }
+
+    /// Begin a canvas position drag: select the track and suppress the baked
+    /// subtitles (one recomposite) so the smooth overlay drives motion.
+    func beginDraggingSubtitle() {
+        selectSubtitles(true)
+        draggingSubtitle = true
+        applyVideoComposition()
+    }
+
+    /// Live position update during a drag — moves the shared style (all cues
+    /// follow). No recomposite, so it stays smooth.
+    func dragSubtitlePosition(x: Double, y: Double) {
+        guard subtitles != nil else { return }
+        subtitles!.style.centerX = min(max(0, x), 1)
+        subtitles!.style.centerY = min(max(0, y), 1)
+    }
+
+    /// End the drag: un-suppress, recomposite at the final position, and persist.
+    func endDraggingSubtitle() {
+        guard draggingSubtitle else { return }
+        draggingSubtitle = false
+        applyVideoComposition()
+        saveEdit()
+    }
+
     /// Select a block and park the playhead at its settled (end) state so the
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
-        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil }   // camera vs text vs zoom: one selection at a time
+        // camera vs text vs zoom vs subtitle: one selection at a time
+        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false }
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
@@ -1500,6 +1688,15 @@ final class StudioModel: ObservableObject {
             layout.textTimeline = TextTimelineSpec(blocks: textBlocks)
             layout.suppressedTextBlockID = draggingTextBlockID
         }
+        // Subtitle cues (rendered below text blocks). Suppressed entirely while
+        // the canvas position box is being dragged — the smooth overlay drives
+        // motion, the cue re-bakes at the dropped position.
+        if let track = subtitles, !draggingSubtitle {
+            let cues = effectiveSubtitleCues
+            if !cues.isEmpty {
+                layout.subtitles = SubtitleTimelineSpec(style: track.style, cues: cues)
+            }
+        }
 
         // Auto zoom/pan: pre-build the smoothed track from blocks + cursor
         // samples (cursor data is loaded regardless of the showCursor toggle).
@@ -1652,6 +1849,7 @@ final class StudioModel: ObservableObject {
             canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
             textBlocks: textBlocks,
+            subtitles: subtitles,
             zoomBlocks: zoomBlocks
         )
         try? bundle.writeEdit(edit)

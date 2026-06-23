@@ -214,6 +214,89 @@ import Foundation
         #expect(edit.cameraBlocks.isEmpty)
     }
 
+    @Test func subtitlesRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = SubtitleTrack(
+            srtFilename: "subtitles.srt",
+            style: SubtitleStyle(centerY: 0.8, fontSize: 0.07, colorHex: "#FFEE00"),
+            cues: [SubtitleCue(begin: 1, end: 2.5, text: "Hello"),
+                   SubtitleCue(begin: 3, end: 4, text: "World")])
+        var edit = EditState()
+        edit.subtitles = track
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().subtitles == track)
+    }
+
+    @Test func legacyEditJSONHasNilSubtitles() throws {
+        let json = #"{"schemaVersion":1,"trimIn":0}"#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.subtitles == nil)
+    }
+
+    @Test func subtitleCueMissingIdDecodes() throws {
+        let json = #"{"begin":1.0,"end":2.0,"text":"Hi"}"#
+        let cue = try JSONDecoder().decode(SubtitleCue.self, from: Data(json.utf8))
+        #expect(cue.begin == 1.0 && cue.end == 2.0 && cue.text == "Hi")
+    }
+
+    @Test func subtitleOffsetRoundTrips() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = SubtitleTrack(
+            srtFilename: "subtitles.srt",
+            cues: [SubtitleCue(begin: 1, end: 2, text: "Hi")],
+            offset: -2.5)
+        var edit = EditState()
+        edit.subtitles = track
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().subtitles?.offset == -2.5)
+    }
+
+    @Test func legacySubtitleTrackHasZeroOffset() throws {
+        let json = #"{"srtFilename":"s.srt","style":{},"cues":[{"begin":1,"end":2,"text":"Hi"}]}"#
+        let track = try JSONDecoder().decode(SubtitleTrack.self, from: Data(json.utf8))
+        #expect(track.offset == 0)
+    }
+
+    @Test func subtitleStyleMapsToTextBlock() {
+        let style = SubtitleStyle(centerX: 0.4, centerY: 0.7, fontName: "Georgia",
+                                  fontSize: 0.08, fontWeight: .bold, colorHex: "#112233",
+                                  alignment: .leading, strokeWidth: 0.05, strokeHex: "#445566",
+                                  boxEnabled: true, boxHex: "#778899", boxOpacity: 0.6,
+                                  shadow: false, boxWidth: 0.55)
+        let id = UUID()
+        let b = style.asTextBlock(id: id, begin: 1, end: 2, text: "Hi")
+        #expect(b.id == id)
+        #expect(b.begin == 1 && b.end == 2 && b.text == "Hi")
+        #expect(b.centerX == 0.4 && b.centerY == 0.7)
+        #expect(b.fontName == "Georgia" && b.fontSize == 0.08 && b.fontWeight == .bold)
+        #expect(b.colorHex == "#112233" && b.alignment == .leading)
+        #expect(b.strokeWidth == 0.05 && b.strokeHex == "#445566")
+        #expect(b.boxEnabled && b.boxHex == "#778899" && b.boxOpacity == 0.6)
+        #expect(b.shadow == false)
+        // Box width carries through; subtitles always auto-wrap to that width.
+        #expect(b.boxWidth == 0.55 && b.autoWrap == true)
+    }
+
+    @Test func subtitleStyleBoxWidthRoundTrips() throws {
+        let style = SubtitleStyle(boxWidth: 0.6)
+        let data = try JSONEncoder().encode(style)
+        #expect(try JSONDecoder().decode(SubtitleStyle.self, from: data).boxWidth == 0.6)
+    }
+
+    @Test func legacySubtitleStyleHasDefaultBoxWidth() throws {
+        let json = #"{"centerX":0.5,"centerY":0.85}"#
+        let style = try JSONDecoder().decode(SubtitleStyle.self, from: Data(json.utf8))
+        #expect(style.boxWidth == 0.9)
+    }
+
     @Test func textBlockNewFieldsRoundTrip() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
