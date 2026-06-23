@@ -263,4 +263,26 @@ import Foundation
         let decoded = try JSONDecoder().decode(EditState.self, from: json)
         #expect(decoded.zoomBlocks.isEmpty)
     }
+
+    @Test func zoomBlockSensitivityRoundTrip() throws {
+        var state = EditState()
+        state.zoomBlocks = [
+            ZoomBlock(begin: 1, end: 3, scale: 2.0, sensitivity: 0.2),
+            ZoomBlock(begin: 4, end: 6, scale: nil, sensitivity: nil),
+        ]
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.zoomBlocks == state.zoomBlocks)
+        #expect(decoded.zoomBlocks[0].sensitivity == 0.2)
+        #expect(decoded.zoomBlocks[1].sensitivity == nil)
+    }
+
+    @Test func zoomBlockMissingSensitivityDecodesNil() throws {
+        // A zoom block written before `sensitivity` existed (only scale present).
+        let json = #"{"zoomBlocks":[{"id":"00000000-0000-0000-0000-000000000000","begin":1,"end":3,"scale":2}]}"#
+            .data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.zoomBlocks.count == 1)
+        #expect(decoded.zoomBlocks[0].sensitivity == nil)
+    }
 }

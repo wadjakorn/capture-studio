@@ -127,12 +127,18 @@ struct ZoomBlock: Codable, Equatable, Identifiable {
     var begin: Double
     var end: Double
     var scale: Double?
+    /// How aggressively auto-zoom pans toward the cursor (0 = calm / ignore
+    /// small moves, 1 = snappy). nil = use the global default
+    /// (`autoZoomDefaultSensitivity`). Mirrors `scale`'s override semantics.
+    var sensitivity: Double?
 
-    init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil) {
+    init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
+         sensitivity: Double? = nil) {
         self.id = id
         self.begin = begin
         self.end = end
         self.scale = scale
+        self.sensitivity = sensitivity
     }
 }
 
