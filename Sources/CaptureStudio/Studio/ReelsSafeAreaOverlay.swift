@@ -14,8 +14,8 @@ struct ReelsSafeAreaOverlay: View {
     // Proportions of the 9:16 content rect (TikTok-ish; tune freely).
     private let topBarH: CGFloat = 0.095   // Following / For You / search
     private let colWidth: CGFloat = 0.16   // right action column width
-    private let colTop: CGFloat = 0.36     // column top (avatar level)
-    private let baseTop: CGFloat = 0.745   // thick base top (caption / nav)
+    private let colTop: CGFloat = 0.50     // column top (avatar level)
+    private let baseTop: CGFloat = 0.86    // thick base top (caption / nav)
 
     var body: some View {
         GeometryReader { geo in
