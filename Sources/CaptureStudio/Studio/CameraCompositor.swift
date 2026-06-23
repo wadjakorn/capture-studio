@@ -53,6 +53,8 @@ struct CompositorLayout {
     /// the composited preview so the moving SwiftUI overlay isn't doubled by a
     /// stale baked copy. nil = render all active.
     var suppressedTextBlockID: UUID?
+    /// Subtitle cues (rendered below text blocks). nil / empty = none.
+    var subtitles: SubtitleTimelineSpec?
 
     // Cursor / click overlays (composited from events.jsonl).
     var showCursor: Bool = false
@@ -74,6 +76,14 @@ struct CameraTimelineSpec {
 /// frame time.
 struct TextTimelineSpec {
     var blocks: [TextBlock]
+}
+
+/// The subtitle cues + shared style for a composition. Cues are read-only; the
+/// compositor renders all cues active at the frame time, beneath the text blocks
+/// (so manual annotations sit on top).
+struct SubtitleTimelineSpec {
+    var style: SubtitleStyle
+    var cues: [SubtitleCue]
 }
 
 /// Frame-shape mask, optional border ring, and drop shadow for a camera PiP —
@@ -288,6 +298,17 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                            overlay: instruction.overlay) {
                 output = cursor.composited(over: output)
+            }
+
+            // Subtitles sit above cursor/camera but below manual text blocks.
+            if let sub = layout.subtitles {
+                for cue in SubtitleTimeline.active(at: now, cues: sub.cues) {
+                    let block = sub.style.asTextBlock(id: cue.id, begin: cue.begin,
+                                                      end: cue.end, text: cue.text)
+                    if let img = textImage(block, canvas: layout.canvas) {
+                        output = img.composited(over: output)
+                    }
+                }
             }
 
             // Text/captions sit topmost. All blocks active at `now`, in array
