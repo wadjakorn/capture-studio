@@ -60,8 +60,9 @@ import CoreGraphics
 
     @Test func focusAnticipatesUpcomingMovement() {
         // Lead should pull focus toward the upcoming x=800 before t=2 (when the
-        // cursor is still physically at x=200).
-        var cfg = AutoZoomConfig(); cfg.lead = 0.4; cfg.smoothing = 0.05
+        // cursor is still physically at x=200). Max sensitivity = snappy + tiny
+        // deadzone, so the drift is clearly visible.
+        var cfg = AutoZoomConfig(); cfg.lead = 0.4; cfg.defaultSensitivity = 1.0
         let blocks = [ZoomBlock(begin: 0, end: 4, scale: 2)]
         let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
                                         sourceSize: source, config: cfg)
@@ -98,5 +99,55 @@ import CoreGraphics
         let f = AutoZoomTrack.sample(at: 2.0, track: track).focus
         #expect(f.x <= 1000)
         #expect(f.x >= 0)
+    }
+
+    @Test func tuningEndpointsClampAndMonotonic() {
+        let lo = AutoZoomTrack.tuning(0)
+        let hi = AutoZoomTrack.tuning(1)
+        #expect(abs(lo.idleSpeed - 200) < 1e-9)
+        #expect(abs(lo.smoothing - 0.30) < 1e-9)
+        #expect(abs(hi.idleSpeed - 10) < 1e-9)
+        #expect(abs(hi.smoothing - 0.05) < 1e-9)
+        // Higher sensitivity → smaller deadzone and less lag.
+        #expect(hi.idleSpeed < lo.idleSpeed)
+        #expect(hi.smoothing < lo.smoothing)
+        // Clamps out-of-range input.
+        #expect(AutoZoomTrack.tuning(-1).idleSpeed == 200)
+        #expect(AutoZoomTrack.tuning(2).idleSpeed == 10)
+    }
+
+    // Cursor drifts slowly: 200 → 260 over 4s ≈ 15 px/s.
+    private func slowDriftCursor() -> [CursorSample] {
+        var s: [CursorSample] = []
+        var t = 0.0
+        while t <= 5.0 {
+            let x = 200 + min(60, t * 15)
+            s.append(CursorSample(t: t, p: CGPoint(x: x, y: 500), cursor: "arrow"))
+            t += 1.0 / 60.0
+        }
+        return s
+    }
+
+    @Test func lowSensitivityIgnoresSlowMoveHighFollows() {
+        let cursor = slowDriftCursor()
+        // s=0 → deadzone 200 px/s, well above the 15 px/s drift → frozen.
+        let low = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 0)],
+                                      cursorSamples: cursor, sourceSize: source)
+        // s=1 → deadzone 10 px/s, below the drift → follows.
+        let high = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 1)],
+                                       cursorSamples: cursor, sourceSize: source)
+        let lowFocus = AutoZoomTrack.sample(at: 3.0, track: low).focus.x
+        let highFocus = AutoZoomTrack.sample(at: 3.0, track: high).focus.x
+        #expect(lowFocus < 215)               // stayed near start (ignored slow drift)
+        #expect(highFocus > lowFocus + 10)    // followed the drift
+    }
+
+    @Test func perBlockSensitivityOverridesDefault() {
+        let cursor = slowDriftCursor()
+        var cfg = AutoZoomConfig(); cfg.defaultSensitivity = 0   // global = calm
+        // Per-block override to snappy should follow despite the calm default.
+        let track = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 1)],
+                                        cursorSamples: cursor, sourceSize: source, config: cfg)
+        #expect(AutoZoomTrack.sample(at: 3.0, track: track).focus.x > 215)
     }
 }

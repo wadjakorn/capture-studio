@@ -18,11 +18,12 @@ struct AutoZoomConfig {
     var lead: Double = 0.4
     /// Zoom-in / zoom-out ramp duration (each end of a block).
     var ramp: Double = 0.4
-    /// Cursor speed (source px/sec) below which the cursor is "still": the pan
-    /// target freezes (hold zoom, freeze pan).
-    var idleSpeed: Double = 40
-    /// Exponential focus-smoothing time constant (seconds).
-    var smoothing: Double = 0.12
+    /// How aggressively the pan follows the cursor, 0…1 (0 = calm / big
+    /// deadzone + laggy, 1 = snappy / tiny deadzone + responsive). Resolved to
+    /// the low-level deadzone + smoothing via `AutoZoomTrack.tuning`. Overridden
+    /// per block by `ZoomBlock.sensitivity`, or globally by
+    /// `autoZoomDefaultSensitivity`.
+    var defaultSensitivity: Double = 0.5
     /// Keyframe sampling step (seconds).
     var step: Double = 1.0 / 60.0
 }
@@ -38,7 +39,6 @@ enum AutoZoomTrack {
                       config: AutoZoomConfig = AutoZoomConfig()) -> [ZoomKeyframe] {
         guard !blocks.isEmpty else { return [] }
         let center = CGPoint(x: sourceSize.width / 2, y: sourceSize.height / 2)
-        let alpha = 1 - exp(-config.step / max(config.smoothing, 1e-4))
         var out: [ZoomKeyframe] = []
 
         for block in blocks.sorted(by: { $0.begin < $1.begin }) {
@@ -46,6 +46,9 @@ enum AutoZoomTrack {
             guard span > 0 else { continue }
             let target = max(1, block.scale ?? config.defaultScale)
             let ramp = min(config.ramp, span / 2)
+            // Per-block sensitivity → deadzone + smoothing.
+            let (idleSpeed, smoothing) = tuning(block.sensitivity ?? config.defaultSensitivity)
+            let alpha = 1 - exp(-config.step / max(smoothing, 1e-4))
 
             // Seed the smoothed focus on the cursor at the block start.
             var focus = cursorPoint(at: block.begin, in: cursorSamples) ?? center
@@ -60,7 +63,7 @@ enum AutoZoomTrack {
                 let aheadT = min(t + config.lead, block.end)
                 let raw = cursorPoint(at: aheadT, in: cursorSamples) ?? center
                 let speed = cursorSpeed(at: aheadT, in: cursorSamples, dt: config.step)
-                let desired = speed < config.idleSpeed ? lastTarget : raw
+                let desired = speed < idleSpeed ? lastTarget : raw
                 lastTarget = desired
                 // Exponential smoothing toward the target, clamped to source.
                 focus.x += (desired.x - focus.x) * alpha
@@ -103,6 +106,14 @@ enum AutoZoomTrack {
     }
 
     // MARK: - Helpers
+
+    /// Map a 0…1 sensitivity to the low-level pan knobs. Low sensitivity = large
+    /// deadzone (ignore small/slow moves) + heavy smoothing (laggy); high =
+    /// small deadzone + light smoothing (snappy).
+    static func tuning(_ s: Double) -> (idleSpeed: Double, smoothing: Double) {
+        let c = min(max(s, 0), 1)
+        return (idleSpeed: 200 - 190 * c, smoothing: 0.30 - 0.25 * c)
+    }
 
     private static func scaleAt(_ t: Double, begin: Double, end: Double,
                                 ramp: Double, target: Double) -> Double {
