@@ -689,7 +689,7 @@ struct StudioView: View {
                 Stepper("", value: Binding(
                     get: { Double(px) },
                     set: { model.setTextFontSize($0 / h); model.commitTextEdit() }
-                ), in: 1...h, step: 1)
+                ), in: 1...(h * 0.5), step: 1)
                 .labelsHidden()
             }
             Slider(value: Binding(

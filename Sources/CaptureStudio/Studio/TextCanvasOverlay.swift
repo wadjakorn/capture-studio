@@ -3,7 +3,7 @@ import SwiftUI
 /// On-canvas affordance for the selected text/caption block: a transparent
 /// selection box, sized to the baked text (via the shared `TextImageRenderer`),
 /// that drags to reposition. Text content is NOT edited here — that happens in
-/// the timeline-anchored input popover. The text itself is always burned into
+/// the inline caption field in the text tool group. The text itself is always burned into
 /// preview frames by the compositor; this view only draws the box.
 ///
 /// A SwiftUI layer ON TOP of the `NSViewRepresentable` player (SwiftUI

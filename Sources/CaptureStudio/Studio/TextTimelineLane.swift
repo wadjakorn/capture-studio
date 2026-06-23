@@ -6,8 +6,7 @@ import SwiftUI
 /// `TextTimeline.subRows`) and grows only as overlaps appear — one row when
 /// nothing overlaps, capped with internal scroll past `maxVisibleRows`. Each
 /// block shows its (truncated) text, drags to retime, has edge handles to
-/// resize (overlap allowed — no neighbor clamp), taps to select, and
-/// double-clicks to open the canvas editor.
+/// resize (overlap allowed — no neighbor clamp), taps to select.
 struct TextTimelineLane: View {
     @ObservedObject var model: StudioModel
 

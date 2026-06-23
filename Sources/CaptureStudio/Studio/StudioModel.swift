@@ -47,8 +47,7 @@ final class StudioModel: ObservableObject {
     static let defaultBlockWidth = 0.5
     // Text/caption timeline. Multiple instances, MAY overlap in time; array
     // order is the z-order (later = on top) and is never re-sorted. The selected
-    // block is the one the lane + style bar + canvas overlay edit; the editing
-    // block is the one with its inline canvas editor open. Persisted to edit.json.
+    // block is the one the lane + style bar + canvas overlay edit. Persisted to edit.json.
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
     /// Set while a text block is being dragged on the canvas, so the compositor
