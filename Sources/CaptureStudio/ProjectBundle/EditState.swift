@@ -117,6 +117,31 @@ struct CameraBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// One auto-zoom span on the screen-track timeline. During `[begin, end)` the
+/// canvas zooms in and pans to follow the cursor (see `AutoZoomTrack`). Blocks
+/// never overlap (a single zoom state at a time), mirroring `CameraBlock`.
+/// `scale` is the target magnification (≥1); nil means use the global default
+/// (`autoZoomDefaultScale`).
+struct ZoomBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var scale: Double?
+    /// How aggressively auto-zoom pans toward the cursor (0 = calm / ignore
+    /// small moves, 1 = snappy). nil = use the global default
+    /// (`autoZoomDefaultSensitivity`). Mirrors `scale`'s override semantics.
+    var sensitivity: Double?
+
+    init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
+         sensitivity: Double? = nil) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.scale = scale
+        self.sensitivity = sensitivity
+    }
+}
+
 /// Text/caption font weight. Unknown raw strings (future versions) decode as
 /// `semibold`.
 enum TextWeight: String, Codable, CaseIterable, Equatable {
@@ -318,6 +343,9 @@ struct EditState: Codable, Equatable {
     /// time (unlike `cameraBlocks`); render / z-order is the array order here
     /// (later element = on top), so this is never re-sorted on store.
     var textBlocks: [TextBlock] = []
+    /// Auto-zoom blocks. Empty = no auto zoom/pan. Non-overlapping; during each
+    /// block the canvas zooms + pans to follow the cursor.
+    var zoomBlocks: [ZoomBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
@@ -335,7 +363,8 @@ struct EditState: Codable, Equatable {
          canvasBackground: CanvasBackground = .black,
          canvasBackgroundBlur: Double = 0.03,
          canvasBackgroundImage: String? = nil,
-         cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = []) {
+         cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
+         zoomBlocks: [ZoomBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
@@ -366,6 +395,7 @@ struct EditState: Codable, Equatable {
         self.canvasBackgroundImage = canvasBackgroundImage
         self.cameraBlocks = cameraBlocks
         self.textBlocks = textBlocks
+        self.zoomBlocks = zoomBlocks
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -408,6 +438,7 @@ struct EditState: Codable, Equatable {
         canvasBackgroundImage = try c.decodeIfPresent(String.self, forKey: .canvasBackgroundImage)
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
+        zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
     }
 }
 

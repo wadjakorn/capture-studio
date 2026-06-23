@@ -175,6 +175,9 @@ struct CursorGlyph {
 struct OverlayPayload {
     var cursorSamples: [CursorSample] = []
     var clickSamples: [ClickSample] = []
+    /// Pre-built auto-zoom track (screen-source focus + magnification per time).
+    /// Empty = no auto zoom/pan. Interpolated per frame; see `AutoZoomTrack`.
+    var autoZoom: [ZoomKeyframe] = []
     /// Cursor name → glyph; falls back to "arrow".
     var glyphs: [String: CursorGlyph] = [:]
     /// Click ring image (square, centered circle stroke), origin (0,0).
@@ -268,26 +271,35 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 request.finish(with: CompositorError.noFrame)
                 return
             }
-            var output = screenCanvasImage(screenBuf, layout: layout,
-                                           backgroundImage: instruction.overlay.backgroundImage)
             let now = request.compositionTime.seconds
+
+            // Resolve auto-zoom for this frame (identity when scale == 1).
+            let zoom = AutoZoomTrack.sample(at: now, track: instruction.overlay.autoZoom)
+            let focusCanvas = Self.sourceToCanvas(zoom.focus, layout: layout)
+            func zoomed(_ img: CIImage) -> CIImage {
+                Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
+                             canvas: layout.canvas)
+            }
+
+            var output = zoomed(screenCanvasImage(screenBuf, layout: layout,
+                                                  backgroundImage: instruction.overlay.backgroundImage))
 
             if let cameraID = layout.cameraTrackID,
                let cameraBuf = request.sourceFrame(byTrackID: cameraID),
                let camera = cameraImage(cameraBuf, at: now, layout: layout,
                                         instruction: instruction) {
-                output = camera.composited(over: output)
+                output = camera.composited(over: output)   // camera is NOT zoomed
             }
 
-            // Click rings sit under the cursor; both above screen + camera.
+            // Click rings sit under the cursor; both ride the screen zoom.
             if layout.clickFeedback {
                 for ring in clickRings(at: now, layout: layout, overlay: instruction.overlay) {
-                    output = ring.composited(over: output)
+                    output = zoomed(ring).composited(over: output)
                 }
             }
             if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                            overlay: instruction.overlay) {
-                output = cursor.composited(over: output)
+                output = zoomed(cursor).composited(over: output)
             }
 
             // Text/captions sit topmost. All blocks active at `now`, in array
@@ -493,6 +505,21 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     private static func sourceToCanvas(_ p: CGPoint, layout: CompositorLayout) -> CGPoint {
         let pl = screenPlacement(layout)
         return CGPoint(x: pl.origin.x + p.x * pl.scale, y: pl.origin.y + p.y * pl.scale)
+    }
+
+    /// Magnify an already-placed canvas-space image by `scale` around a canvas
+    /// focus point (top-left origin). Identity when `scale <= 1`. Used to apply
+    /// auto-zoom to the screen + cursor + click layers (camera/text are not
+    /// passed through this, so they stay fixed).
+    private static func magnify(_ image: CIImage, scale: CGFloat,
+                                focusCanvas: CGPoint, canvas: CGSize) -> CIImage {
+        guard scale > 1.0001 else { return image }
+        let fx = focusCanvas.x
+        let fy = canvas.height - focusCanvas.y          // top-left → CI bottom-left
+        let t = CGAffineTransform(translationX: -fx, y: -fy)
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(translationX: fx, y: fy))
+        return image.transformed(by: t)
     }
 
     /// Canvas pixels per screen point (glyph sizing).

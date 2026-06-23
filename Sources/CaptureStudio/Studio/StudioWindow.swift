@@ -122,6 +122,9 @@ struct StudioView: View {
             if !model.textBlocks.isEmpty {
                 laneRow("textformat") { TextTimelineLane(model: model) }
             }
+            if model.showsZoomTimeline {
+                laneRow("plus.magnifyingglass") { ZoomTimelineLane(model: model) }
+            }
 
             Divider().padding(.vertical, 2)
 
@@ -146,6 +149,7 @@ struct StudioView: View {
                     toolGroup { cameraControls }
                 }
                 toolGroup { textControls }
+                toolGroup { zoomControls }
                 toolGroup { cursorControls }
             }
         }
@@ -392,6 +396,55 @@ struct StudioView: View {
             .overlay(RoundedRectangle(cornerRadius: 5)
                 .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
             .help("Edit caption text · Shift+Return for a new line")
+        }
+    }
+
+    @ViewBuilder private var zoomControls: some View {
+        Button { model.addZoomBlock() } label: {
+            Label("Add zoom", systemImage: "plus.magnifyingglass")
+        }
+        .help("Add an auto zoom/pan block at the playhead")
+
+        Button {
+            if let id = model.selectedZoomBlockID { model.removeZoomBlock(id) }
+        } label: {
+            Image(systemName: "minus.magnifyingglass")
+        }
+        .disabled(model.selectedZoomBlockID == nil)
+        .help("Delete the selected zoom block")
+
+        if model.selectedZoomBlockID != nil {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .foregroundStyle(.secondary)
+                Slider(
+                    value: Binding(get: { model.selectedZoomScale },
+                                   set: { model.setZoomScale($0) }),
+                    in: 1...6,
+                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
+                )
+                .frame(width: 90)
+                Text(String(format: "%.1f×", model.selectedZoomScale))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .help("Zoom magnification for the selected block")
+
+            HStack(spacing: 4) {
+                Image(systemName: "hand.draw")
+                    .foregroundStyle(.secondary)
+                Slider(
+                    value: Binding(get: { model.selectedZoomSensitivity },
+                                   set: { model.setZoomSensitivity($0) }),
+                    in: 0...1,
+                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
+                )
+                .frame(width: 90)
+                Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .help("Follow sensitivity — how aggressively the zoom pans toward the cursor (low = calm, high = snappy)")
         }
     }
 
