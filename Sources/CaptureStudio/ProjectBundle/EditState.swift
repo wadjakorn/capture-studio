@@ -238,6 +238,120 @@ struct TextBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// One subtitle cue parsed from an `.srt`: a `[begin, end)` span and read-only
+/// text. Unlike `TextBlock`, a cue carries no style — the whole subtitle track
+/// shares one `SubtitleStyle`.
+struct SubtitleCue: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var text: String
+
+    init(id: UUID = UUID(), begin: Double, end: Double, text: String) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.text = text
+    }
+}
+
+/// The one shared, user-configured look for every subtitle cue. Fields mirror
+/// `TextBlock` styling so the existing `TextImageRenderer` renders cues unchanged
+/// via `asTextBlock`. Position is normalized 0–1 in render space (top-left
+/// origin); `fontSize` is a fraction of canvas height.
+struct SubtitleStyle: Codable, Equatable {
+    var centerX: Double
+    var centerY: Double
+    var fontName: String
+    var fontSize: Double
+    var fontWeight: TextWeight
+    var colorHex: String
+    var alignment: TextAlignmentH
+    var strokeWidth: Double
+    var strokeHex: String
+    var boxEnabled: Bool
+    var boxHex: String
+    var boxOpacity: Double
+    var shadow: Bool
+
+    init(centerX: Double = 0.5, centerY: Double = 0.85,
+         fontName: String = "Helvetica", fontSize: Double = 0.05,
+         fontWeight: TextWeight = .semibold, colorHex: String = "#FFFFFF",
+         alignment: TextAlignmentH = .center, strokeWidth: Double = 0,
+         strokeHex: String = "#000000", boxEnabled: Bool = false,
+         boxHex: String = "#000000", boxOpacity: Double = 0.5,
+         shadow: Bool = true) {
+        self.centerX = centerX
+        self.centerY = centerY
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.fontWeight = fontWeight
+        self.colorHex = colorHex
+        self.alignment = alignment
+        self.strokeWidth = strokeWidth
+        self.strokeHex = strokeHex
+        self.boxEnabled = boxEnabled
+        self.boxHex = boxHex
+        self.boxOpacity = boxOpacity
+        self.shadow = shadow
+    }
+
+    // Custom decode so a track written by an older/newer in-between version with
+    // a missing field still loads, mirroring TextBlock / EditState.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        centerX = try c.decodeIfPresent(Double.self, forKey: .centerX) ?? 0.5
+        centerY = try c.decodeIfPresent(Double.self, forKey: .centerY) ?? 0.85
+        fontName = try c.decodeIfPresent(String.self, forKey: .fontName) ?? "Helvetica"
+        fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize) ?? 0.05
+        let weightRaw = try c.decodeIfPresent(String.self, forKey: .fontWeight)
+        fontWeight = weightRaw.flatMap(TextWeight.init(rawValue:)) ?? .semibold
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#FFFFFF"
+        let alignRaw = try c.decodeIfPresent(String.self, forKey: .alignment)
+        alignment = alignRaw.flatMap(TextAlignmentH.init(rawValue:)) ?? .center
+        strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
+        strokeHex = try c.decodeIfPresent(String.self, forKey: .strokeHex) ?? "#000000"
+        boxEnabled = try c.decodeIfPresent(Bool.self, forKey: .boxEnabled) ?? false
+        boxHex = try c.decodeIfPresent(String.self, forKey: .boxHex) ?? "#000000"
+        boxOpacity = try c.decodeIfPresent(Double.self, forKey: .boxOpacity) ?? 0.5
+        shadow = try c.decodeIfPresent(Bool.self, forKey: .shadow) ?? true
+    }
+
+    /// Synthesize a transient `TextBlock` for one cue so the existing renderer /
+    /// compositor text path draws it unchanged. `source` is `.manual` (cues are
+    /// never auto-captions).
+    func asTextBlock(id: UUID, begin: Double, end: Double, text: String) -> TextBlock {
+        TextBlock(id: id, begin: begin, end: end, text: text,
+                  centerX: centerX, centerY: centerY,
+                  fontName: fontName, fontSize: fontSize, fontWeight: fontWeight,
+                  colorHex: colorHex, alignment: alignment, boxEnabled: boxEnabled,
+                  boxHex: boxHex, boxOpacity: boxOpacity, strokeWidth: strokeWidth,
+                  strokeHex: strokeHex, shadow: shadow, source: .manual)
+    }
+}
+
+/// An imported subtitle track: the bundled `.srt` filename, the one shared style,
+/// and the read-only cues. Persisted on `EditState`; nil = no subtitles.
+struct SubtitleTrack: Codable, Equatable {
+    var srtFilename: String
+    var style: SubtitleStyle
+    var cues: [SubtitleCue]
+
+    init(srtFilename: String, style: SubtitleStyle = SubtitleStyle(),
+         cues: [SubtitleCue] = []) {
+        self.srtFilename = srtFilename
+        self.style = style
+        self.cues = cues
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        srtFilename = try c.decodeIfPresent(String.self, forKey: .srtFilename) ?? ""
+        style = try c.decodeIfPresent(SubtitleStyle.self, forKey: .style) ?? SubtitleStyle()
+        cues = try c.decodeIfPresent([SubtitleCue].self, forKey: .cues) ?? []
+    }
+}
+
 /// Studio edit state persisted as edit.json inside the bundle.
 /// All edits are metadata — master files are never mutated.
 struct EditState: Codable, Equatable {
@@ -306,6 +420,9 @@ struct EditState: Codable, Equatable {
     /// time (unlike `cameraBlocks`); render / z-order is the array order here
     /// (later element = on top), so this is never re-sorted on store.
     var textBlocks: [TextBlock] = []
+    /// Imported subtitle track (nil = none). Cues are read-only; `style` is the
+    /// shared look. The `.srt` itself lives in the bundle (see ProjectBundle).
+    var subtitles: SubtitleTrack? = nil
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
@@ -323,7 +440,8 @@ struct EditState: Codable, Equatable {
          canvasBackground: CanvasBackground = .black,
          canvasBackgroundBlur: Double = 0.03,
          canvasBackgroundImage: String? = nil,
-         cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = []) {
+         cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
+         subtitles: SubtitleTrack? = nil) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
@@ -354,6 +472,7 @@ struct EditState: Codable, Equatable {
         self.canvasBackgroundImage = canvasBackgroundImage
         self.cameraBlocks = cameraBlocks
         self.textBlocks = textBlocks
+        self.subtitles = subtitles
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -396,6 +515,7 @@ struct EditState: Codable, Equatable {
         canvasBackgroundImage = try c.decodeIfPresent(String.self, forKey: .canvasBackgroundImage)
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
+        subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
     }
 }
 

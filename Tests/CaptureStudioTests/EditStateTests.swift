@@ -213,4 +213,45 @@ import Foundation
         let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
         #expect(edit.cameraBlocks.isEmpty)
     }
+
+    @Test func subtitlesRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = SubtitleTrack(
+            srtFilename: "subtitles.srt",
+            style: SubtitleStyle(centerY: 0.8, fontSize: 0.07, colorHex: "#FFEE00"),
+            cues: [SubtitleCue(begin: 1, end: 2.5, text: "Hello"),
+                   SubtitleCue(begin: 3, end: 4, text: "World")])
+        var edit = EditState()
+        edit.subtitles = track
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().subtitles == track)
+    }
+
+    @Test func legacyEditJSONHasNilSubtitles() throws {
+        let json = #"{"schemaVersion":1,"trimIn":0}"#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.subtitles == nil)
+    }
+
+    @Test func subtitleStyleMapsToTextBlock() {
+        let style = SubtitleStyle(centerX: 0.4, centerY: 0.7, fontName: "Georgia",
+                                  fontSize: 0.08, fontWeight: .bold, colorHex: "#112233",
+                                  alignment: .leading, strokeWidth: 0.05, strokeHex: "#445566",
+                                  boxEnabled: true, boxHex: "#778899", boxOpacity: 0.6,
+                                  shadow: false)
+        let id = UUID()
+        let b = style.asTextBlock(id: id, begin: 1, end: 2, text: "Hi")
+        #expect(b.id == id)
+        #expect(b.begin == 1 && b.end == 2 && b.text == "Hi")
+        #expect(b.centerX == 0.4 && b.centerY == 0.7)
+        #expect(b.fontName == "Georgia" && b.fontSize == 0.08 && b.fontWeight == .bold)
+        #expect(b.colorHex == "#112233" && b.alignment == .leading)
+        #expect(b.strokeWidth == 0.05 && b.strokeHex == "#445566")
+        #expect(b.boxEnabled && b.boxHex == "#778899" && b.boxOpacity == 0.6)
+        #expect(b.shadow == false)
+    }
 }
