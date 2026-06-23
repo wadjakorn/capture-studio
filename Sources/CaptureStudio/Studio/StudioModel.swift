@@ -818,7 +818,7 @@ final class StudioModel: ObservableObject {
     func selectTextBlock(_ id: UUID?) {
         if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil }
+        if id != nil { selectedBlockID = nil; selectedZoomBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -1032,7 +1032,7 @@ final class StudioModel: ObservableObject {
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
-        if id != nil { selectedTextBlockID = nil }   // camera vs text: one selection at a time
+        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil }   // camera vs text vs zoom: one selection at a time
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
