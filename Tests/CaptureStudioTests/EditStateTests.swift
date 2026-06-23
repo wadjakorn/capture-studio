@@ -243,6 +243,28 @@ import Foundation
         #expect(cue.begin == 1.0 && cue.end == 2.0 && cue.text == "Hi")
     }
 
+    @Test func subtitleOffsetRoundTrips() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let track = SubtitleTrack(
+            srtFilename: "subtitles.srt",
+            cues: [SubtitleCue(begin: 1, end: 2, text: "Hi")],
+            offset: -2.5)
+        var edit = EditState()
+        edit.subtitles = track
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().subtitles?.offset == -2.5)
+    }
+
+    @Test func legacySubtitleTrackHasZeroOffset() throws {
+        let json = #"{"srtFilename":"s.srt","style":{},"cues":[{"begin":1,"end":2,"text":"Hi"}]}"#
+        let track = try JSONDecoder().decode(SubtitleTrack.self, from: Data(json.utf8))
+        #expect(track.offset == 0)
+    }
+
     @Test func subtitleStyleMapsToTextBlock() {
         let style = SubtitleStyle(centerX: 0.4, centerY: 0.7, fontName: "Georgia",
                                   fontSize: 0.08, fontWeight: .bold, colorHex: "#112233",

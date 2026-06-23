@@ -348,12 +348,14 @@ struct SubtitleTrack: Codable, Equatable {
     var srtFilename: String
     var style: SubtitleStyle
     var cues: [SubtitleCue]
+    var offset: Double           // seconds, added to every cue's begin/end (re-sync)
 
     init(srtFilename: String, style: SubtitleStyle = SubtitleStyle(),
-         cues: [SubtitleCue] = []) {
+         cues: [SubtitleCue] = [], offset: Double = 0) {
         self.srtFilename = srtFilename
         self.style = style
         self.cues = cues
+        self.offset = offset
     }
 
     init(from decoder: Decoder) throws {
@@ -361,6 +363,7 @@ struct SubtitleTrack: Codable, Equatable {
         srtFilename = try c.decodeIfPresent(String.self, forKey: .srtFilename) ?? ""
         style = try c.decodeIfPresent(SubtitleStyle.self, forKey: .style) ?? SubtitleStyle()
         cues = try c.decodeIfPresent([SubtitleCue].self, forKey: .cues) ?? []
+        offset = try c.decodeIfPresent(Double.self, forKey: .offset) ?? 0
     }
 }
 
