@@ -53,6 +53,10 @@ final class StudioModel: ObservableObject {
     // block is the one the lane + style bar + canvas overlay edit. Persisted to edit.json.
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
+    // Zoom/pan timeline. Blocks drive an auto-zoom track in the compositor.
+    // Persisted to edit.json.
+    @Published private(set) var zoomBlocks: [ZoomBlock] = []
+    @Published var selectedZoomBlockID: UUID?
     /// Set while a text block is being dragged on the canvas, so the compositor
     /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
     /// (no per-tick recomposite). Cleared on drop.
@@ -101,6 +105,16 @@ final class StudioModel: ObservableObject {
     /// The camera lane is shown only when the camera is visible *and* has a
     /// block timeline. Toggling the camera off hides the lane (blocks retained).
     var showsCameraTimeline: Bool { cameraVisible && cameraHasTimeline }
+    /// The zoom lane is shown only when there is at least one zoom block.
+    var showsZoomTimeline: Bool { !zoomBlocks.isEmpty }
+
+    /// Per-project default magnification for new/unset blocks (global config).
+    var autoZoomConfig: AutoZoomConfig {
+        var c = AutoZoomConfig()
+        let v = UserDefaults.standard.double(forKey: "autoZoomDefaultScale")
+        if v > 1 { c.defaultScale = v }
+        return c
+    }
     var selectedBlock: CameraBlock? {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
@@ -265,6 +279,7 @@ final class StudioModel: ObservableObject {
         cameraNeedsCompositor
             || cameraHasTimeline
             || !textBlocks.isEmpty
+            || !zoomBlocks.isEmpty
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
             || (cropAspect.isFit && canvasBackground != .black)
@@ -349,6 +364,7 @@ final class StudioModel: ObservableObject {
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
+            zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
             applyVideoComposition()
             applyAudioMix()
 
@@ -695,6 +711,88 @@ final class StudioModel: ObservableObject {
     func toggleBlockVisible(_ id: UUID) {
         guard let i = cameraBlocks.firstIndex(where: { $0.id == id }) else { return }
         cameraBlocks[i].visible.toggle()
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    // MARK: - Zoom timeline (auto zoom/pan blocks)
+
+    /// Add a zoom block at the playhead (scale = nil → uses the global default).
+    func addZoomBlock() {
+        let t = min(max(currentTime, 0), duration)
+        let added = ZoomTimeline.add(zoomBlocks, atTime: t,
+                                     width: Self.defaultBlockWidth, duration: duration)
+        setZoomBlocks(added.blocks, select: added.id)
+    }
+
+    func moveZoomBlockBegin(_ id: UUID, toTime: Double) {
+        zoomBlocks = ZoomTimeline.moveBegin(zoomBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveZoomBlockEnd(_ id: UUID, toTime: Double) {
+        zoomBlocks = ZoomTimeline.moveEnd(zoomBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveZoomBlock(_ id: UUID, toBegin: Double) {
+        zoomBlocks = ZoomTimeline.moveBlock(zoomBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitZoomEdit() { saveEdit() }
+
+    func removeZoomBlock(_ id: UUID) {
+        let list = ZoomTimeline.remove(zoomBlocks, id: id)
+        setZoomBlocks(list, select: selectedZoomBlockID == id ? nil : selectedZoomBlockID)
+    }
+
+    /// Select a zoom block (clears camera/text selection) and park the playhead
+    /// inside its span so the preview shows the zoom.
+    func selectZoomBlock(_ id: UUID?) {
+        selectedZoomBlockID = id
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil }
+        if let id, let b = zoomBlocks.first(where: { $0.id == id }) {
+            seek(to: min((b.begin + b.end) / 2, duration))
+        }
+    }
+
+    /// Effective scale of the selected block (its override, else global default).
+    var selectedZoomScale: Double {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else {
+            return autoZoomConfig.defaultScale
+        }
+        return b.scale ?? autoZoomConfig.defaultScale
+    }
+
+    /// Set the selected block's scale override (live; persist via commitZoomEdit).
+    func setZoomScale(_ v: Double) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].scale = min(max(1, v), 6)
+        applyVideoComposition()
+    }
+
+    /// Clear the override so the block follows the global default again.
+    func resetZoomScale() {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].scale = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Replace the zoom-block list. Adding the first / removing the last flips
+    /// the compositor on/off, so refresh the player item when `needsCompositor`
+    /// changes, mirroring `setBlocks`.
+    private func setZoomBlocks(_ list: [ZoomBlock], select id: UUID?) {
+        let was = needsCompositor
+        zoomBlocks = list
+        selectedZoomBlockID = id
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
         applyVideoComposition()
         saveEdit()
     }
@@ -1373,6 +1471,15 @@ final class StudioModel: ObservableObject {
             layout.suppressedTextBlockID = draggingTextBlockID
         }
 
+        // Auto zoom/pan: pre-build the smoothed track from blocks + cursor
+        // samples (cursor data is loaded regardless of the showCursor toggle).
+        if !zoomBlocks.isEmpty {
+            overlay.autoZoom = AutoZoomTrack.build(blocks: zoomBlocks,
+                                                   cursorSamples: cursorSamples,
+                                                   sourceSize: sourceSize,
+                                                   config: autoZoomConfig)
+        }
+
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),
             layout: layout,
@@ -1514,7 +1621,8 @@ final class StudioModel: ObservableObject {
             canvasBackgroundBlur: canvasBackgroundBlur,
             canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
-            textBlocks: textBlocks
+            textBlocks: textBlocks,
+            zoomBlocks: zoomBlocks
         )
         try? bundle.writeEdit(edit)
     }
