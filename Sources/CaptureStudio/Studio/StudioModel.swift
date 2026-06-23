@@ -61,6 +61,15 @@ final class StudioModel: ObservableObject {
     /// `TextTimeline.firstVisibleTime`), so it is the single source of truth for
     /// both the composition `frameDuration` and that seek.
     static let compositionFrameRate: Double = 60
+    /// New playhead time after a horizontal scroll of `dx` view points across a
+    /// canvas `viewWidth` wide; a full-width scroll spans the whole `duration`.
+    /// Positive `dx` (swipe right) rewinds; negative advances. Clamped to clip.
+    nonisolated static func scrubbedTime(from current: Double, scrollDX dx: CGFloat,
+                                         viewWidth: CGFloat, duration: Double) -> Double {
+        guard viewWidth > 0, duration > 0 else { return current }
+        let delta = Double(dx / viewWidth) * duration
+        return min(max(0, current - delta), duration)
+    }
     /// Style/position template for the next added text block — every block edit
     /// snapshots into it so a new block clones the most recent one (text aside).
     /// In-memory only: resets each launch (no cross-session memory).
