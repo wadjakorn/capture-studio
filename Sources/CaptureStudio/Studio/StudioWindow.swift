@@ -610,10 +610,18 @@ struct StudioView: View {
                 }
                 .pickerStyle(.segmented).labelsHidden()
 
-                styleSliderText("Size", value: Binding(
-                    get: { block?.fontSize ?? 0.06 },
-                    set: { model.setTextFontSize($0) }
-                ), range: 0.02...0.2)
+                textSizeRow(block)
+
+                Toggle("Auto-wrap lines", isOn: Binding(
+                    get: { block?.autoWrap ?? true },
+                    set: { model.setTextAutoWrap($0) }
+                ))
+                if block?.autoWrap ?? true {
+                    styleSliderText("Box width", value: Binding(
+                        get: { block?.boxWidth ?? 0.9 },
+                        set: { model.setTextBoxWidth($0) }
+                    ), range: 0.05...1.0)
+                }
 
                 textColorRow("Color", hex: block?.colorHex ?? "#FFFFFF") {
                     model.setTextColorHex($0)
@@ -659,6 +667,35 @@ struct StudioView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Slider(value: value, in: range) { editing in
+                if !editing { model.commitTextEdit() }
+            }
+        }
+    }
+
+    /// Font-size control showing the rendered px height, with a ±1px stepper and
+    /// a slider. `fontSize` is a fraction of canvas height, so px = fontSize ×
+    /// renderSize.height (falls back to 1080 before the canvas size is known).
+    @ViewBuilder
+    private func textSizeRow(_ block: TextBlock?) -> some View {
+        let h = model.renderSize.height > 0 ? model.renderSize.height : 1080
+        let frac = block?.fontSize ?? 0.06
+        let px = Int((frac * h).rounded())
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("Size").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(px) px").font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Stepper("", value: Binding(
+                    get: { Double(px) },
+                    set: { model.setTextFontSize($0 / h); model.commitTextEdit() }
+                ), in: 1...h, step: 1)
+                .labelsHidden()
+            }
+            Slider(value: Binding(
+                get: { block?.fontSize ?? 0.06 },
+                set: { model.setTextFontSize($0) }
+            ), in: 0.005...0.2) { editing in
                 if !editing { model.commitTextEdit() }
             }
         }
