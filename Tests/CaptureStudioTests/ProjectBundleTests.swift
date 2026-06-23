@@ -55,4 +55,39 @@ import Foundation
         #expect(bundle.editURL.lastPathComponent == "edit.json")
         #expect(bundle.metaURL.lastPathComponent == "meta.json")
     }
+
+    @Test func writeAndDeleteSubtitleFile() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let src = dir.appendingPathComponent("input.srt")
+        try "1\n00:00:01,000 --> 00:00:02,000\nHi".write(to: src, atomically: true, encoding: .utf8)
+
+        let name = try bundle.writeSubtitleFile(from: src)
+        #expect(name == "subtitles.srt")
+        let dest = bundle.subtitleFileURL(name)
+        #expect(FileManager.default.fileExists(atPath: dest.path))
+        #expect(try String(contentsOf: dest, encoding: .utf8).contains("Hi"))
+
+        bundle.deleteSubtitleFile()
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    @Test func writeSubtitleFileReplacesPrevious() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let src1 = dir.appendingPathComponent("a.srt")
+        try "first".write(to: src1, atomically: true, encoding: .utf8)
+        _ = try bundle.writeSubtitleFile(from: src1)
+
+        let src2 = dir.appendingPathComponent("b.srt")
+        try "second".write(to: src2, atomically: true, encoding: .utf8)
+        let name = try bundle.writeSubtitleFile(from: src2)
+        #expect(try String(contentsOf: bundle.subtitleFileURL(name), encoding: .utf8) == "second")
+    }
 }

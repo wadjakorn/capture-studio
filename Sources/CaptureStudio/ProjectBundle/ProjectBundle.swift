@@ -84,4 +84,28 @@ struct ProjectBundle {
             try? FileManager.default.removeItem(at: f)
         }
     }
+
+    // MARK: - Subtitles (.srt)
+
+    /// URL of the imported subtitle file inside the bundle (so it travels with
+    /// the project). `name` is the file name stored in `EditState.subtitles`.
+    func subtitleFileURL(_ name: String) -> URL {
+        url.appendingPathComponent(name)
+    }
+
+    /// Copy an imported `.srt` into the bundle as `subtitles.srt`, replacing any
+    /// previous one. Returns the file name to persist in `EditState`.
+    @discardableResult
+    func writeSubtitleFile(from source: URL) throws -> String {
+        let name = "subtitles.srt"
+        let dest = url.appendingPathComponent(name)
+        deleteSubtitleFile()
+        try FileManager.default.copyItem(at: source, to: dest)
+        return name
+    }
+
+    /// Remove the imported subtitle file, if any.
+    func deleteSubtitleFile() {
+        try? FileManager.default.removeItem(at: url.appendingPathComponent("subtitles.srt"))
+    }
 }
