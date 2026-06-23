@@ -951,6 +951,64 @@ final class StudioModel: ObservableObject {
     func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
     func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
 
+    // MARK: - Subtitles
+
+    /// Import an `.srt`: copy it into the bundle, parse + clamp its cues, and
+    /// show the subtitle lane. Runs off the main actor with a loader. Replacing
+    /// an existing track preserves the current style. No-op while already busy.
+    func importSubtitles(from url: URL) {
+        guard subtitleState == .idle else { return }
+        subtitleState = .applying
+        let bundle = self.bundle
+        let duration = self.duration
+        let existingStyle = subtitles?.style
+        Task {
+            let track: SubtitleTrack? = await Task.detached {
+                guard let name = try? bundle.writeSubtitleFile(from: url) else { return nil }
+                let fileURL = bundle.subtitleFileURL(name)
+                let raw = (try? String(contentsOf: fileURL, encoding: .utf8))
+                    ?? (try? String(contentsOf: fileURL)) ?? ""
+                let cues = SubtitleTimeline.clamped(SubtitleParser.parse(raw), duration: duration)
+                guard !cues.isEmpty else { return nil }
+                return SubtitleTrack(srtFilename: name,
+                                     style: existingStyle ?? SubtitleStyle(), cues: cues)
+            }.value
+
+            guard let track else {
+                bundle.deleteSubtitleFile()
+                subtitleState = .idle
+                Log.studio.error("subtitle import failed or produced no cues")
+                return
+            }
+            subtitles = track
+            subtitleSelected = true
+            selectedTextBlockID = nil
+            selectedBlockID = nil
+            editingTextBlockID = nil
+            refreshPlayerItemForCanvasChange()
+            applyVideoComposition()
+            saveEdit()
+            subtitleState = .idle
+        }
+    }
+
+    /// Remove the subtitle track + its `.srt` and hide the lane. Loader-gated.
+    func removeSubtitles() {
+        guard subtitleState == .idle, subtitles != nil else { return }
+        subtitleState = .removing
+        let bundle = self.bundle
+        Task {
+            await Task.detached { bundle.deleteSubtitleFile() }.value
+            subtitles = nil
+            subtitleSelected = false
+            draggingSubtitle = false
+            refreshPlayerItemForCanvasChange()
+            applyVideoComposition()
+            saveEdit()
+            subtitleState = .idle
+        }
+    }
+
     /// Select a block and park the playhead at its settled (end) state so the
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
