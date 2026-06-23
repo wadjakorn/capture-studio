@@ -140,10 +140,6 @@ final class StudioModel: ObservableObject {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
     }
-    /// Camera-follow sensitivity (0...1) for the selected camera block, or nil if none.
-    var selectedCameraFollowSensitivity: Double? {
-        selectedBlock?.zoomSensitivity
-    }
     var selectedTextBlock: TextBlock? {
         guard let id = selectedTextBlockID else { return nil }
         return textBlocks.first { $0.id == id }
@@ -1314,15 +1310,6 @@ final class StudioModel: ObservableObject {
     func setCameraZoom(_ value: Double) {
         cameraZoom = min(max(1, value), 4)
         setCameraFeedCenter(x: cameraFeedX, y: cameraFeedY)
-    }
-
-    /// Live camera-follow sensitivity (0...1) for the selected camera block.
-    /// Persist via commitCameraEdit().
-    func setCameraFollowSensitivity(_ value: Double) {
-        guard let id = selectedBlockID,
-              let i = cameraBlocks.firstIndex(where: { $0.id == id }) else { return }
-        cameraBlocks[i].zoomSensitivity = min(max(0, value), 1)
-        applyVideoComposition()
     }
 
     /// Live camera feed pan during drag; clamps so the crop stays inside feed.

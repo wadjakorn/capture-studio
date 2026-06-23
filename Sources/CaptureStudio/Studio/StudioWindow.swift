@@ -183,11 +183,6 @@ struct StudioView: View {
                 toolGroup { cursorControls }            // mouse appearance
                 if model.hasCameraTrack {
                     toolGroup { cameraControls }
-                    // Follow-sensitivity group only exists for a selected move
-                    // block — otherwise it'd render as an empty pill.
-                    if model.selectedBlockID != nil {
-                        toolGroup { cameraFollowControls }
-                    }
                 }
                 toolGroup { subtitleControls }
                     .onChange(of: model.subtitles == nil) { _, nowNil in
@@ -609,27 +604,6 @@ struct StudioView: View {
         }
         .toggleStyle(.button)
         .help("Show click feedback rings")
-    }
-
-    // Gated by the call site (only shown for a selected move block).
-    private var cameraFollowControls: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "hand.draw").foregroundStyle(.secondary)
-            Slider(value: Binding(
-                get: { model.selectedCameraFollowSensitivity ?? 0.5 },
-                set: { model.setCameraFollowSensitivity($0) }
-            ), in: 0...1) { editing in
-                if !editing { model.commitCameraEdit() }
-            }
-            .frame(width: 80)
-            .controlSize(.small)
-            Text("\(Int(((model.selectedCameraFollowSensitivity ?? 0.5) * 100).rounded()))%")
-                .font(.caption2)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .trailing)
-        }
-        .help("Follow sensitivity — how closely camera moves follow screen gestures")
     }
 
     private func volumeSlider(systemImage: String, help: String,
