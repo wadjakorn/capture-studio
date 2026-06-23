@@ -555,7 +555,9 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     /// Cache identity for a rendered text image: everything that affects the
     /// pixels (content + style + canvas), but NOT position — a moved block keeps
     /// its render. Begin/end and id are irrelevant to the pixels.
-    private struct TextCacheKey: Hashable {
+    // Internal (not private) so a unit test can assert the key distinguishes
+    // every pixel-affecting field. Nested in the compositor as an impl detail.
+    struct TextCacheKey: Hashable {
         let text: String
         let fontName: String
         let fontSize: Double
@@ -568,6 +570,11 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         let strokeWidth: Double
         let strokeHex: String
         let shadow: Bool
+        // Wrapping affects the rendered pixels, so it must be part of the key —
+        // omitting these returns a stale image when the wrap box is resized or
+        // auto-wrap is toggled.
+        let boxWidth: Double
+        let autoWrap: Bool
         let canvasW: Double
         let canvasH: Double
 
@@ -576,6 +583,7 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             fontWeight = b.fontWeight; colorHex = b.colorHex; alignment = b.alignment
             boxEnabled = b.boxEnabled; boxHex = b.boxHex; boxOpacity = b.boxOpacity
             strokeWidth = b.strokeWidth; strokeHex = b.strokeHex; shadow = b.shadow
+            boxWidth = b.boxWidth; autoWrap = b.autoWrap
             canvasW = canvas.width; canvasH = canvas.height
         }
     }

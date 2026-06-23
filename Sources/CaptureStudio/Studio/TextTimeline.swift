@@ -133,6 +133,17 @@ enum TextTimeline {
 
     // MARK: - Helpers
 
+    /// Smallest composition-frame-aligned time ≥ `begin`. The player quantizes
+    /// the displayed frame DOWN to the composition frame grid (`compositionTime
+    /// = floor(t·fps)/fps`), so seeking to a non-grid `begin` lands on the frame
+    /// just before it, where the half-open `[begin, end)` test fails and the
+    /// caption renders one frame late. Seeking here instead lands on the first
+    /// frame whose quantized time is still ≥ `begin`.
+    static func firstVisibleTime(begin: Double, fps: Double) -> Double {
+        guard fps > 0, begin > 0 else { return max(0, begin) }
+        return (begin * fps).rounded(.up) / fps
+    }
+
     private static func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
         min(max(x, lo), max(lo, hi))
     }

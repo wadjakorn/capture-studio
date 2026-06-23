@@ -56,6 +56,11 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Frames-per-second of the preview/export video composition. The seek that
+    /// reveals a selected caption must align to this grid (see
+    /// `TextTimeline.firstVisibleTime`), so it is the single source of truth for
+    /// both the composition `frameDuration` and that seek.
+    static let compositionFrameRate: Double = 60
     /// Style/position template for the next added text block — every block edit
     /// snapshots into it so a new block clones the most recent one (text aside).
     /// In-memory only: resets each launch (no cross-session memory).
@@ -706,7 +711,10 @@ final class StudioModel: ObservableObject {
         if id != nil { selectedBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
-            seek(to: min(b.begin, duration))
+            // Align to the composition frame grid so the caption is visible at
+            // the seeked frame (a raw begin can render one frame late).
+            seek(to: min(TextTimeline.firstVisibleTime(begin: b.begin,
+                                                       fps: Self.compositionFrameRate), duration))
         }
     }
 
@@ -1272,7 +1280,7 @@ final class StudioModel: ObservableObject {
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = canvas
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: Int32(Self.compositionFrameRate))
         videoComposition.instructions = [instruction]
         return videoComposition
     }
@@ -1357,7 +1365,7 @@ final class StudioModel: ObservableObject {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.customVideoCompositorClass = StudioCompositor.self
         videoComposition.renderSize = canvas
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: Int32(Self.compositionFrameRate))
         videoComposition.instructions = [instruction]
         return videoComposition
     }
