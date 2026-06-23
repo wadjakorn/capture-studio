@@ -721,8 +721,10 @@ struct StudioView: View {
             }
             .padding(14)
         }
-        .frame(width: 280)
-        .frame(maxHeight: 420)
+        // Fixed height so the ScrollView clips + scrolls inside the popover
+        // chrome instead of overflowing it (a bare maxHeight leaves the scroll
+        // container unbounded in a .popover).
+        .frame(width: 280, height: 460)
     }
 
     private func styleSliderText(_ title: String, value: Binding<Double>,
@@ -843,8 +845,10 @@ struct StudioView: View {
             }
             .padding(14)
         }
-        .frame(width: 280)
-        .frame(maxHeight: 420)
+        // Fixed height so the ScrollView clips + scrolls inside the popover
+        // chrome instead of overflowing it (a bare maxHeight leaves the scroll
+        // container unbounded in a .popover).
+        .frame(width: 280, height: 460)
     }
 
     private func styleSliderSubtitle(_ title: String, value: Binding<Double>,
