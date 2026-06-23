@@ -104,9 +104,10 @@ struct CameraBlock: Codable, Equatable, Identifiable {
     var centerX: Double
     var centerY: Double
     var scale: Double
+    var zoomSensitivity: Double = 0.5 // Follow sensitivity: 0...1
 
     init(id: UUID = UUID(), begin: Double, end: Double, visible: Bool,
-         centerX: Double, centerY: Double, scale: Double) {
+         centerX: Double, centerY: Double, scale: Double, zoomSensitivity: Double = 0.5) {
         self.id = id
         self.begin = begin
         self.end = end
@@ -114,6 +115,7 @@ struct CameraBlock: Codable, Equatable, Identifiable {
         self.centerX = centerX
         self.centerY = centerY
         self.scale = scale
+        self.zoomSensitivity = zoomSensitivity
     }
 }
 

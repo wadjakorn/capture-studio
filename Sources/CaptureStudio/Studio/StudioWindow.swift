@@ -3,11 +3,24 @@ import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
+/// Reports the natural (padded) height of a style popover's content so the
+/// popover frame can fit it up to a cap instead of using a fixed height.
+private struct StylePopoverHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var showCameraStyle = false
     @State private var showTextStyle = false
     @State private var showSubtitleStyle = false
+    // Measured content heights for the style popovers; drive a content-fitting,
+    // capped frame so they never clip their last row or leave empty slack.
+    @State private var textPopoverHeight: CGFloat = 0
+    @State private var subtitlePopoverHeight: CGFloat = 0
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -154,6 +167,7 @@ struct StudioView: View {
                 toolGroup { reframeControls }
                 if model.hasCameraTrack {
                     toolGroup { cameraControls }
+                    toolGroup { cameraFollowControls }
                 }
                 toolGroup { textControls }
                 toolGroup { subtitleControls }
@@ -521,6 +535,28 @@ struct StudioView: View {
         .help("Show click feedback rings")
     }
 
+    @ViewBuilder private var cameraFollowControls: some View {
+        if model.selectedBlockID != nil {
+            HStack(spacing: 4) {
+                Image(systemName: "hand.draw").foregroundStyle(.secondary)
+                Slider(value: Binding(
+                    get: { model.selectedCameraFollowSensitivity ?? 0.5 },
+                    set: { model.setCameraFollowSensitivity($0) }
+                ), in: 0...1) { editing in
+                    if !editing { model.commitCameraEdit() }
+                }
+                .frame(width: 80)
+                .controlSize(.small)
+                Text("\(Int(((model.selectedCameraFollowSensitivity ?? 0.5) * 100).rounded()))%")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
+            .help("Follow sensitivity — how closely camera moves follow screen gestures")
+        }
+    }
+
     private func volumeSlider(systemImage: String, help: String,
                               value: Binding<Double>,
                               range: ClosedRange<Double> = 0...1,
@@ -776,12 +812,19 @@ struct StudioView: View {
                     set: { model.setTextShadow($0) }
                 ))
             }
-            .padding(14)
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
+            })
         }
-        // Fixed height so the ScrollView clips + scrolls inside the popover
-        // chrome instead of overflowing it (a bare maxHeight leaves the scroll
-        // container unbounded in a .popover).
-        .frame(width: 280, height: 460)
+        // Fit the content up to a cap; scroll only past it. Sizing to content
+        // keeps collapsed states slack-free and stops the last row from being
+        // clipped by the popover's rounded bottom edge.
+        .frame(width: 320, height: min(textPopoverHeight == 0 ? 500 : textPopoverHeight, 500))
+        .scrollBounceBehavior(.basedOnSize)
+        .onPreferenceChange(StylePopoverHeightKey.self) { textPopoverHeight = $0 }
     }
 
     private func styleSliderText(_ title: String, value: Binding<Double>,
@@ -905,12 +948,19 @@ struct StudioView: View {
                 Text("Scrub to a subtitle, then drag it on the canvas to reposition.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            .padding(14)
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
+            })
         }
-        // Fixed height so the ScrollView clips + scrolls inside the popover
-        // chrome instead of overflowing it (a bare maxHeight leaves the scroll
-        // container unbounded in a .popover).
-        .frame(width: 280, height: 460)
+        // Fit the content up to a cap; scroll only past it. Sizing to content
+        // keeps collapsed states slack-free and stops the last row from being
+        // clipped by the popover's rounded bottom edge.
+        .frame(width: 320, height: min(subtitlePopoverHeight == 0 ? 500 : subtitlePopoverHeight, 500))
+        .scrollBounceBehavior(.basedOnSize)
+        .onPreferenceChange(StylePopoverHeightKey.self) { subtitlePopoverHeight = $0 }
     }
 
     private func styleSliderSubtitle(_ title: String, value: Binding<Double>,
