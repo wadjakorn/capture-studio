@@ -108,11 +108,13 @@ final class StudioModel: ObservableObject {
     /// The zoom lane is shown only when there is at least one zoom block.
     var showsZoomTimeline: Bool { !zoomBlocks.isEmpty }
 
-    /// Per-project default magnification for new/unset blocks (global config).
+    /// Per-project defaults for new/unset blocks (global config).
     var autoZoomConfig: AutoZoomConfig {
         var c = AutoZoomConfig()
         let v = UserDefaults.standard.double(forKey: "autoZoomDefaultScale")
         if v > 1 { c.defaultScale = v }
+        let s = UserDefaults.standard.double(forKey: "autoZoomDefaultSensitivity")
+        if s > 0 && s <= 1 { c.defaultSensitivity = s }
         return c
     }
     var selectedBlock: CameraBlock? {
@@ -779,6 +781,34 @@ final class StudioModel: ObservableObject {
         guard let id = selectedZoomBlockID,
               let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
         zoomBlocks[i].scale = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Effective follow-sensitivity of the selected block (its override, else
+    /// the global default).
+    var selectedZoomSensitivity: Double {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else {
+            return autoZoomConfig.defaultSensitivity
+        }
+        return b.sensitivity ?? autoZoomConfig.defaultSensitivity
+    }
+
+    /// Set the selected block's sensitivity override (live; persist via
+    /// commitZoomEdit).
+    func setZoomSensitivity(_ v: Double) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].sensitivity = min(max(0, v), 1)
+        applyVideoComposition()
+    }
+
+    /// Clear the override so the block follows the global default again.
+    func resetZoomSensitivity() {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].sensitivity = nil
         applyVideoComposition()
         saveEdit()
     }
