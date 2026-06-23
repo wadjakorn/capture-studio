@@ -10,13 +10,17 @@ enum SubtitleTimeline {
         cues.filter { $0.begin <= t && t < $0.end }
     }
 
-    /// Drop cues that start at or after `duration`; clamp each remaining end to
-    /// `duration`. Preserves order.
-    static func clamped(_ cues: [SubtitleCue], duration: Double) -> [SubtitleCue] {
+    /// Shift every cue by `offset` seconds, then drop cues that fall entirely
+    /// outside `[0, duration)` and clamp the survivors to that range. Preserves
+    /// order. `offset == 0` reproduces the previous `clamped` behavior.
+    static func effective(_ cues: [SubtitleCue], offset: Double, duration: Double) -> [SubtitleCue] {
         cues.compactMap { cue in
-            guard cue.begin < duration else { return nil }
+            let begin = cue.begin + offset
+            let end = cue.end + offset
+            guard end > 0, begin < duration else { return nil }
             var c = cue
-            c.end = min(cue.end, duration)
+            c.begin = max(0, begin)
+            c.end = min(end, duration)
             return c
         }
     }

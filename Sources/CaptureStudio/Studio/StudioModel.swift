@@ -356,7 +356,7 @@ final class StudioModel: ObservableObject {
             // Clamp cues to the actual clip; a track whose cues all fall past the
             // end loads as no subtitles (the .srt file is left in the bundle).
             if let track = edit.subtitles {
-                let cues = SubtitleTimeline.clamped(track.cues, duration: duration)
+                let cues = SubtitleTimeline.effective(track.cues, offset: 0, duration: duration)
                 subtitles = cues.isEmpty ? nil
                     : SubtitleTrack(srtFilename: track.srtFilename,
                                     style: track.style, cues: cues)
@@ -976,7 +976,7 @@ final class StudioModel: ObservableObject {
                 } else {
                     raw = ""
                 }
-                let cues = SubtitleTimeline.clamped(SubtitleParser.parse(raw), duration: duration)
+                let cues = SubtitleTimeline.effective(SubtitleParser.parse(raw), offset: 0, duration: duration)
                 guard !cues.isEmpty else { return nil }
                 return SubtitleTrack(srtFilename: name,
                                      style: existingStyle ?? SubtitleStyle(), cues: cues)
