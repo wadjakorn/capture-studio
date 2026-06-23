@@ -7,6 +7,7 @@ struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var showCameraStyle = false
     @State private var showTextStyle = false
+    @State private var showSubtitleStyle = false
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -70,6 +71,9 @@ struct StudioView: View {
                     if model.selectedTextBlock != nil {
                         TextCanvasOverlay(model: model)
                     }
+                    if model.subtitleSelected {
+                        SubtitleCanvasOverlay(model: model)
+                    }
                     // Topmost: reels safe-area guide (studio-only).
                     ReelsSafeAreaOverlay(model: model)
                 }
@@ -125,6 +129,9 @@ struct StudioView: View {
                         textEditorPopover
                     }
             }
+            if model.showsSubtitleTimeline {
+                laneRow("captions.bubble") { SubtitleTimelineLane(model: model) }
+            }
 
             Divider().padding(.vertical, 2)
 
@@ -149,6 +156,7 @@ struct StudioView: View {
                     toolGroup { cameraControls }
                 }
                 toolGroup { textControls }
+                toolGroup { subtitleControls }
                 toolGroup { cursorControls }
             }
         }
@@ -371,6 +379,52 @@ struct StudioView: View {
         .help("Edit text style, order, and delete")
         .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
             textStylePopover
+        }
+    }
+
+    @ViewBuilder private var subtitleControls: some View {
+        if model.subtitles == nil {
+            Button { pickSubtitleFile() } label: {
+                Image(systemName: "captions.bubble")
+            }
+            .disabled(model.subtitleState != .idle)
+            .help("Import subtitles from an .srt file")
+        } else {
+            Button {
+                model.selectSubtitles(true)
+                showSubtitleStyle.toggle()
+            } label: {
+                Image(systemName: "captions.bubble.fill")
+            }
+            .disabled(model.subtitleState != .idle)
+            .help("Subtitle style & position")
+            .popover(isPresented: $showSubtitleStyle, arrowEdge: .bottom) {
+                subtitleStylePopover
+            }
+
+            Button(role: .destructive) { model.removeSubtitles() } label: {
+                Image(systemName: "trash")
+            }
+            .disabled(model.subtitleState != .idle)
+            .help("Remove subtitles")
+        }
+        if model.subtitleState != .idle {
+            ProgressView().controlSize(.small)
+        }
+    }
+
+    /// Pick a `.srt` file and apply it as the subtitle track.
+    private func pickSubtitleFile() {
+        let panel = NSOpenPanel()
+        if let srt = UTType(filenameExtension: "srt") {
+            panel.allowedContentTypes = [srt, .text]
+        } else {
+            panel.allowedContentTypes = [.text]
+        }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            model.importSubtitles(from: url)
         }
     }
 
@@ -674,6 +728,102 @@ struct StudioView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Slider(value: value, in: range) { editing in
                 if !editing { model.commitTextEdit() }
+            }
+        }
+    }
+
+    // MARK: - Subtitle style (one shared config applied to every cue)
+
+    @ViewBuilder
+    private var subtitleStylePopover: some View {
+        let style = model.subtitles?.style
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Applies to all subtitles").font(.caption).foregroundStyle(.secondary)
+
+                Divider()
+
+                Picker("Font", selection: Binding(
+                    get: { style?.fontName ?? "Helvetica" },
+                    set: { model.setSubtitleFontName($0) }
+                )) {
+                    ForEach(Self.fontFamilies, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden()
+
+                Picker("Weight", selection: Binding(
+                    get: { style?.fontWeight ?? .semibold },
+                    set: { model.setSubtitleWeight($0) }
+                )) {
+                    ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+
+                Picker("Align", selection: Binding(
+                    get: { style?.alignment ?? .center },
+                    set: { model.setSubtitleAlignment($0) }
+                )) {
+                    Image(systemName: "text.alignleft").tag(TextAlignmentH.leading)
+                    Image(systemName: "text.aligncenter").tag(TextAlignmentH.center)
+                    Image(systemName: "text.alignright").tag(TextAlignmentH.trailing)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+
+                styleSliderSubtitle("Size", value: Binding(
+                    get: { style?.fontSize ?? 0.05 },
+                    set: { model.setSubtitleFontSize($0) }
+                ), range: 0.02...0.2)
+
+                textColorRow("Color", hex: style?.colorHex ?? "#FFFFFF") {
+                    model.setSubtitleColorHex($0)
+                }
+
+                Toggle("Background box", isOn: Binding(
+                    get: { style?.boxEnabled ?? false },
+                    set: { model.setSubtitleBoxEnabled($0) }
+                ))
+                if style?.boxEnabled == true {
+                    textColorRow("Box color", hex: style?.boxHex ?? "#000000") {
+                        model.setSubtitleBoxHex($0)
+                    }
+                    styleSliderSubtitle("Box opacity", value: Binding(
+                        get: { style?.boxOpacity ?? 0.5 },
+                        set: { model.setSubtitleBoxOpacity($0) }
+                    ), range: 0...1)
+                }
+
+                styleSliderSubtitle("Outline", value: Binding(
+                    get: { style?.strokeWidth ?? 0 },
+                    set: { model.setSubtitleStrokeWidth($0) }
+                ), range: 0...0.2)
+                if (style?.strokeWidth ?? 0) > 0 {
+                    textColorRow("Outline color", hex: style?.strokeHex ?? "#000000") {
+                        model.setSubtitleStrokeHex($0)
+                    }
+                }
+
+                Toggle("Shadow", isOn: Binding(
+                    get: { style?.shadow ?? true },
+                    set: { model.setSubtitleShadow($0) }
+                ))
+
+                Divider()
+
+                Text("Scrub to a subtitle, then drag it on the canvas to reposition.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            .padding(14)
+        }
+        .frame(width: 280)
+        .frame(maxHeight: 420)
+    }
+
+    private func styleSliderSubtitle(_ title: String, value: Binding<Double>,
+                                     range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Slider(value: value, in: range) { editing in
+                if !editing { model.commitSubtitleEdit() }
             }
         }
     }
