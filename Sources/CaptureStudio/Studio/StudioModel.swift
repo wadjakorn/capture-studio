@@ -58,6 +58,10 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Style/position template for the next added text block — every block edit
+    /// snapshots into it so a new block clones the most recent one (text aside).
+    /// In-memory only: resets each launch (no cross-session memory).
+    private var lastTextStyle = TextBlock(begin: 0, end: 0)
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
     // 0–1 in the camera's own space. Persisted to edit.json.
     @Published var cameraZoom = 1.0
@@ -711,11 +715,12 @@ final class StudioModel: ObservableObject {
     /// input so the user can type immediately.
     func addTextBlock() {
         let t = min(max(currentTime, 0), duration)
+        var template = lastTextStyle
+        template.text = ""              // inherit style + position, never the words
         let added = TextTimeline.add(textBlocks, atTime: t, width: Self.defaultTextWidth,
-                                     duration: duration,
-                                     template: TextBlock(begin: 0, end: 0))
+                                     duration: duration, template: template)
         setTextBlocks(added.blocks, select: added.id)
-        editingTextBlockID = added.id
+        editingTextBlockID = added.id   // (removed in Task 5)
     }
 
     func removeTextBlock(_ id: UUID) {
@@ -767,6 +772,7 @@ final class StudioModel: ObservableObject {
     private func updateTextBlock(_ id: UUID, _ mutate: (inout TextBlock) -> Void) {
         guard let i = textBlocks.firstIndex(where: { $0.id == id }) else { return }
         mutate(&textBlocks[i])
+        lastTextStyle = textBlocks[i]   // template tracks the last-edited block
         applyVideoComposition()
     }
 
@@ -802,8 +808,9 @@ final class StudioModel: ObservableObject {
     /// End a canvas position drag: un-suppress, recomposite once at the final
     /// position, and persist.
     func endDraggingText() {
-        guard draggingTextBlockID != nil else { return }
+        guard let id = draggingTextBlockID else { return }
         draggingTextBlockID = nil
+        if let b = textBlocks.first(where: { $0.id == id }) { lastTextStyle = b }
         applyVideoComposition()
         saveEdit()
     }
@@ -903,7 +910,7 @@ final class StudioModel: ObservableObject {
     }
 
     func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
-    func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
+    func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.005, v), 0.5) } }
     func setTextWeight(_ w: TextWeight) { updateSelectedText(commit: true) { $0.fontWeight = w } }
     func setTextColorHex(_ hex: String) { updateSelectedText(commit: true) { $0.colorHex = hex } }
     func setTextAlignment(_ a: TextAlignmentH) { updateSelectedText(commit: true) { $0.alignment = a } }
@@ -913,6 +920,8 @@ final class StudioModel: ObservableObject {
     func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
     func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
     func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
+    func setTextBoxWidth(_ v: Double) { updateSelectedText(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
+    func setTextAutoWrap(_ on: Bool) { updateSelectedText(commit: true) { $0.autoWrap = on } }
 
     /// Select a block and park the playhead at its settled (end) state so the
     /// preview shows exactly what the overlay edits. Pass nil to deselect.

@@ -49,6 +49,30 @@ import Foundation
         #expect(out[0].end == 10)                // 9 + 5 clamped to duration
     }
 
+    @Test func addCopiesTemplateStyleAndResetsSpan() {
+        var template = TextBlock(begin: 0, end: 0)
+        template.fontSize = 0.09
+        template.colorHex = "#FF0000"
+        template.boxWidth = 0.4
+        template.autoWrap = false
+        template.centerX = 0.3
+        template.centerY = 0.2
+
+        let (blocks, id) = TextTimeline.add([], atTime: 2, width: 3,
+                                            duration: 10, template: template)
+        let b = blocks.first { $0.id == id }!
+        #expect(b.fontSize == 0.09)
+        #expect(b.colorHex == "#FF0000")
+        #expect(b.boxWidth == 0.4)
+        #expect(b.autoWrap == false)
+        #expect(b.centerX == 0.3)
+        #expect(b.centerY == 0.2)
+        #expect(b.begin == 2)
+        #expect(b.end == 5)
+        #expect(b.id != template.id)
+        #expect(b.text == "")
+    }
+
     // MARK: move (no neighbor clamp)
 
     @Test func moveBeginClampsToOwnEndAndZero() {
