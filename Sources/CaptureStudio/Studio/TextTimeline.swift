@@ -133,6 +133,14 @@ enum TextTimeline {
 
     // MARK: - Helpers
 
+    /// Frame-aligned time for the first visible frame of a caption with the given
+    /// begin time. Aligns the time to the nearest frame boundary (rounded up) so
+    /// the caption appears at the seeked frame instead of one frame late.
+    static func firstVisibleTime(begin: Double, fps: Int) -> Double {
+        let frameRate = Double(fps)
+        return ceil(begin * frameRate) / frameRate
+    }
+
     private static func clamp(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
         min(max(x, lo), max(lo, hi))
     }

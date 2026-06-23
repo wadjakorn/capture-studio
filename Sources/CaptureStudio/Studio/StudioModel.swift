@@ -58,6 +58,8 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Composition frame rate (frames per second) for video export.
+    static let compositionFrameRate = 60
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
     // 0–1 in the camera's own space. Persisted to edit.json.
     @Published var cameraZoom = 1.0
@@ -703,7 +705,13 @@ final class StudioModel: ObservableObject {
         if id != nil { selectedBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
-            seek(to: min(b.begin, duration))
+            // Align to the composition frame grid so the caption is visible at
+            // the seeked frame (a raw begin can render one frame late). For a
+            // sub-frame-length block the aligned time can reach `end`, so fall
+            // back to `begin` to keep the playhead inside the span.
+            let aligned = TextTimeline.firstVisibleTime(begin: b.begin,
+                                                        fps: Self.compositionFrameRate)
+            seek(to: min(aligned < b.end ? aligned : b.begin, duration))
         }
     }
 
