@@ -966,8 +966,14 @@ final class StudioModel: ObservableObject {
             let track: SubtitleTrack? = await Task.detached {
                 guard let name = try? bundle.writeSubtitleFile(from: url) else { return nil }
                 let fileURL = bundle.subtitleFileURL(name)
-                let raw = (try? String(contentsOf: fileURL, encoding: .utf8))
-                    ?? (try? String(contentsOf: fileURL)) ?? ""
+                let raw: String
+                if let data = try? Data(contentsOf: fileURL) {
+                    raw = String(data: data, encoding: .utf8)
+                        ?? String(data: data, encoding: .isoLatin1)
+                        ?? ""
+                } else {
+                    raw = ""
+                }
                 let cues = SubtitleTimeline.clamped(SubtitleParser.parse(raw), duration: duration)
                 guard !cues.isEmpty else { return nil }
                 return SubtitleTrack(srtFilename: name,
