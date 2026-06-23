@@ -731,7 +731,7 @@ final class StudioModel: ObservableObject {
     /// playhead inside its span so the preview shows it. Pass nil to deselect.
     func selectTextBlock(_ id: UUID?) {
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil }
+        if id != nil { selectedBlockID = nil; subtitleSelected = false }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -857,6 +857,8 @@ final class StudioModel: ObservableObject {
     func deselectAll() {
         deselectText()
         selectedBlockID = nil
+        if draggingSubtitle { endDraggingSubtitle() }
+        subtitleSelected = false
     }
 
     // MARK: Canvas pan/zoom (inspection only)
@@ -1015,11 +1017,70 @@ final class StudioModel: ObservableObject {
         }
     }
 
+    /// Select the subtitle track for configuration (clears camera/text
+    /// selection); pass false to deselect.
+    func selectSubtitles(_ on: Bool) {
+        subtitleSelected = on
+        if on {
+            selectedTextBlockID = nil
+            selectedBlockID = nil
+            editingTextBlockID = nil
+        }
+    }
+
+    func commitSubtitleEdit() { saveEdit() }
+
+    /// Mutate the shared subtitle style live (applies to every cue). Discrete
+    /// edits commit immediately; slider drags pass `commit: false` and persist on
+    /// end via `commitSubtitleEdit`.
+    private func updateSubtitleStyle(commit: Bool, _ mutate: (inout SubtitleStyle) -> Void) {
+        guard subtitles != nil else { return }
+        mutate(&subtitles!.style)
+        applyVideoComposition()
+        if commit { saveEdit() }
+    }
+
+    func setSubtitleFontName(_ name: String) { updateSubtitleStyle(commit: true) { $0.fontName = name } }
+    func setSubtitleFontSize(_ v: Double) { updateSubtitleStyle(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
+    func setSubtitleWeight(_ w: TextWeight) { updateSubtitleStyle(commit: true) { $0.fontWeight = w } }
+    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.colorHex = hex } }
+    func setSubtitleAlignment(_ a: TextAlignmentH) { updateSubtitleStyle(commit: true) { $0.alignment = a } }
+    func setSubtitleBoxEnabled(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.boxEnabled = on } }
+    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.boxHex = hex } }
+    func setSubtitleBoxOpacity(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
+    func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
+    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
+    func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
+
+    /// Begin a canvas position drag: select the track and suppress the baked
+    /// subtitles (one recomposite) so the smooth overlay drives motion.
+    func beginDraggingSubtitle() {
+        selectSubtitles(true)
+        draggingSubtitle = true
+        applyVideoComposition()
+    }
+
+    /// Live position update during a drag — moves the shared style (all cues
+    /// follow). No recomposite, so it stays smooth.
+    func dragSubtitlePosition(x: Double, y: Double) {
+        guard subtitles != nil else { return }
+        subtitles!.style.centerX = min(max(0, x), 1)
+        subtitles!.style.centerY = min(max(0, y), 1)
+    }
+
+    /// End the drag: un-suppress, recomposite at the final position, and persist.
+    func endDraggingSubtitle() {
+        guard draggingSubtitle else { return }
+        draggingSubtitle = false
+        applyVideoComposition()
+        saveEdit()
+    }
+
     /// Select a block and park the playhead at its settled (end) state so the
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
-        if id != nil { selectedTextBlockID = nil }   // camera vs text: one selection at a time
+        if id != nil { selectedTextBlockID = nil; subtitleSelected = false }   // one selection at a time
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
