@@ -1063,6 +1063,22 @@ final class StudioModel: ObservableObject {
     func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
     func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
 
+    /// Shift every cue by `seconds` (added to begin/end). Clamped to a finite
+    /// guard range — intentionally NOT tied to `duration`, so a begin-trim larger
+    /// than the trimmed clip can still be corrected. Recomposites + saves.
+    func setSubtitleOffset(_ seconds: Double) {
+        guard subtitles != nil else { return }
+        subtitles!.offset = min(max(-86_400, seconds), 86_400)
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Align cue #1 (the smallest raw `begin`) to the current playhead.
+    func setSubtitleOffsetFromPlayhead() {
+        guard let cues = subtitles?.cues, let minBegin = cues.map(\.begin).min() else { return }
+        setSubtitleOffset(currentTime - minBegin)
+    }
+
     /// Begin a canvas position drag: select the track and suppress the baked
     /// subtitles (one recomposite) so the smooth overlay drives motion.
     func beginDraggingSubtitle() {

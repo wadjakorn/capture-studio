@@ -746,6 +746,32 @@ struct StudioView: View {
 
                 Divider()
 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Time offset (s)").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        TextField("", value: Binding(
+                            get: { model.subtitles?.offset ?? 0 },
+                            set: { model.setSubtitleOffset($0) }
+                        ), format: .number.precision(.fractionLength(2)))
+                            .frame(width: 64)
+                            .multilineTextAlignment(.trailing)
+                            .textFieldStyle(.roundedBorder)
+                        Stepper("", value: Binding(
+                            get: { model.subtitles?.offset ?? 0 },
+                            set: { model.setSubtitleOffset($0) }
+                        ), in: -86_400...86_400, step: 0.1)
+                            .labelsHidden()
+                        Spacer()
+                        Button("Set from playhead") { model.setSubtitleOffsetFromPlayhead() }
+                            .controlSize(.small)
+                    }
+                    Text("SRT made from the raw (untrimmed) video? Nudge or set from the playhead to re-sync.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .disabled(model.subtitleState != .idle)
+
+                Divider()
+
                 Picker("Font", selection: Binding(
                     get: { style?.fontName ?? "Helvetica" },
                     set: { model.setSubtitleFontName($0) }
