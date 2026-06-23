@@ -711,8 +711,9 @@ final class StudioModel: ObservableObject {
         }
     }
 
-    /// Add an empty default text block at the playhead, select it, and open its
-    /// input so the user can type immediately.
+    /// Add an empty default text block at the playhead and select it. Selecting
+    /// it reveals the inline caption field in the text tool group, so the user
+    /// can type immediately. The new block clones the last-edited style.
     func addTextBlock() {
         let t = min(max(currentTime, 0), duration)
         var template = lastTextStyle
@@ -770,9 +771,8 @@ final class StudioModel: ObservableObject {
         }
     }
 
-    /// Begin a canvas position drag: select, close any open text input, and
-    /// suppress the baked copy (one recomposite) so the smooth SwiftUI overlay
-    /// drives motion.
+    /// Begin a canvas position drag: select and suppress the baked copy (one
+    /// recomposite) so the smooth SwiftUI overlay drives motion.
     func beginDraggingText(_ id: UUID) {
         selectTextBlock(id)
         draggingTextBlockID = id
@@ -799,8 +799,11 @@ final class StudioModel: ObservableObject {
 
     /// Deselect any text block (closing the inline editor / drag first).
     func deselectText() {
-        if draggingTextBlockID != nil { endDraggingText() }
-        if selectedTextBlockID != nil { saveEdit() }   // persist any live text edit
+        if draggingTextBlockID != nil {
+            endDraggingText()
+        } else if selectedTextBlockID != nil {
+            saveEdit()   // persist any live text edit (drag-end already saved)
+        }
         selectedTextBlockID = nil
     }
 
