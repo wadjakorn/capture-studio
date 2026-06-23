@@ -9,7 +9,7 @@ import SwiftUI
 /// transform doesn't feed back into the drag.
 struct CanvasNavigationLayer: View {
     @ObservedObject var model: StudioModel
-    @State private var lastTranslation: CGSize = .zero
+    @State private var lastTranslation: CGSize?
 
     var body: some View {
         Color.clear
@@ -18,12 +18,14 @@ struct CanvasNavigationLayer: View {
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .global)
                     .onChanged { value in
-                        let dx = value.translation.width - lastTranslation.width
-                        let dy = value.translation.height - lastTranslation.height
+                        // First event sets the baseline (zero delta); later
+                        // events pan by the per-update increment.
+                        let previous = lastTranslation ?? value.translation
                         lastTranslation = value.translation
-                        model.panCanvas(by: CGSize(width: dx, height: dy))
+                        model.panCanvas(by: CGSize(width: value.translation.width - previous.width,
+                                                   height: value.translation.height - previous.height))
                     }
-                    .onEnded { _ in lastTranslation = .zero }
+                    .onEnded { _ in lastTranslation = nil }
             )
     }
 }
