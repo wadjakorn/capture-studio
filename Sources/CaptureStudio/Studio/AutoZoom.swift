@@ -10,22 +10,22 @@ struct ZoomKeyframe: Equatable {
     var focusY: Double
 }
 
-/// Tunables for the auto-zoom pre-pass. Defaults are v1 values; `defaultScale`
-/// is overridden per project from `autoZoomDefaultScale`.
+/// Tunables for the auto-zoom pre-pass. `defaultScale` / `defaultSensitivity`
+/// are overridden per project from UserDefaults (see `StudioModel.autoZoomConfig`).
 struct AutoZoomConfig {
     var defaultScale: Double = 2.0
-    /// Anticipation: focus targets the cursor position this many seconds ahead.
-    var lead: Double = 0.4
     /// Zoom-in / zoom-out ramp duration (each end of a block).
     var ramp: Double = 0.4
-    /// How aggressively the pan follows the cursor, 0…1 (0 = calm / big
-    /// deadzone + laggy, 1 = snappy / tiny deadzone + responsive). Resolved to
-    /// the low-level deadzone + smoothing via `AutoZoomTrack.tuning`. Overridden
-    /// per block by `ZoomBlock.sensitivity`, or globally by
-    /// `autoZoomDefaultSensitivity`.
+    /// How aggressively the pan follows the cursor, 0…1. Low = calm (large
+    /// ignore-zone, long settle delay, slow pan); high = snappy (no ignore-zone,
+    /// no delay, fast pan). Resolved to deadzone/dwell/smoothing via `tuning`.
+    /// Overridden per block by `ZoomBlock.sensitivity`.
     var defaultSensitivity: Double = 0.5
     /// Keyframe sampling step (seconds).
     var step: Double = 1.0 / 60.0
+    /// How still the cursor must stay (fraction of source width) to count as
+    /// "resting at the same spot" for the dwell timer.
+    var restRadiusFrac: Double = 0.012
 }
 
 /// Pure pre-pass: turn zoom blocks + cursor samples into a smoothed
@@ -33,12 +33,19 @@ struct AutoZoomConfig {
 /// (at composition build) and interpolating at render time keeps the render
 /// deterministic under out-of-order frame requests (preview scrubbing). No
 /// AVFoundation / AppKit deps so it's unit-testable.
+///
+/// Follow model (settle-based): the canvas does NOT chase the moving cursor.
+/// When the cursor comes to rest at a new spot, holds it for the `dwell` time,
+/// and that spot is beyond the `deadzone` from where the canvas is currently
+/// looking, the focus gently pans toward it. Quick flicks, jitters, and
+/// pass-throughs never accumulate dwell, so they are ignored.
 enum AutoZoomTrack {
     static func build(blocks: [ZoomBlock], cursorSamples: [CursorSample],
                       sourceSize: CGSize,
                       config: AutoZoomConfig = AutoZoomConfig()) -> [ZoomKeyframe] {
         guard !blocks.isEmpty else { return [] }
         let center = CGPoint(x: sourceSize.width / 2, y: sourceSize.height / 2)
+        let restRadius = config.restRadiusFrac * sourceSize.width
         var out: [ZoomKeyframe] = []
 
         for block in blocks.sorted(by: { $0.begin < $1.begin }) {
@@ -46,28 +53,36 @@ enum AutoZoomTrack {
             guard span > 0 else { continue }
             let target = max(1, block.scale ?? config.defaultScale)
             let ramp = min(config.ramp, span / 2)
-            // Per-block sensitivity → deadzone + smoothing.
-            let (idleSpeed, smoothing) = tuning(block.sensitivity ?? config.defaultSensitivity)
+            // Per-block sensitivity → ignore-zone + settle delay + pan gentleness.
+            let (deadzoneFrac, dwell, smoothing) = tuning(block.sensitivity ?? config.defaultSensitivity)
+            let deadzonePx = deadzoneFrac * sourceSize.width
             let alpha = 1 - exp(-config.step / max(smoothing, 1e-4))
 
             // Seed the smoothed focus on the cursor at the block start.
             var focus = cursorPoint(at: block.begin, in: cursorSamples) ?? center
-            var lastTarget = focus
+            var restPos = focus
+            var restElapsed = 0.0
 
             var t = block.begin
             while t < block.end - 1e-9 {
                 // Scale ramp (smoothstep in, hold, smoothstep out).
                 let scale = scaleAt(t, begin: block.begin, end: block.end,
                                     ramp: ramp, target: target)
-                // Anticipated, idle-gated target.
-                let aheadT = min(t + config.lead, block.end)
-                let raw = cursorPoint(at: aheadT, in: cursorSamples) ?? center
-                let speed = cursorSpeed(at: aheadT, in: cursorSamples, dt: config.step)
-                let desired = speed < idleSpeed ? lastTarget : raw
-                lastTarget = desired
-                // Exponential smoothing toward the target, clamped to source.
-                focus.x += (desired.x - focus.x) * alpha
-                focus.y += (desired.y - focus.y) * alpha
+                // Track how long the cursor has rested near the same spot.
+                let pos = cursorPoint(at: t, in: cursorSamples) ?? center
+                if hypot(pos.x - restPos.x, pos.y - restPos.y) <= restRadius {
+                    restElapsed += config.step
+                } else {
+                    restPos = pos
+                    restElapsed = 0
+                }
+                // Pan toward the rest spot only once it has settled long enough
+                // AND is beyond the ignore-zone from the current focus.
+                let settled = restElapsed >= dwell
+                let beyond = hypot(restPos.x - focus.x, restPos.y - focus.y) > deadzonePx
+                let aim = (settled && beyond) ? restPos : focus
+                focus.x += (aim.x - focus.x) * alpha
+                focus.y += (aim.y - focus.y) * alpha
                 focus.x = min(max(focus.x, 0), sourceSize.width)
                 focus.y = min(max(focus.y, 0), sourceSize.height)
 
@@ -107,12 +122,14 @@ enum AutoZoomTrack {
 
     // MARK: - Helpers
 
-    /// Map a 0…1 sensitivity to the low-level pan knobs. Low sensitivity = large
-    /// deadzone (ignore small/slow moves) + heavy smoothing (laggy); high =
-    /// small deadzone + light smoothing (snappy).
-    static func tuning(_ s: Double) -> (idleSpeed: Double, smoothing: Double) {
+    /// Map a 0…1 sensitivity to the follow knobs. Low sensitivity = large
+    /// ignore-zone (fraction of source width), long settle delay, and heavy
+    /// smoothing (slow pan); high = no ignore-zone, no delay, light smoothing.
+    static func tuning(_ s: Double) -> (deadzone: Double, dwell: Double, smoothing: Double) {
         let c = min(max(s, 0), 1)
-        return (idleSpeed: 200 - 190 * c, smoothing: 0.30 - 0.25 * c)
+        return (deadzone: 0.10 * (1 - c),
+                dwell: 0.6 * (1 - c),
+                smoothing: 0.30 - 0.25 * c)
     }
 
     private static func scaleAt(_ t: Double, begin: Double, end: Double,
@@ -135,14 +152,5 @@ enum AutoZoomTrack {
     /// Cursor position at `t` (source px), linearly interpolated; nil if empty.
     private static func cursorPoint(at t: Double, in samples: [CursorSample]) -> CGPoint? {
         CursorOverlay.position(at: t, in: samples)?.p
-    }
-
-    /// Cursor speed (source px/sec) around `t` via a centered difference.
-    private static func cursorSpeed(at t: Double, in samples: [CursorSample],
-                                    dt: Double) -> Double {
-        guard let a = cursorPoint(at: t - dt, in: samples),
-              let b = cursorPoint(at: t + dt, in: samples) else { return 0 }
-        let dx = b.x - a.x, dy = b.y - a.y
-        return (dx * dx + dy * dy).squareRoot() / (2 * dt)
     }
 }
