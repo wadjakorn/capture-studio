@@ -56,6 +56,12 @@ struct SubtitleTimelineLane: View {
                         .onChanged { value in
                             model.seek(to: time(atX: value.location.x, width: width))
                         }
+                        .onEnded { value in
+                            if abs(value.translation.width) < 3
+                                && abs(value.translation.height) < 3 {
+                                model.deselectAll()
+                            }
+                        }
                 )
                 .overlay { if model.subtitleState != .idle { loader } }
             }

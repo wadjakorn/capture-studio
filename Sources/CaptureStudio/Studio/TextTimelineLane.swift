@@ -58,11 +58,18 @@ struct TextTimelineLane: View {
                 .frame(height: contentHeight)
                 .coordinateSpace(name: laneSpace)
                 .contentShape(Rectangle())
-                // Empty-track scrub (blocks/handles consume their own hits first).
+                // Empty-track scrub (blocks/handles consume their own hits first);
+                // a pure tap (no scrub) on empty track also deselects.
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .named(laneSpace))
                         .onChanged { value in
                             model.seek(to: time(atX: value.location.x, width: width))
+                        }
+                        .onEnded { value in
+                            if abs(value.translation.width) < 3
+                                && abs(value.translation.height) < 3 {
+                                model.deselectAll()
+                            }
                         }
                 )
             }

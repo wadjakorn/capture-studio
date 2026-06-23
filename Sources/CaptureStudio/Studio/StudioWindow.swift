@@ -17,6 +17,8 @@ struct StudioView: View {
     @State private var showCameraStyle = false
     @State private var showTextStyle = false
     @State private var showSubtitleStyle = false
+    @State private var showZoomStyle = false
+    @State private var confirmRemoveSubtitles = false
     // Measured content heights for the style popovers; drive a content-fitting,
     // capped frame so they never clip their last row or leave empty slack.
     @State private var textPopoverHeight: CGFloat = 0
@@ -56,6 +58,13 @@ struct StudioView: View {
         }
         // Esc deselects any selected block (the text input owns Esc while open).
         .background {
+            // Click any inert region of the editor (toolbar gaps, group/lane
+            // padding) to deselect — not just the empty canvas. Interactive
+            // controls (buttons, sliders, lanes, canvas overlays) consume their
+            // own clicks, so only "still parts" fall through to here.
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture { model.deselectAll() }
             // The inline caption field owns Esc while a text block is selected.
             if model.selectedTextBlock == nil {
                 Button("") { model.deselectAll() }
@@ -76,6 +85,11 @@ struct StudioView: View {
                     CanvasNavigationLayer(model: model)
                     // Click a visible caption to select it (above navigation).
                     TextSelectHitLayer(model: model)
+                    // Click the camera to select it; the full overlay (handles)
+                    // only appears once selected, so it can be deselected.
+                    if model.cameraOverlayEditableAtPlayhead && !model.showsCameraOverlay {
+                        CameraSelectHitLayer(model: model)
+                    }
                     if model.showsCameraOverlay {
                         CameraPipOverlay(model: model)
                     }
@@ -159,22 +173,26 @@ struct StudioView: View {
                 toolGroup { outputControls }
             }
 
-            // Row 2 — editing tools, grouped; each group wraps intact.
+            // Row 2 — editing tools, grouped; each group wraps intact. Order:
+            // sound · main video · mouse · camera · subtitle · cursor-follow · text.
             FlowLayout(hSpacing: 8, vSpacing: 8) {
                 if model.hasSystemAudioTrack || model.hasMicTrack {
                     toolGroup { audioControls }
                 }
                 toolGroup { reframeControls }
+                toolGroup { cursorControls }            // mouse appearance
                 if model.hasCameraTrack {
                     toolGroup { cameraControls }
                 }
-                toolGroup { textControls }
                 toolGroup { subtitleControls }
                     .onChange(of: model.subtitles == nil) { _, nowNil in
                         if nowNil { showSubtitleStyle = false }
                     }
-                toolGroup { zoomControls }
-                toolGroup { cursorControls }
+                toolGroup { zoomControls }              // cursor follow (auto zoom/pan)
+                    .onChange(of: model.selectedZoomBlockID == nil) { _, nowNil in
+                        if nowNil { showZoomStyle = false }
+                    }
+                toolGroup { textControls }              // text — last group
             }
         }
         .padding(12)
@@ -401,26 +419,49 @@ struct StudioView: View {
             Image(systemName: "slider.horizontal.3")
         }
         .disabled(model.selectedTextBlock == nil)
-        .help("Edit text style, order, and delete")
+        .help("Edit text style")
         .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
             textStylePopover
         }
 
-        // Inline caption input — shown only while a text block is selected.
-        // Selecting a block (timeline or canvas) reveals it; deselecting hides it.
-        if model.selectedTextBlock != nil {
-            CaptionTextEditor(
-                text: Binding(
-                    get: { model.selectedTextBlock?.text ?? "" },
-                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
-                ),
-                onSubmit: { model.commitTextEdit() }
-            )
-            .frame(width: 220, height: 44)
-            .overlay(RoundedRectangle(cornerRadius: 5)
-                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
-            .help("Edit caption text · Shift+Return for a new line")
-        }
+        // Z-order + delete for the selected block — always shown, disabled
+        // until a block is selected.
+        Button {
+            if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
+        } label: { Image(systemName: "arrow.down.square") }
+            .disabled(model.selectedTextBlock == nil)
+            .help("Send backward")
+        Button {
+            if let id = model.selectedTextBlockID { model.bringTextForward(id) }
+        } label: { Image(systemName: "arrow.up.square") }
+            .disabled(model.selectedTextBlock == nil)
+            .help("Bring forward")
+        Button(role: .destructive) {
+            if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
+        } label: { Image(systemName: "trash") }
+            .disabled(model.selectedTextBlock == nil)
+            .help("Delete this text block")
+
+        // Inline caption input — always shown; editable only while a text block
+        // is selected (timeline or canvas), greyed out otherwise. Bigger so
+        // multi-line captions are comfortable to edit.
+        CaptionTextEditor(
+            text: Binding(
+                get: { model.selectedTextBlock?.text ?? "" },
+                set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
+            ),
+            isEnabled: model.selectedTextBlock != nil,
+            focusToken: model.selectedTextBlockID,
+            onSubmit: { model.commitTextEdit() },
+            onCancel: { model.deselectAll() }
+        )
+        .frame(width: 320, height: 56)
+        .overlay(RoundedRectangle(cornerRadius: 5)
+            .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
+        .opacity(model.selectedTextBlock == nil ? 0.55 : 1)
+        .help(model.selectedTextBlock == nil
+              ? "Select a text block to edit its caption"
+              : "Edit caption text · Shift+Return for a new line")
     }
 
     @ViewBuilder private var zoomControls: some View {
@@ -429,47 +470,68 @@ struct StudioView: View {
         }
         .help("Add an auto zoom/pan block at the playhead")
 
-        Button {
+        // Per-block scale + sensitivity live in the popover — only meaningful
+        // with a zoom block selected, so the button is gated on selection.
+        Button { showZoomStyle.toggle() } label: {
+            Image(systemName: "slider.horizontal.3")
+        }
+        .disabled(model.selectedZoomBlockID == nil)
+        .help("Zoom magnification & follow sensitivity for the selected block")
+        .popover(isPresented: $showZoomStyle, arrowEdge: .bottom) {
+            zoomStylePopover
+        }
+
+        Button(role: .destructive) {
             if let id = model.selectedZoomBlockID { model.removeZoomBlock(id) }
         } label: {
-            Image(systemName: "minus.magnifyingglass")
+            Image(systemName: "trash")
         }
         .disabled(model.selectedZoomBlockID == nil)
         .help("Delete the selected zoom block")
+    }
 
-        if model.selectedZoomBlockID != nil {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .foregroundStyle(.secondary)
+    /// Per-block zoom controls (scale + follow sensitivity) — the two scalers
+    /// that used to sit inline, now wrapped in a popover since they operate on
+    /// the selected move/zoom block.
+    private var zoomStylePopover: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Zoom", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(String(format: "%.1f×", model.selectedZoomScale))
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
                 Slider(
                     value: Binding(get: { model.selectedZoomScale },
                                    set: { model.setZoomScale($0) }),
                     in: 1...6,
                     onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
                 )
-                .frame(width: 90)
-                Text(String(format: "%.1f×", model.selectedZoomScale))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
             }
-            .help("Zoom magnification for the selected block")
 
-            HStack(spacing: 4) {
-                Image(systemName: "hand.draw")
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label("Follow sensitivity", systemImage: "hand.draw")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
                 Slider(
                     value: Binding(get: { model.selectedZoomSensitivity },
                                    set: { model.setZoomSensitivity($0) }),
                     in: 0...1,
                     onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
                 )
-                .frame(width: 90)
-                Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Text("How aggressively the zoom pans toward the cursor — low = calm, high = snappy.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .help("Follow sensitivity — how aggressively the zoom pans toward the cursor (low = calm, high = snappy)")
         }
+        .padding(16)
+        .frame(width: 280)
     }
 
     @ViewBuilder private var subtitleControls: some View {
@@ -491,13 +553,23 @@ struct StudioView: View {
             .popover(isPresented: $showSubtitleStyle, arrowEdge: .bottom) {
                 subtitleStylePopover
             }
-
-            Button(role: .destructive) { model.removeSubtitles() } label: {
-                Image(systemName: "trash")
-            }
-            .disabled(model.subtitleState != .idle)
-            .help("Remove subtitles")
         }
+
+        // Bin always shown; disabled until a track exists, mirroring the other
+        // delete controls. Confirms before removing (destructive).
+        Button(role: .destructive) { confirmRemoveSubtitles = true } label: {
+            Image(systemName: "trash")
+        }
+        .disabled(model.subtitles == nil || model.subtitleState != .idle)
+        .help("Remove subtitles")
+        .confirmationDialog("Remove subtitles?", isPresented: $confirmRemoveSubtitles,
+                            titleVisibility: .visible) {
+            Button("Remove Subtitles", role: .destructive) { model.removeSubtitles() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the imported subtitle track from this project.")
+        }
+
         if model.subtitleState != .idle {
             ProgressView().controlSize(.small)
         }
@@ -699,24 +771,6 @@ struct StudioView: View {
         let block = model.selectedTextBlock
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Button {
-                        if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
-                    } label: { Image(systemName: "arrow.down.square") }
-                        .help("Send backward")
-                    Button {
-                        if let id = model.selectedTextBlockID { model.bringTextForward(id) }
-                    } label: { Image(systemName: "arrow.up.square") }
-                        .help("Bring forward")
-                    Spacer()
-                    Button(role: .destructive) {
-                        if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
-                    } label: { Image(systemName: "trash") }
-                        .help("Delete this text block")
-                }
-
-                Divider()
-
                 Picker("Font", selection: Binding(
                     get: { block?.fontName ?? "Helvetica" },
                     set: { model.setTextFontName($0) }
