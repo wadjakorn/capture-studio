@@ -27,6 +27,9 @@ final class StudioModel: ObservableObject {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var duration: Double = 0
     @Published var currentTime: Double = 0
+    /// Transient: while true, dragging the preview pans the reframed video
+    /// (see CropPanOverlay). Not persisted; reset when the reframe isn't pannable.
+    @Published var panVideoMode = false
     @Published private(set) var trimIn: Double = 0
     @Published private(set) var trimOut: Double = 0
     @Published private(set) var exportState: ExportState = .idle
@@ -47,11 +50,13 @@ final class StudioModel: ObservableObject {
     static let defaultBlockWidth = 0.5
     // Text/caption timeline. Multiple instances, MAY overlap in time; array
     // order is the z-order (later = on top) and is never re-sorted. The selected
-    // block is the one the lane + style bar + canvas overlay edit; the editing
-    // block is the one with its inline canvas editor open. Persisted to edit.json.
+    // block is the one the lane + style bar + canvas overlay edit. Persisted to edit.json.
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
-    @Published var editingTextBlockID: UUID?
+    // Zoom/pan timeline. Blocks drive an auto-zoom track in the compositor.
+    // Persisted to edit.json.
+    @Published private(set) var zoomBlocks: [ZoomBlock] = []
+    @Published var selectedZoomBlockID: UUID?
     /// Set while a text block is being dragged on the canvas, so the compositor
     /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
     /// (no per-tick recomposite). Cleared on drop.
@@ -73,8 +78,24 @@ final class StudioModel: ObservableObject {
     /// compositor suppresses the baked subtitles and the smooth overlay drives
     /// motion. Cleared on drop.
     @Published private(set) var draggingSubtitle = false
-    /// Composition frame rate (frames per second) for video export.
-    static let compositionFrameRate = 60
+    /// Frames-per-second of the preview/export video composition. The seek that
+    /// reveals a selected caption must align to this grid (see
+    /// `TextTimeline.firstVisibleTime`), so it is the single source of truth for
+    /// both the composition `frameDuration` and that seek.
+    static let compositionFrameRate: Double = 60
+    /// New playhead time after a horizontal scroll of `dx` view points across a
+    /// canvas `viewWidth` wide; a full-width scroll spans the whole `duration`.
+    /// Positive `dx` (swipe right) rewinds; negative advances. Clamped to clip.
+    nonisolated static func scrubbedTime(from current: Double, scrollDX dx: CGFloat,
+                                         viewWidth: CGFloat, duration: Double) -> Double {
+        guard viewWidth > 0, duration > 0 else { return current }
+        let delta = Double(dx / viewWidth) * duration
+        return min(max(0, current - delta), duration)
+    }
+    /// Style/position template for the next added text block — every block edit
+    /// snapshots into it so a new block clones the most recent one (text aside).
+    /// In-memory only: resets each launch (no cross-session memory).
+    private var lastTextStyle = TextBlock(begin: 0, end: 0)
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
     // 0–1 in the camera's own space. Persisted to edit.json.
     @Published var cameraZoom = 1.0
@@ -99,6 +120,18 @@ final class StudioModel: ObservableObject {
     /// The camera lane is shown only when the camera is visible *and* has a
     /// block timeline. Toggling the camera off hides the lane (blocks retained).
     var showsCameraTimeline: Bool { cameraVisible && cameraHasTimeline }
+    /// The zoom lane is shown only when there is at least one zoom block.
+    var showsZoomTimeline: Bool { !zoomBlocks.isEmpty }
+
+    /// Per-project defaults for new/unset blocks (global config).
+    var autoZoomConfig: AutoZoomConfig {
+        var c = AutoZoomConfig()
+        let v = UserDefaults.standard.double(forKey: "autoZoomDefaultScale")
+        if v > 1 { c.defaultScale = v }
+        let s = UserDefaults.standard.double(forKey: "autoZoomDefaultSensitivity")
+        if s > 0 && s <= 1 { c.defaultSensitivity = s }
+        return c
+    }
     var selectedBlock: CameraBlock? {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
@@ -275,6 +308,7 @@ final class StudioModel: ObservableObject {
             || cameraHasTimeline
             || !textBlocks.isEmpty
             || showsSubtitleTimeline
+            || !zoomBlocks.isEmpty
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
             || (cropAspect.isFit && canvasBackground != .black)
@@ -369,6 +403,7 @@ final class StudioModel: ObservableObject {
                     : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
                                     cues: track.cues, offset: track.offset)
             }
+            zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
             applyVideoComposition()
             applyAudioMix()
 
@@ -719,6 +754,116 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    // MARK: - Zoom timeline (auto zoom/pan blocks)
+
+    /// Add a zoom block at the playhead (scale = nil → uses the global default).
+    func addZoomBlock() {
+        let t = min(max(currentTime, 0), duration)
+        let added = ZoomTimeline.add(zoomBlocks, atTime: t,
+                                     width: Self.defaultBlockWidth, duration: duration)
+        setZoomBlocks(added.blocks, select: added.id)
+    }
+
+    func moveZoomBlockBegin(_ id: UUID, toTime: Double) {
+        zoomBlocks = ZoomTimeline.moveBegin(zoomBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveZoomBlockEnd(_ id: UUID, toTime: Double) {
+        zoomBlocks = ZoomTimeline.moveEnd(zoomBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveZoomBlock(_ id: UUID, toBegin: Double) {
+        zoomBlocks = ZoomTimeline.moveBlock(zoomBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitZoomEdit() { saveEdit() }
+
+    func removeZoomBlock(_ id: UUID) {
+        let list = ZoomTimeline.remove(zoomBlocks, id: id)
+        setZoomBlocks(list, select: selectedZoomBlockID == id ? nil : selectedZoomBlockID)
+    }
+
+    /// Select a zoom block (clears camera/text selection) and park the playhead
+    /// inside its span so the preview shows the zoom.
+    func selectZoomBlock(_ id: UUID?) {
+        selectedZoomBlockID = id
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false }
+        if let id, let b = zoomBlocks.first(where: { $0.id == id }) {
+            seek(to: min((b.begin + b.end) / 2, duration))
+        }
+    }
+
+    /// Effective scale of the selected block (its override, else global default).
+    var selectedZoomScale: Double {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else {
+            return autoZoomConfig.defaultScale
+        }
+        return b.scale ?? autoZoomConfig.defaultScale
+    }
+
+    /// Set the selected block's scale override (live; persist via commitZoomEdit).
+    func setZoomScale(_ v: Double) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].scale = min(max(1, v), 6)
+        applyVideoComposition()
+    }
+
+    /// Clear the override so the block follows the global default again.
+    func resetZoomScale() {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].scale = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Effective follow-sensitivity of the selected block (its override, else
+    /// the global default).
+    var selectedZoomSensitivity: Double {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else {
+            return autoZoomConfig.defaultSensitivity
+        }
+        return b.sensitivity ?? autoZoomConfig.defaultSensitivity
+    }
+
+    /// Set the selected block's sensitivity override (live; persist via
+    /// commitZoomEdit).
+    func setZoomSensitivity(_ v: Double) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].sensitivity = min(max(0, v), 1)
+        applyVideoComposition()
+    }
+
+    /// Clear the override so the block follows the global default again.
+    func resetZoomSensitivity() {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].sensitivity = nil
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Replace the zoom-block list. Adding the first / removing the last flips
+    /// the compositor on/off, so refresh the player item when `needsCompositor`
+    /// changes, mirroring `setBlocks`.
+    private func setZoomBlocks(_ list: [ZoomBlock], select id: UUID?) {
+        let was = needsCompositor
+        zoomBlocks = list
+        selectedZoomBlockID = id
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
+        saveEdit()
+    }
+
     // MARK: - Text timeline (captions)
 
     /// Replace the text-block list (preserving its array order = z-order). Adding
@@ -738,8 +883,9 @@ final class StudioModel: ObservableObject {
     /// Select a text block (clears any camera-block selection) and park the
     /// playhead inside its span so the preview shows it. Pass nil to deselect.
     func selectTextBlock(_ id: UUID?) {
+        if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil; subtitleSelected = false }
+        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -752,20 +898,20 @@ final class StudioModel: ObservableObject {
         }
     }
 
-    /// Add an empty default text block at the playhead, select it, and open its
-    /// input so the user can type immediately.
+    /// Add an empty default text block at the playhead and select it. Selecting
+    /// it reveals the inline caption field in the text tool group, so the user
+    /// can type immediately. The new block clones the last-edited style.
     func addTextBlock() {
         let t = min(max(currentTime, 0), duration)
+        var template = lastTextStyle
+        template.text = ""              // inherit style + position, never the words
         let added = TextTimeline.add(textBlocks, atTime: t, width: Self.defaultTextWidth,
-                                     duration: duration,
-                                     template: TextBlock(begin: 0, end: 0))
+                                     duration: duration, template: template)
         setTextBlocks(added.blocks, select: added.id)
-        editingTextBlockID = added.id
     }
 
     func removeTextBlock(_ id: UUID) {
         let list = TextTimeline.remove(textBlocks, id: id)
-        if editingTextBlockID == id { editingTextBlockID = nil }
         setTextBlocks(list, select: selectedTextBlockID == id ? nil : selectedTextBlockID)
     }
 
@@ -791,27 +937,13 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    /// Open the text input popover for a block (select it and mark it editing).
-    /// The input is off-canvas, so the baked text stays visible and updates live
-    /// as the user types — no suppression needed.
-    func beginEditingText(_ id: UUID) {
-        selectTextBlock(id)
-        editingTextBlockID = id
-    }
-
-    /// Close the text input popover and persist (text was applied live).
-    func endEditingText() {
-        guard editingTextBlockID != nil else { return }
-        editingTextBlockID = nil
-        saveEdit()
-    }
-
     /// Mutate one block in place (preserves array order / z-order) and refresh
     /// the preview live. Does NOT persist — call `commitTextEdit` at gesture /
     /// edit end, mirroring the camera drag/commit split.
     private func updateTextBlock(_ id: UUID, _ mutate: (inout TextBlock) -> Void) {
         guard let i = textBlocks.firstIndex(where: { $0.id == id }) else { return }
         mutate(&textBlocks[i])
+        lastTextStyle = textBlocks[i]   // template tracks the last-edited block
         applyVideoComposition()
     }
 
@@ -826,12 +958,10 @@ final class StudioModel: ObservableObject {
         }
     }
 
-    /// Begin a canvas position drag: select, close any open text input, and
-    /// suppress the baked copy (one recomposite) so the smooth SwiftUI overlay
-    /// drives motion.
+    /// Begin a canvas position drag: select and suppress the baked copy (one
+    /// recomposite) so the smooth SwiftUI overlay drives motion.
     func beginDraggingText(_ id: UUID) {
         selectTextBlock(id)
-        editingTextBlockID = nil
         draggingTextBlockID = id
         applyVideoComposition()
     }
@@ -847,16 +977,20 @@ final class StudioModel: ObservableObject {
     /// End a canvas position drag: un-suppress, recomposite once at the final
     /// position, and persist.
     func endDraggingText() {
-        guard draggingTextBlockID != nil else { return }
+        guard let id = draggingTextBlockID else { return }
         draggingTextBlockID = nil
+        if let b = textBlocks.first(where: { $0.id == id }) { lastTextStyle = b }
         applyVideoComposition()
         saveEdit()
     }
 
     /// Deselect any text block (closing the inline editor / drag first).
     func deselectText() {
-        if editingTextBlockID != nil { endEditingText() }
-        if draggingTextBlockID != nil { endDraggingText() }
+        if draggingTextBlockID != nil {
+            endDraggingText()
+        } else if selectedTextBlockID != nil {
+            saveEdit()   // persist any live text edit (drag-end already saved)
+        }
         selectedTextBlockID = nil
     }
 
@@ -865,6 +999,7 @@ final class StudioModel: ObservableObject {
     func deselectAll() {
         deselectText()
         selectedBlockID = nil
+        selectedZoomBlockID = nil
         if draggingSubtitle { endDraggingSubtitle() }
         subtitleSelected = false
     }
@@ -950,7 +1085,7 @@ final class StudioModel: ObservableObject {
     }
 
     func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
-    func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
+    func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.005, v), 0.5) } }
     func setTextWeight(_ w: TextWeight) { updateSelectedText(commit: true) { $0.fontWeight = w } }
     func setTextColorHex(_ hex: String) { updateSelectedText(commit: true) { $0.colorHex = hex } }
     func setTextAlignment(_ a: TextAlignmentH) { updateSelectedText(commit: true) { $0.alignment = a } }
@@ -960,6 +1095,8 @@ final class StudioModel: ObservableObject {
     func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
     func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
     func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
+    func setTextBoxWidth(_ v: Double) { updateSelectedText(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
+    func setTextAutoWrap(_ on: Bool) { updateSelectedText(commit: true) { $0.autoWrap = on } }
 
     // MARK: - Subtitles
 
@@ -1004,7 +1141,7 @@ final class StudioModel: ObservableObject {
             subtitleSelected = true
             selectedTextBlockID = nil
             selectedBlockID = nil
-            editingTextBlockID = nil
+            selectedZoomBlockID = nil
             refreshPlayerItemForCanvasChange()
             applyVideoComposition()
             saveEdit()
@@ -1036,7 +1173,7 @@ final class StudioModel: ObservableObject {
         if on {
             selectedTextBlockID = nil
             selectedBlockID = nil
-            editingTextBlockID = nil
+            selectedZoomBlockID = nil
         }
     }
 
@@ -1111,7 +1248,8 @@ final class StudioModel: ObservableObject {
     /// preview shows exactly what the overlay edits. Pass nil to deselect.
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
-        if id != nil { selectedTextBlockID = nil; subtitleSelected = false }   // one selection at a time
+        // camera vs text vs zoom vs subtitle: one selection at a time
+        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false }
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
@@ -1252,6 +1390,7 @@ final class StudioModel: ObservableObject {
 
     func setCropAspect(_ aspect: CropAspect) {
         cropAspect = aspect
+        if !cropPannable { panVideoMode = false }
         templateGuideVisible = (aspect == .nineBySixteenTemplate)
         cropCenterX = 0.5
         cropCenterY = 0.5
@@ -1472,7 +1611,7 @@ final class StudioModel: ObservableObject {
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = canvas
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: Int32(Self.compositionFrameRate))
         videoComposition.instructions = [instruction]
         return videoComposition
     }
@@ -1558,6 +1697,15 @@ final class StudioModel: ObservableObject {
             }
         }
 
+        // Auto zoom/pan: pre-build the smoothed track from blocks + cursor
+        // samples (cursor data is loaded regardless of the showCursor toggle).
+        if !zoomBlocks.isEmpty {
+            overlay.autoZoom = AutoZoomTrack.build(blocks: zoomBlocks,
+                                                   cursorSamples: cursorSamples,
+                                                   sourceSize: sourceSize,
+                                                   config: autoZoomConfig)
+        }
+
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),
             layout: layout,
@@ -1566,7 +1714,7 @@ final class StudioModel: ObservableObject {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.customVideoCompositorClass = StudioCompositor.self
         videoComposition.renderSize = canvas
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 60)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: Int32(Self.compositionFrameRate))
         videoComposition.instructions = [instruction]
         return videoComposition
     }
@@ -1700,7 +1848,8 @@ final class StudioModel: ObservableObject {
             canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
             textBlocks: textBlocks,
-            subtitles: subtitles
+            subtitles: subtitles,
+            zoomBlocks: zoomBlocks
         )
         try? bundle.writeEdit(edit)
     }

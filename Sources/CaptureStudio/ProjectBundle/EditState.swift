@@ -117,6 +117,31 @@ struct CameraBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// One auto-zoom span on the screen-track timeline. During `[begin, end)` the
+/// canvas zooms in and pans to follow the cursor (see `AutoZoomTrack`). Blocks
+/// never overlap (a single zoom state at a time), mirroring `CameraBlock`.
+/// `scale` is the target magnification (≥1); nil means use the global default
+/// (`autoZoomDefaultScale`).
+struct ZoomBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var scale: Double?
+    /// How aggressively auto-zoom pans toward the cursor (0 = calm / ignore
+    /// small moves, 1 = snappy). nil = use the global default
+    /// (`autoZoomDefaultSensitivity`). Mirrors `scale`'s override semantics.
+    var sensitivity: Double?
+
+    init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
+         sensitivity: Double? = nil) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.scale = scale
+        self.sensitivity = sensitivity
+    }
+}
+
 /// Text/caption font weight. Unknown raw strings (future versions) decode as
 /// `semibold`.
 enum TextWeight: String, Codable, CaseIterable, Equatable {
@@ -172,6 +197,13 @@ struct TextBlock: Codable, Equatable, Identifiable {
     var strokeWidth: Double
     var strokeHex: String
     var shadow: Bool
+    /// Wrap-frame width as a fraction of canvas width. Text soft-wraps to this
+    /// width when `autoWrap` is on; ignored when off. 0.9 reproduces the legacy
+    /// hardcoded wrap width.
+    var boxWidth: Double
+    /// When true, text soft-wraps to `boxWidth`; when false only explicit
+    /// newlines break lines (long lines extend past the canvas edges).
+    var autoWrap: Bool
     // Forward-compat: distinguishes hand-authored vs. auto-generated captions.
     var source: TextSource
 
@@ -182,7 +214,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
          alignment: TextAlignmentH = .center, boxEnabled: Bool = false,
          boxHex: String = "#000000", boxOpacity: Double = 0.5,
          strokeWidth: Double = 0, strokeHex: String = "#000000",
-         shadow: Bool = true, source: TextSource = .manual) {
+         shadow: Bool = true, boxWidth: Double = 0.9, autoWrap: Bool = true,
+         source: TextSource = .manual) {
         self.id = id
         self.begin = begin
         self.end = end
@@ -200,6 +233,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
         self.strokeWidth = strokeWidth
         self.strokeHex = strokeHex
         self.shadow = shadow
+        self.boxWidth = boxWidth
+        self.autoWrap = autoWrap
         self.source = source
     }
 
@@ -233,6 +268,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
         strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
         strokeHex = try c.decodeIfPresent(String.self, forKey: .strokeHex) ?? "#000000"
         shadow = try c.decodeIfPresent(Bool.self, forKey: .shadow) ?? true
+        boxWidth = try c.decodeIfPresent(Double.self, forKey: .boxWidth) ?? 0.9
+        autoWrap = try c.decodeIfPresent(Bool.self, forKey: .autoWrap) ?? true
         let sourceRaw = try c.decodeIfPresent(String.self, forKey: .source)
         source = sourceRaw.flatMap(TextSource.init(rawValue:)) ?? .manual
     }
@@ -438,6 +475,9 @@ struct EditState: Codable, Equatable {
     /// Imported subtitle track (nil = none). Cues are read-only; `style` is the
     /// shared look. The `.srt` itself lives in the bundle (see ProjectBundle).
     var subtitles: SubtitleTrack? = nil
+    /// Auto-zoom blocks. Empty = no auto zoom/pan. Non-overlapping; during each
+    /// block the canvas zooms + pans to follow the cursor.
+    var zoomBlocks: [ZoomBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
@@ -456,7 +496,8 @@ struct EditState: Codable, Equatable {
          canvasBackgroundBlur: Double = 0.03,
          canvasBackgroundImage: String? = nil,
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
-         subtitles: SubtitleTrack? = nil) {
+         subtitles: SubtitleTrack? = nil,
+         zoomBlocks: [ZoomBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
@@ -488,6 +529,7 @@ struct EditState: Codable, Equatable {
         self.cameraBlocks = cameraBlocks
         self.textBlocks = textBlocks
         self.subtitles = subtitles
+        self.zoomBlocks = zoomBlocks
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -531,6 +573,7 @@ struct EditState: Codable, Equatable {
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
         subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
+        zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
     }
 }
 

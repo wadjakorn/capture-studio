@@ -94,7 +94,9 @@ enum TextImageRenderer {
         }
         let attr = NSAttributedString(string: block.text, attributes: attrs)
 
-        let maxWidth = canvas.width * 0.9
+        let maxWidth: CGFloat = block.autoWrap
+            ? max(1, canvas.width * CGFloat(block.boxWidth))
+            : .greatestFiniteMagnitude
         let framesetter = CTFramesetterCreateWithAttributedString(attr as CFAttributedString)
         let full = CFRange(location: 0, length: attr.length)
         let fit = CTFramesetterSuggestFrameSizeWithConstraints(

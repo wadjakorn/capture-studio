@@ -282,4 +282,76 @@ import Foundation
         #expect(b.boxEnabled && b.boxHex == "#778899" && b.boxOpacity == 0.6)
         #expect(b.shadow == false)
     }
+
+    @Test func textBlockNewFieldsRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var tb = TextBlock(begin: 0, end: 2, text: "hi")
+        tb.boxWidth = 0.42
+        tb.autoWrap = false
+        var edit = EditState()
+        edit.textBlocks = [tb]
+        try bundle.writeEdit(edit)
+
+        let loaded = bundle.loadEdit().textBlocks.first
+        #expect(loaded?.boxWidth == 0.42)
+        #expect(loaded?.autoWrap == false)
+    }
+
+    @Test func textBlockMissingNewFieldsDefault() throws {
+        let id = UUID().uuidString
+        let json = """
+        {"id":"\(id)","begin":0,"end":2,"text":"hi","centerX":0.5,"centerY":0.85,\
+        "fontName":"Helvetica","fontSize":0.06,"fontWeight":"semibold","colorHex":"#FFFFFF",\
+        "alignment":"center","boxEnabled":false,"boxHex":"#000000","boxOpacity":0.5,\
+        "strokeWidth":0,"strokeHex":"#000000","shadow":true,"source":"manual"}
+        """.data(using: .utf8)!
+        let tb = try JSONDecoder().decode(TextBlock.self, from: json)
+        #expect(tb.boxWidth == 0.9)
+        #expect(tb.autoWrap == true)
+    }
+
+    @Test func zoomBlocksRoundTrip() throws {
+        var state = EditState()
+        state.zoomBlocks = [
+            ZoomBlock(begin: 1, end: 3, scale: 2.5),
+            ZoomBlock(begin: 4, end: 6, scale: nil),
+        ]
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.zoomBlocks == state.zoomBlocks)
+        #expect(decoded.zoomBlocks[1].scale == nil)
+    }
+
+    @Test func zoomBlocksDefaultEmptyOnOldBundle() throws {
+        // edit.json written before zoomBlocks existed → decodes to [].
+        let json = #"{"schemaVersion":1,"trimIn":0}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.zoomBlocks.isEmpty)
+    }
+
+    @Test func zoomBlockSensitivityRoundTrip() throws {
+        var state = EditState()
+        state.zoomBlocks = [
+            ZoomBlock(begin: 1, end: 3, scale: 2.0, sensitivity: 0.2),
+            ZoomBlock(begin: 4, end: 6, scale: nil, sensitivity: nil),
+        ]
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.zoomBlocks == state.zoomBlocks)
+        #expect(decoded.zoomBlocks[0].sensitivity == 0.2)
+        #expect(decoded.zoomBlocks[1].sensitivity == nil)
+    }
+
+    @Test func zoomBlockMissingSensitivityDecodesNil() throws {
+        // A zoom block written before `sensitivity` existed (only scale present).
+        let json = #"{"zoomBlocks":[{"id":"00000000-0000-0000-0000-000000000000","begin":1,"end":3,"scale":2}]}"#
+            .data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.zoomBlocks.count == 1)
+        #expect(decoded.zoomBlocks[0].sensitivity == nil)
+    }
 }

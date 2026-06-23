@@ -26,7 +26,7 @@ struct CropPanOverlay: View {
                     .gesture(panGesture(viewToSource: viewToSource))
             }
         }
-        .allowsHitTesting(model.cropPannable)
+        .allowsHitTesting(true)
     }
 
     private func panGesture(viewToSource: CGFloat) -> some Gesture {
