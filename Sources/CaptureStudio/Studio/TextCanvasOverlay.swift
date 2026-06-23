@@ -12,6 +12,7 @@ struct TextCanvasOverlay: View {
     @ObservedObject var model: StudioModel
 
     @State private var dragStart: CGPoint?
+    @State private var resizeStartWidth: Double?
     private let space = "textCanvas"
 
     var body: some View {
@@ -28,19 +29,32 @@ struct TextCanvasOverlay: View {
                     let cx = videoRect.minX + CGFloat(block.centerX) * model.renderSize.width * viewScale
                     let cy = videoRect.minY + CGFloat(block.centerY) * model.renderSize.height * viewScale
                     let measured = TextImageRenderer.size(block, canvas: model.renderSize)
-                    let boxW = max(measured.width * viewScale, 44)
+                    // While auto-wrapping, the box shows the wrap frame (boxWidth)
+                    // so its edges are the draggable wrap width; otherwise it hugs
+                    // the measured single-line text.
+                    let frameW = block.autoWrap
+                        ? CGFloat(block.boxWidth) * model.renderSize.width * viewScale
+                        : measured.width * viewScale
+                    let boxW = max(frameW, 44)
                     let boxH = max(measured.height * viewScale, 26)
 
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.accentColor, lineWidth: 2)
                         .contentShape(Rectangle())            // whole box is draggable
                         .frame(width: boxW, height: boxH)
+                        .overlay {
+                            if block.autoWrap {
+                                resizeHandle(block: block, viewScale: viewScale, leading: true)
+                                    .position(x: 0, y: boxH / 2)
+                                resizeHandle(block: block, viewScale: viewScale, leading: false)
+                                    .position(x: boxW, y: boxH / 2)
+                            }
+                        }
                         .gesture(moveGesture(block: block, viewScale: viewScale))
-                        .onTapGesture(count: 2) { model.beginEditingText(block.id) }
                         // Consume single taps so a click on the box keeps the
                         // selection instead of falling through to the catcher.
                         .onTapGesture { model.selectTextBlock(block.id) }
-                        .help("Drag to move · double-click to edit text")
+                        .help("Drag to move · drag a side handle to resize the wrap width")
                         .position(x: cx, y: cy)
                 }
             }
@@ -83,6 +97,36 @@ struct TextCanvasOverlay: View {
             .onEnded { _ in
                 dragStart = nil
                 model.endDraggingText()
+            }
+    }
+
+    /// A small side handle that resizes the wrap width symmetrically about the
+    /// block center.
+    private func resizeHandle(block: TextBlock, viewScale: CGFloat, leading: Bool) -> some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(width: 6, height: 22)
+            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
+            .frame(width: 18, height: 30)            // larger hit area
+            .contentShape(Rectangle())
+            .highPriorityGesture(resizeGesture(block: block, viewScale: viewScale, leading: leading))
+    }
+
+    private func resizeGesture(block: TextBlock, viewScale: CGFloat, leading: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .named(space))
+            .onChanged { value in
+                guard model.renderSize.width > 0 else { return }
+                if resizeStartWidth == nil { resizeStartWidth = block.boxWidth }
+                guard let start = resizeStartWidth else { return }
+                // Center-anchored: a leading drag-left and a trailing drag-right
+                // both widen; the factor of 2 keeps the box centered.
+                let deltaFrac = Double(value.translation.width / viewScale) / model.renderSize.width
+                let signed = leading ? -deltaFrac : deltaFrac
+                model.setTextBoxWidth(start + 2 * signed)
+            }
+            .onEnded { _ in
+                resizeStartWidth = nil
+                model.commitTextEdit()
             }
     }
 
