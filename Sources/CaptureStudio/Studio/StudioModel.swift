@@ -46,6 +46,10 @@ final class StudioModel: ObservableObject {
     // block is the one the lane + PiP overlay edit. Persisted to edit.json.
     @Published private(set) var cameraBlocks: [CameraBlock] = []
     @Published var selectedBlockID: UUID?
+    /// The home/static camera placement is selected for editing — drives the PiP
+    /// overlay in static mode (block selection drives it in timeline mode), so
+    /// the camera is deselectable like every other element. Transient: not saved.
+    @Published var cameraSelected = false
     /// Default width of a newly added block (seconds).
     static let defaultBlockWidth = 0.5
     // Text/caption timeline. Multiple instances, MAY overlap in time; array
@@ -170,16 +174,22 @@ final class StudioModel: ObservableObject {
         }
         return cameraHome
     }
-    /// Whether the interactive PiP box is shown. Static mode: while visible.
-    /// Timeline mode: a block is selected (edits its target), or nothing is
-    /// selected and the playhead sits before the first block (edits home).
+    /// Whether the camera placement can be edited at the current playhead: always
+    /// in static mode; in timeline mode only before the first block (where the
+    /// home placement applies). Drives the select hit-target and overlay gating.
+    var cameraOverlayEditableAtPlayhead: Bool {
+        guard hasCameraTrack, cameraVisible else { return false }
+        guard cameraHasTimeline else { return true }
+        if let first = cameraBlocks.first { return currentTime < first.begin }
+        return true
+    }
+    /// Whether the interactive PiP box is shown. Timeline mode: a block is
+    /// selected (edits its target). Home/static: only while the camera is
+    /// explicitly selected — so it can be deselected like every other element
+    /// (Esc / empty canvas / empty timeline / inert UI).
     var showsCameraOverlay: Bool {
-        guard hasCameraTrack else { return false }
-        guard cameraVisible else { return false }
-        guard cameraHasTimeline else { return cameraVisible }
-        if selectedBlock != nil { return true }
-        if let first = cameraBlocks.first, currentTime < first.begin { return true }
-        return false
+        if cameraHasTimeline, selectedBlock != nil { return true }
+        return cameraSelected && cameraOverlayEditableAtPlayhead
     }
     /// Camera feed size after the 90° orientation step — width/height swapped
     /// at 90/270 so PiP aspect and feed crop track the rotated content.
@@ -794,7 +804,7 @@ final class StudioModel: ObservableObject {
     /// inside its span so the preview shows the zoom.
     func selectZoomBlock(_ id: UUID?) {
         selectedZoomBlockID = id
-        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false }
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if let id, let b = zoomBlocks.first(where: { $0.id == id }) {
             seek(to: min((b.begin + b.end) / 2, duration))
         }
@@ -861,6 +871,8 @@ final class StudioModel: ObservableObject {
         let was = needsCompositor
         zoomBlocks = list
         selectedZoomBlockID = id
+        // One selection at a time (see `setBlocks`).
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
@@ -877,6 +889,8 @@ final class StudioModel: ObservableObject {
         let was = needsCompositor
         textBlocks = list
         selectedTextBlockID = id
+        // One selection at a time (see `setBlocks`).
+        if id != nil { selectedBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
@@ -889,7 +903,7 @@ final class StudioModel: ObservableObject {
     func selectTextBlock(_ id: UUID?) {
         if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil }
+        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil; cameraSelected = false }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -1004,6 +1018,7 @@ final class StudioModel: ObservableObject {
         deselectText()
         selectedBlockID = nil
         selectedZoomBlockID = nil
+        cameraSelected = false
         if draggingSubtitle { endDraggingSubtitle() }
         subtitleSelected = false
     }
@@ -1146,6 +1161,7 @@ final class StudioModel: ObservableObject {
             selectedTextBlockID = nil
             selectedBlockID = nil
             selectedZoomBlockID = nil
+            cameraSelected = false
             refreshPlayerItemForCanvasChange()
             applyVideoComposition()
             saveEdit()
@@ -1178,7 +1194,18 @@ final class StudioModel: ObservableObject {
             selectedTextBlockID = nil
             selectedBlockID = nil
             selectedZoomBlockID = nil
+            cameraSelected = false
         }
+    }
+
+    /// Select the home/static camera placement for editing (shows the PiP
+    /// overlay). Single-selection: clears every other selection and any block.
+    func selectCamera() {
+        cameraSelected = true
+        selectedBlockID = nil
+        selectedTextBlockID = nil
+        selectedZoomBlockID = nil
+        subtitleSelected = false
     }
 
     func commitSubtitleEdit() { saveEdit() }
@@ -1254,7 +1281,7 @@ final class StudioModel: ObservableObject {
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
         // camera vs text vs zoom vs subtitle: one selection at a time
-        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false }
+        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
@@ -1267,6 +1294,9 @@ final class StudioModel: ObservableObject {
         let was = needsCompositor
         cameraBlocks = list
         selectedBlockID = id
+        // One selection at a time: the add/set paths bypass `selectBlock`, so
+        // clear the other kinds here too (else add-while-other-selected = both).
+        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
