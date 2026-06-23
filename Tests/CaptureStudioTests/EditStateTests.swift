@@ -244,4 +244,23 @@ import Foundation
         #expect(tb.boxWidth == 0.9)
         #expect(tb.autoWrap == true)
     }
+
+    @Test func zoomBlocksRoundTrip() throws {
+        var state = EditState()
+        state.zoomBlocks = [
+            ZoomBlock(begin: 1, end: 3, scale: 2.5),
+            ZoomBlock(begin: 4, end: 6, scale: nil),
+        ]
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.zoomBlocks == state.zoomBlocks)
+        #expect(decoded.zoomBlocks[1].scale == nil)
+    }
+
+    @Test func zoomBlocksDefaultEmptyOnOldBundle() throws {
+        // edit.json written before zoomBlocks existed → decodes to [].
+        let json = #"{"schemaVersion":1,"trimIn":0}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.zoomBlocks.isEmpty)
+    }
 }
