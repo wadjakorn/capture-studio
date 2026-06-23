@@ -237,6 +237,12 @@ import Foundation
         #expect(edit.subtitles == nil)
     }
 
+    @Test func subtitleCueMissingIdDecodes() throws {
+        let json = #"{"begin":1.0,"end":2.0,"text":"Hi"}"#
+        let cue = try JSONDecoder().decode(SubtitleCue.self, from: Data(json.utf8))
+        #expect(cue.begin == 1.0 && cue.end == 2.0 && cue.text == "Hi")
+    }
+
     @Test func subtitleStyleMapsToTextBlock() {
         let style = SubtitleStyle(centerX: 0.4, centerY: 0.7, fontName: "Georgia",
                                   fontSize: 0.08, fontWeight: .bold, colorHex: "#112233",

@@ -253,6 +253,16 @@ struct SubtitleCue: Codable, Equatable, Identifiable {
         self.end = end
         self.text = text
     }
+
+    // Custom decode so cue JSON missing "id" (e.g. from an older writer) gets a
+    // fresh UUID rather than throwing keyNotFound, mirroring TextBlock / EditState.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        begin = try c.decodeIfPresent(Double.self, forKey: .begin) ?? 0
+        end = try c.decodeIfPresent(Double.self, forKey: .end) ?? 0
+        text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+    }
 }
 
 /// The one shared, user-configured look for every subtitle cue. Fields mirror
@@ -263,6 +273,8 @@ struct SubtitleStyle: Codable, Equatable {
     var centerX: Double
     var centerY: Double
     var fontName: String
+    // 0.05 is intentionally smaller than TextBlock's 0.06 — subtitles sit
+    // closer to the edge and look best slightly smaller; not a typo.
     var fontSize: Double
     var fontWeight: TextWeight
     var colorHex: String
