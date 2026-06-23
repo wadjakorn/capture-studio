@@ -71,10 +71,18 @@ final class CanvasInputView: NSView {
                 model.zoomCanvas(by: 1 + line * 0.005)
                 return nil
             }
+            let dx = event.scrollingDeltaX, dy = event.scrollingDeltaY
+            if abs(dx) > abs(dy) {
+                // Horizontal scroll scrubs the timeline.
+                model.seek(to: StudioModel.scrubbedTime(from: model.currentTime,
+                                                        scrollDX: dx,
+                                                        viewWidth: bounds.width,
+                                                        duration: model.duration))
+                return nil
+            }
+            // Vertical scroll pans the zoomed inspection view (content follows).
             guard model.canvasZoomed else { return event }
-            // Document-scroll feel: content follows the scroll delta.
-            model.panCanvas(by: CGSize(width: event.scrollingDeltaX,
-                                       height: event.scrollingDeltaY))
+            model.panCanvas(by: CGSize(width: 0, height: dy))
             return nil
 
         case .otherMouseDragged where event.buttonNumber == 2:
