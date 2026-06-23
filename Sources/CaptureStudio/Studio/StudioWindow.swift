@@ -154,6 +154,7 @@ struct StudioView: View {
                 toolGroup { reframeControls }
                 if model.hasCameraTrack {
                     toolGroup { cameraControls }
+                    toolGroup { zoomControls }
                 }
                 toolGroup { textControls }
                 toolGroup { subtitleControls }
@@ -519,6 +520,28 @@ struct StudioView: View {
         }
         .toggleStyle(.button)
         .help("Show click feedback rings")
+    }
+
+    @ViewBuilder private var zoomControls: some View {
+        if model.selectedBlockID != nil {
+            HStack(spacing: 4) {
+                Image(systemName: "hand.draw").foregroundStyle(.secondary)
+                Slider(value: Binding(
+                    get: { model.selectedZoomSensitivity ?? 0.5 },
+                    set: { model.setZoomSensitivity($0) }
+                ), in: 0...1) { editing in
+                    if !editing { model.commitZoomEdit() }
+                }
+                .frame(width: 80)
+                .controlSize(.small)
+                Text("\(Int(((model.selectedZoomSensitivity ?? 0.5) * 100).rounded()))%")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
+            .help("Follow sensitivity — how closely camera moves follow screen gestures")
+        }
     }
 
     private func volumeSlider(systemImage: String, help: String,
