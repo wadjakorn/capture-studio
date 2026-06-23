@@ -58,6 +58,21 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Subtitle states for the loader gate while importing/removing.
+    enum SubtitleState: Equatable { case idle, applying, removing }
+    /// Imported subtitle track (nil = none, lane hidden). Cues are read-only;
+    /// `style` is the one shared, user-configured look applied to every cue.
+    /// Persisted to edit.json; the `.srt` file lives in the bundle.
+    @Published private(set) var subtitles: SubtitleTrack?
+    /// Loader gate: import/remove run off the main actor so the UI never blocks.
+    @Published private(set) var subtitleState: SubtitleState = .idle
+    /// The subtitle track is selected for configuration (mutually exclusive with
+    /// camera-block and text-block selection).
+    @Published var subtitleSelected = false
+    /// Set while dragging the subtitle position box on the canvas, so the
+    /// compositor suppresses the baked subtitles and the smooth overlay drives
+    /// motion. Cleared on drop.
+    @Published private(set) var draggingSubtitle = false
     /// Composition frame rate (frames per second) for video export.
     static let compositionFrameRate = 60
     // Camera feed reframe — zoom 1…4 (1 = whole feed), feed center normalized
@@ -91,6 +106,11 @@ final class StudioModel: ObservableObject {
     var selectedTextBlock: TextBlock? {
         guard let id = selectedTextBlockID else { return nil }
         return textBlocks.first { $0.id == id }
+    }
+    /// The subtitle lane shows only when a track with at least one cue exists.
+    var showsSubtitleTimeline: Bool {
+        guard let s = subtitles else { return false }
+        return !s.cues.isEmpty
     }
     /// The static "home" placement — the camera's resting state, held before the
     /// first block and used as the first block's "from".
@@ -248,6 +268,7 @@ final class StudioModel: ObservableObject {
         cameraNeedsCompositor
             || cameraHasTimeline
             || !textBlocks.isEmpty
+            || showsSubtitleTimeline
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
             || (cropAspect.isFit && canvasBackground != .black)
@@ -332,6 +353,14 @@ final class StudioModel: ObservableObject {
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
+            // Clamp cues to the actual clip; a track whose cues all fall past the
+            // end loads as no subtitles (the .srt file is left in the bundle).
+            if let track = edit.subtitles {
+                let cues = SubtitleTimeline.clamped(track.cues, duration: duration)
+                subtitles = cues.isEmpty ? nil
+                    : SubtitleTrack(srtFilename: track.srtFilename,
+                                    style: track.style, cues: cues)
+            }
             applyVideoComposition()
             applyAudioMix()
 
@@ -1363,6 +1392,12 @@ final class StudioModel: ObservableObject {
             layout.textTimeline = TextTimelineSpec(blocks: textBlocks)
             layout.suppressedTextBlockID = draggingTextBlockID
         }
+        // Subtitle cues (rendered below text blocks). Suppressed entirely while
+        // the canvas position box is being dragged — the smooth overlay drives
+        // motion, the cue re-bakes at the dropped position.
+        if let track = subtitles, !track.cues.isEmpty, !draggingSubtitle {
+            layout.subtitles = SubtitleTimelineSpec(style: track.style, cues: track.cues)
+        }
 
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),
@@ -1505,7 +1540,8 @@ final class StudioModel: ObservableObject {
             canvasBackgroundBlur: canvasBackgroundBlur,
             canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
-            textBlocks: textBlocks
+            textBlocks: textBlocks,
+            subtitles: subtitles
         )
         try? bundle.writeEdit(edit)
     }
