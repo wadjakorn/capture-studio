@@ -27,6 +27,9 @@ final class StudioModel: ObservableObject {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var duration: Double = 0
     @Published var currentTime: Double = 0
+    /// Transient: while true, dragging the preview pans the reframed video
+    /// (see CropPanOverlay). Not persisted; reset when the reframe isn't pannable.
+    @Published var panVideoMode = false
     @Published private(set) var trimIn: Double = 0
     @Published private(set) var trimOut: Double = 0
     @Published private(set) var exportState: ExportState = .idle
@@ -1069,6 +1072,7 @@ final class StudioModel: ObservableObject {
 
     func setCropAspect(_ aspect: CropAspect) {
         cropAspect = aspect
+        if !cropPannable { panVideoMode = false }
         templateGuideVisible = (aspect == .nineBySixteenTemplate)
         cropCenterX = 0.5
         cropCenterY = 0.5

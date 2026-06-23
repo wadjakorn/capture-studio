@@ -227,6 +227,14 @@ struct StudioView: View {
         .fixedSize()
         .help("Reframe aspect ratio")
 
+        Toggle(isOn: Binding(get: { model.panVideoMode },
+                             set: { model.panVideoMode = $0 })) {
+            Image(systemName: "hand.draw")
+        }
+        .toggleStyle(.button)
+        .disabled(!model.cropPannable)
+        .help("Move/pan the reframed video — drag the canvas to reposition it")
+
         Toggle(isOn: Binding(get: { model.templateGuideVisible },
                              set: { model.templateGuideVisible = $0 })) {
             Image(systemName: "rectangle.dashed")
