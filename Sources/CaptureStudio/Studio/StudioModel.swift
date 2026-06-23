@@ -724,9 +724,12 @@ final class StudioModel: ObservableObject {
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
-            // the seeked frame (a raw begin can render one frame late).
-            seek(to: min(TextTimeline.firstVisibleTime(begin: b.begin,
-                                                       fps: Self.compositionFrameRate), duration))
+            // the seeked frame (a raw begin can render one frame late). For a
+            // sub-frame-length block the aligned time can reach `end`, so fall
+            // back to `begin` to keep the playhead inside the span.
+            let aligned = TextTimeline.firstVisibleTime(begin: b.begin,
+                                                        fps: Self.compositionFrameRate)
+            seek(to: min(aligned < b.end ? aligned : b.begin, duration))
         }
     }
 
