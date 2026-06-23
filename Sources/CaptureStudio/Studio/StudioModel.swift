@@ -963,9 +963,10 @@ final class StudioModel: ObservableObject {
 
     // MARK: - Subtitles
 
-    /// Import an `.srt`: copy it into the bundle, parse + clamp its cues, and
-    /// show the subtitle lane. Runs off the main actor with a loader. Replacing
-    /// an existing track preserves the current style. No-op while already busy.
+    /// Import an `.srt`: copy it into the bundle and parse its cues (stored raw;
+    /// the track offset is applied at consumption), then show the subtitle lane.
+    /// Runs off the main actor with a loader. Replacing an existing track
+    /// preserves the current style and offset. No-op while already busy.
     func importSubtitles(from url: URL) {
         guard subtitleState == .idle else { return }
         subtitleState = .applying
@@ -1066,6 +1067,9 @@ final class StudioModel: ObservableObject {
     /// Shift every cue by `seconds` (added to begin/end). Clamped to a finite
     /// guard range — intentionally NOT tied to `duration`, so a begin-trim larger
     /// than the trimmed clip can still be corrected. Recomposites + saves.
+    /// A discrete control (stepper / formatted field), so it always commits —
+    /// unlike the `commit: false` slider setters; do not wrap it in a deferred
+    /// commit path.
     func setSubtitleOffset(_ seconds: Double) {
         guard subtitles != nil else { return }
         subtitles!.offset = min(max(-86_400, seconds), 86_400)
