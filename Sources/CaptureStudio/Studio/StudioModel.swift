@@ -964,7 +964,7 @@ final class StudioModel: ObservableObject {
         let bundle = self.bundle
         let duration = self.duration
         let existingStyle = subtitles?.style
-        Task {
+        Task { @MainActor in
             let track: SubtitleTrack? = await Task.detached {
                 guard let name = try? bundle.writeSubtitleFile(from: url) else { return nil }
                 let fileURL = bundle.subtitleFileURL(name)
@@ -1005,7 +1005,7 @@ final class StudioModel: ObservableObject {
         guard subtitleState == .idle, subtitles != nil else { return }
         subtitleState = .removing
         let bundle = self.bundle
-        Task {
+        Task { @MainActor in
             await Task.detached { bundle.deleteSubtitleFile() }.value
             subtitles = nil
             subtitleSelected = false

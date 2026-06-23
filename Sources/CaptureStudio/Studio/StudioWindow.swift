@@ -157,6 +157,9 @@ struct StudioView: View {
                 }
                 toolGroup { textControls }
                 toolGroup { subtitleControls }
+                    .onChange(of: model.subtitles == nil) { _, nowNil in
+                        if nowNil { showSubtitleStyle = false }
+                    }
                 toolGroup { cursorControls }
             }
         }
