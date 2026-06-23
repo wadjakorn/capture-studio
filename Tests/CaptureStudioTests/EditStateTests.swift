@@ -213,4 +213,35 @@ import Foundation
         let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
         #expect(edit.cameraBlocks.isEmpty)
     }
+
+    @Test func textBlockNewFieldsRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var tb = TextBlock(begin: 0, end: 2, text: "hi")
+        tb.boxWidth = 0.42
+        tb.autoWrap = false
+        var edit = EditState()
+        edit.textBlocks = [tb]
+        try bundle.writeEdit(edit)
+
+        let loaded = bundle.loadEdit().textBlocks.first
+        #expect(loaded?.boxWidth == 0.42)
+        #expect(loaded?.autoWrap == false)
+    }
+
+    @Test func textBlockMissingNewFieldsDefault() throws {
+        let id = UUID().uuidString
+        let json = """
+        {"id":"\(id)","begin":0,"end":2,"text":"hi","centerX":0.5,"centerY":0.85,\
+        "fontName":"Helvetica","fontSize":0.06,"fontWeight":"semibold","colorHex":"#FFFFFF",\
+        "alignment":"center","boxEnabled":false,"boxHex":"#000000","boxOpacity":0.5,\
+        "strokeWidth":0,"strokeHex":"#000000","shadow":true,"source":"manual"}
+        """.data(using: .utf8)!
+        let tb = try JSONDecoder().decode(TextBlock.self, from: json)
+        #expect(tb.boxWidth == 0.9)
+        #expect(tb.autoWrap == true)
+    }
 }

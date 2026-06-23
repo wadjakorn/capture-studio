@@ -42,7 +42,8 @@ struct StudioView: View {
         }
         // Esc deselects any selected block (the text input owns Esc while open).
         .background {
-            if model.editingTextBlockID == nil {
+            // The inline caption field owns Esc while a text block is selected.
+            if model.selectedTextBlock == nil {
                 Button("") { model.deselectAll() }
                     .keyboardShortcut(.cancelAction).opacity(0)
             }
@@ -57,21 +58,23 @@ struct StudioView: View {
             ZStack {
                 ZStack {
                     PlayerView(player: player)
-                    // Click empty canvas to deselect.
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.deselectAll() }
-                    if model.cropPannable {
-                        CropPanOverlay(model: model)
-                    }
+                    // Bottom: tap deselects, left-drag pans the inspection view.
+                    CanvasNavigationLayer(model: model)
+                    // Click a visible caption to select it (above navigation).
+                    TextSelectHitLayer(model: model)
                     if model.showsCameraOverlay {
                         CameraPipOverlay(model: model)
                     }
                     if model.selectedTextBlock != nil {
                         TextCanvasOverlay(model: model)
                     }
-                    // Topmost: reels safe-area guide (studio-only).
+                    // Reels safe-area guide (studio-only).
                     ReelsSafeAreaOverlay(model: model)
+                    // Pan-video mode: a top grab layer that wins all drags in the
+                    // video rect while the mode is on.
+                    if model.panVideoMode {
+                        CropPanOverlay(model: model)
+                    }
                 }
                 .scaleEffect(model.canvasZoom)
                 .offset(x: model.canvasPanX, y: model.canvasPanY)
@@ -118,12 +121,6 @@ struct StudioView: View {
             }
             if !model.textBlocks.isEmpty {
                 laneRow("textformat") { TextTimelineLane(model: model) }
-                    .popover(isPresented: Binding(
-                        get: { model.editingTextBlockID != nil },
-                        set: { if !$0 { model.endEditingText() } }
-                    ), arrowEdge: .top) {
-                        textEditorPopover
-                    }
             }
 
             Divider().padding(.vertical, 2)
@@ -231,6 +228,14 @@ struct StudioView: View {
         .menuStyle(.button)
         .fixedSize()
         .help("Reframe aspect ratio")
+
+        Toggle(isOn: Binding(get: { model.panVideoMode },
+                             set: { model.panVideoMode = $0 })) {
+            Image(systemName: "hand.draw")
+        }
+        .toggleStyle(.button)
+        .disabled(!model.cropPannable)
+        .help("Move/pan the reframed video — drag the canvas to reposition it")
 
         Toggle(isOn: Binding(get: { model.templateGuideVisible },
                              set: { model.templateGuideVisible = $0 })) {
@@ -371,6 +376,22 @@ struct StudioView: View {
         .help("Edit text style, order, and delete")
         .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
             textStylePopover
+        }
+
+        // Inline caption input — shown only while a text block is selected.
+        // Selecting a block (timeline or canvas) reveals it; deselecting hides it.
+        if model.selectedTextBlock != nil {
+            CaptionTextEditor(
+                text: Binding(
+                    get: { model.selectedTextBlock?.text ?? "" },
+                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
+                ),
+                onSubmit: { model.commitTextEdit() }
+            )
+            .frame(width: 220, height: 44)
+            .overlay(RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
+            .help("Edit caption text · Shift+Return for a new line")
         }
     }
 
@@ -541,31 +562,6 @@ struct StudioView: View {
         }
     }
 
-    // MARK: - Text input
-
-    /// The dedicated caption input, shown as a popover off the text lane when a
-    /// block is selected. Return / Esc / click-outside apply; Shift+Return adds
-    /// a newline. Text updates the preview live as you type.
-    @ViewBuilder
-    private var textEditorPopover: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Caption text").font(.caption).foregroundStyle(.secondary)
-            CaptionTextEditor(
-                text: Binding(
-                    get: { model.selectedTextBlock?.text ?? "" },
-                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
-                ),
-                onSubmit: { model.endEditingText() }
-            )
-            .frame(width: 280, height: 92)
-            .overlay(RoundedRectangle(cornerRadius: 5)
-                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
-            Text("Return to apply · Shift+Return for a new line · Esc to apply")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-        .padding(12)
-    }
-
     // MARK: - Text style
 
     /// Curated font families (Core Text resolves by family name; unknown names
@@ -624,10 +620,18 @@ struct StudioView: View {
                 }
                 .pickerStyle(.segmented).labelsHidden()
 
-                styleSliderText("Size", value: Binding(
-                    get: { block?.fontSize ?? 0.06 },
-                    set: { model.setTextFontSize($0) }
-                ), range: 0.02...0.2)
+                textSizeRow(block)
+
+                Toggle("Auto-wrap lines", isOn: Binding(
+                    get: { block?.autoWrap ?? true },
+                    set: { model.setTextAutoWrap($0) }
+                ))
+                if block?.autoWrap ?? true {
+                    styleSliderText("Box width", value: Binding(
+                        get: { block?.boxWidth ?? 0.9 },
+                        set: { model.setTextBoxWidth($0) }
+                    ), range: 0.05...1.0)
+                }
 
                 textColorRow("Color", hex: block?.colorHex ?? "#FFFFFF") {
                     model.setTextColorHex($0)
@@ -673,6 +677,35 @@ struct StudioView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Slider(value: value, in: range) { editing in
+                if !editing { model.commitTextEdit() }
+            }
+        }
+    }
+
+    /// Font-size control showing the rendered px height, with a ±1px stepper and
+    /// a slider. `fontSize` is a fraction of canvas height, so px = fontSize ×
+    /// renderSize.height (falls back to 1080 before the canvas size is known).
+    @ViewBuilder
+    private func textSizeRow(_ block: TextBlock?) -> some View {
+        let h = model.renderSize.height > 0 ? model.renderSize.height : 1080
+        let frac = block?.fontSize ?? 0.06
+        let px = Int((frac * h).rounded())
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("Size").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(px) px").font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                Stepper("", value: Binding(
+                    get: { Double(px) },
+                    set: { model.setTextFontSize($0 / h); model.commitTextEdit() }
+                ), in: 1...(h * 0.5), step: 1)
+                .labelsHidden()
+            }
+            Slider(value: Binding(
+                get: { block?.fontSize ?? 0.06 },
+                set: { model.setTextFontSize($0) }
+            ), in: 0.005...0.2) { editing in
                 if !editing { model.commitTextEdit() }
             }
         }

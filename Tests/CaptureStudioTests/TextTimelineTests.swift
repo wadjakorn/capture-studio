@@ -49,6 +49,30 @@ import Foundation
         #expect(out[0].end == 10)                // 9 + 5 clamped to duration
     }
 
+    @Test func addCopiesTemplateStyleAndResetsSpan() {
+        var template = TextBlock(begin: 0, end: 0)
+        template.fontSize = 0.09
+        template.colorHex = "#FF0000"
+        template.boxWidth = 0.4
+        template.autoWrap = false
+        template.centerX = 0.3
+        template.centerY = 0.2
+
+        let (blocks, id) = TextTimeline.add([], atTime: 2, width: 3,
+                                            duration: 10, template: template)
+        let b = blocks.first { $0.id == id }!
+        #expect(b.fontSize == 0.09)
+        #expect(b.colorHex == "#FF0000")
+        #expect(b.boxWidth == 0.4)
+        #expect(b.autoWrap == false)
+        #expect(b.centerX == 0.3)
+        #expect(b.centerY == 0.2)
+        #expect(b.begin == 2)
+        #expect(b.end == 5)
+        #expect(b.id != template.id)
+        #expect(b.text == "")
+    }
+
     // MARK: move (no neighbor clamp)
 
     @Test func moveBeginClampsToOwnEndAndZero() {
@@ -140,5 +164,31 @@ import Foundation
         let json = Data(#"{"id":"00000000-0000-0000-0000-000000000000","begin":0,"end":1,"source":"future"}"#.utf8)
         let block = try JSONDecoder().decode(TextBlock.self, from: json)
         #expect(block.source == .manual)        // unknown raw string → default
+    }
+
+    // Selecting a block seeks to its begin so the caption shows. The compositor
+    // quantizes the displayed frame down to the composition frame grid, so a
+    // non-grid begin must be bumped up to the next frame or the half-open
+    // [begin, end) test excludes the displayed frame and the text shows a frame
+    // late. `firstVisibleTime` computes that frame-aligned seek target.
+    @Test func firstVisibleTimeAlignsToFrameGridAtOrAfterBegin() {
+        let fps = 60.0
+        let begin = 3.41                                   // not on the 1/60 grid
+        let t = TextTimeline.firstVisibleTime(begin: begin, fps: fps)
+        #expect(t >= begin)                                // never before begin
+        #expect(t < begin + 1.0 / fps)                     // at most one frame later
+
+        let block = TextBlock(begin: begin, end: 5)
+        // The frame the player would show when seeking to exactly `begin`
+        // quantizes down below begin — block inactive there (the bug).
+        let quantizedDown = (begin * fps).rounded(.down) / fps
+        #expect(!TextTimeline.active(at: quantizedDown, blocks: [block]).contains { $0.id == block.id })
+        // At the aligned time the block is active.
+        #expect(TextTimeline.active(at: t, blocks: [block]).contains { $0.id == block.id })
+    }
+
+    @Test func firstVisibleTimeKeepsAlignedAndZeroBegins() {
+        #expect(TextTimeline.firstVisibleTime(begin: 2.0, fps: 60) == 2.0)   // already on grid
+        #expect(TextTimeline.firstVisibleTime(begin: 0, fps: 60) == 0)
     }
 }

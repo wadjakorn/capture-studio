@@ -172,6 +172,13 @@ struct TextBlock: Codable, Equatable, Identifiable {
     var strokeWidth: Double
     var strokeHex: String
     var shadow: Bool
+    /// Wrap-frame width as a fraction of canvas width. Text soft-wraps to this
+    /// width when `autoWrap` is on; ignored when off. 0.9 reproduces the legacy
+    /// hardcoded wrap width.
+    var boxWidth: Double
+    /// When true, text soft-wraps to `boxWidth`; when false only explicit
+    /// newlines break lines (long lines extend past the canvas edges).
+    var autoWrap: Bool
     // Forward-compat: distinguishes hand-authored vs. auto-generated captions.
     var source: TextSource
 
@@ -182,7 +189,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
          alignment: TextAlignmentH = .center, boxEnabled: Bool = false,
          boxHex: String = "#000000", boxOpacity: Double = 0.5,
          strokeWidth: Double = 0, strokeHex: String = "#000000",
-         shadow: Bool = true, source: TextSource = .manual) {
+         shadow: Bool = true, boxWidth: Double = 0.9, autoWrap: Bool = true,
+         source: TextSource = .manual) {
         self.id = id
         self.begin = begin
         self.end = end
@@ -200,6 +208,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
         self.strokeWidth = strokeWidth
         self.strokeHex = strokeHex
         self.shadow = shadow
+        self.boxWidth = boxWidth
+        self.autoWrap = autoWrap
         self.source = source
     }
 
@@ -233,6 +243,8 @@ struct TextBlock: Codable, Equatable, Identifiable {
         strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0
         strokeHex = try c.decodeIfPresent(String.self, forKey: .strokeHex) ?? "#000000"
         shadow = try c.decodeIfPresent(Bool.self, forKey: .shadow) ?? true
+        boxWidth = try c.decodeIfPresent(Double.self, forKey: .boxWidth) ?? 0.9
+        autoWrap = try c.decodeIfPresent(Bool.self, forKey: .autoWrap) ?? true
         let sourceRaw = try c.decodeIfPresent(String.self, forKey: .source)
         source = sourceRaw.flatMap(TextSource.init(rawValue:)) ?? .manual
     }
