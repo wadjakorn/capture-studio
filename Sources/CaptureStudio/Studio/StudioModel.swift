@@ -1200,6 +1200,7 @@ final class StudioModel: ObservableObject {
     func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
     func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
     func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
+    func setSubtitleBoxWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
 
     /// Shift every cue by `seconds` (added to begin/end). Clamped to a finite
     /// guard range — intentionally NOT tied to `duration`, so a begin-trim larger

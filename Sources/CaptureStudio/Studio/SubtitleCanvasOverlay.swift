@@ -12,6 +12,7 @@ struct SubtitleCanvasOverlay: View {
     @ObservedObject var model: StudioModel
 
     @State private var dragStart: CGPoint?
+    @State private var resizeStartWidth: Double?
     private let space = "subtitleCanvas"
 
     var body: some View {
@@ -31,15 +32,24 @@ struct SubtitleCanvasOverlay: View {
                     let cx = videoRect.minX + CGFloat(style.centerX) * model.renderSize.width * viewScale
                     let cy = videoRect.minY + CGFloat(style.centerY) * model.renderSize.height * viewScale
                     let measured = TextImageRenderer.size(block, canvas: model.renderSize)
-                    let boxW = max(measured.width * viewScale, 44)
+                    // Subtitles always auto-wrap, so the box shows the wrap frame
+                    // (boxWidth) — its side edges are the draggable wrap width.
+                    let frameW = CGFloat(style.boxWidth) * model.renderSize.width * viewScale
+                    let boxW = max(frameW, 44)
                     let boxH = max(measured.height * viewScale, 26)
 
                     RoundedRectangle(cornerRadius: 4)
                         .strokeBorder(Color.accentColor, lineWidth: 2)
                         .contentShape(Rectangle())
                         .frame(width: boxW, height: boxH)
+                        .overlay {
+                            resizeHandle(viewScale: viewScale, leading: true)
+                                .position(x: 0, y: boxH / 2)
+                            resizeHandle(viewScale: viewScale, leading: false)
+                                .position(x: boxW, y: boxH / 2)
+                        }
                         .gesture(moveGesture(viewScale: viewScale))
-                        .help("Drag to move all subtitles")
+                        .help("Drag to move all subtitles · drag a side handle to resize the wrap width")
                         .position(x: cx, y: cy)
                 }
             }
@@ -72,6 +82,37 @@ struct SubtitleCanvasOverlay: View {
             .onEnded { _ in
                 dragStart = nil
                 model.endDraggingSubtitle()
+            }
+    }
+
+    /// A small side handle that resizes the shared wrap width symmetrically about
+    /// the subtitle center (so every cue re-wraps to the new width).
+    private func resizeHandle(viewScale: CGFloat, leading: Bool) -> some View {
+        Capsule()
+            .fill(Color.accentColor)
+            .frame(width: 6, height: 22)
+            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
+            .frame(width: 18, height: 30)            // larger hit area
+            .contentShape(Rectangle())
+            .highPriorityGesture(resizeGesture(viewScale: viewScale, leading: leading))
+    }
+
+    private func resizeGesture(viewScale: CGFloat, leading: Bool) -> some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .named(space))
+            .onChanged { value in
+                guard model.renderSize.width > 0,
+                      let style = model.subtitles?.style else { return }
+                if resizeStartWidth == nil { resizeStartWidth = style.boxWidth }
+                guard let start = resizeStartWidth else { return }
+                // Center-anchored: leading drag-left and trailing drag-right both
+                // widen; the factor of 2 keeps the box centered.
+                let deltaFrac = Double(value.translation.width / viewScale) / model.renderSize.width
+                let signed = leading ? -deltaFrac : deltaFrac
+                model.setSubtitleBoxWidth(start + 2 * signed)
+            }
+            .onEnded { _ in
+                resizeStartWidth = nil
+                model.commitSubtitleEdit()
             }
     }
 

@@ -862,6 +862,11 @@ struct StudioView: View {
                     set: { model.setSubtitleFontSize($0) }
                 ), range: 0.02...0.2)
 
+                styleSliderSubtitle("Box width (wrap)", value: Binding(
+                    get: { style?.boxWidth ?? 0.9 },
+                    set: { model.setSubtitleBoxWidth($0) }
+                ), range: 0.05...1.0)
+
                 textColorRow("Color", hex: style?.colorHex ?? "#FFFFFF") {
                     model.setSubtitleColorHex($0)
                 }

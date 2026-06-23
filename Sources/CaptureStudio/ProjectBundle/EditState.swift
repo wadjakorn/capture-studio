@@ -322,6 +322,9 @@ struct SubtitleStyle: Codable, Equatable {
     var boxHex: String
     var boxOpacity: Double
     var shadow: Bool
+    /// Wrap width as a fraction of canvas width — subtitles always auto-wrap to
+    /// it (mirrors `TextBlock.boxWidth`). 0.9 reproduces the prior fixed width.
+    var boxWidth: Double
 
     init(centerX: Double = 0.5, centerY: Double = 0.85,
          fontName: String = "Helvetica", fontSize: Double = 0.05,
@@ -329,7 +332,7 @@ struct SubtitleStyle: Codable, Equatable {
          alignment: TextAlignmentH = .center, strokeWidth: Double = 0,
          strokeHex: String = "#000000", boxEnabled: Bool = false,
          boxHex: String = "#000000", boxOpacity: Double = 0.5,
-         shadow: Bool = true) {
+         shadow: Bool = true, boxWidth: Double = 0.9) {
         self.centerX = centerX
         self.centerY = centerY
         self.fontName = fontName
@@ -343,6 +346,7 @@ struct SubtitleStyle: Codable, Equatable {
         self.boxHex = boxHex
         self.boxOpacity = boxOpacity
         self.shadow = shadow
+        self.boxWidth = boxWidth
     }
 
     // Custom decode so a track written by an older/newer in-between version with
@@ -364,6 +368,7 @@ struct SubtitleStyle: Codable, Equatable {
         boxHex = try c.decodeIfPresent(String.self, forKey: .boxHex) ?? "#000000"
         boxOpacity = try c.decodeIfPresent(Double.self, forKey: .boxOpacity) ?? 0.5
         shadow = try c.decodeIfPresent(Bool.self, forKey: .shadow) ?? true
+        boxWidth = try c.decodeIfPresent(Double.self, forKey: .boxWidth) ?? 0.9
     }
 
     /// Synthesize a transient `TextBlock` for one cue so the existing renderer /
@@ -375,7 +380,8 @@ struct SubtitleStyle: Codable, Equatable {
                   fontName: fontName, fontSize: fontSize, fontWeight: fontWeight,
                   colorHex: colorHex, alignment: alignment, boxEnabled: boxEnabled,
                   boxHex: boxHex, boxOpacity: boxOpacity, strokeWidth: strokeWidth,
-                  strokeHex: strokeHex, shadow: shadow, source: .manual)
+                  strokeHex: strokeHex, shadow: shadow, boxWidth: boxWidth,
+                  autoWrap: true, source: .manual)
     }
 }
 

@@ -270,7 +270,7 @@ import Foundation
                                   fontSize: 0.08, fontWeight: .bold, colorHex: "#112233",
                                   alignment: .leading, strokeWidth: 0.05, strokeHex: "#445566",
                                   boxEnabled: true, boxHex: "#778899", boxOpacity: 0.6,
-                                  shadow: false)
+                                  shadow: false, boxWidth: 0.55)
         let id = UUID()
         let b = style.asTextBlock(id: id, begin: 1, end: 2, text: "Hi")
         #expect(b.id == id)
@@ -281,6 +281,20 @@ import Foundation
         #expect(b.strokeWidth == 0.05 && b.strokeHex == "#445566")
         #expect(b.boxEnabled && b.boxHex == "#778899" && b.boxOpacity == 0.6)
         #expect(b.shadow == false)
+        // Box width carries through; subtitles always auto-wrap to that width.
+        #expect(b.boxWidth == 0.55 && b.autoWrap == true)
+    }
+
+    @Test func subtitleStyleBoxWidthRoundTrips() throws {
+        let style = SubtitleStyle(boxWidth: 0.6)
+        let data = try JSONEncoder().encode(style)
+        #expect(try JSONDecoder().decode(SubtitleStyle.self, from: data).boxWidth == 0.6)
+    }
+
+    @Test func legacySubtitleStyleHasDefaultBoxWidth() throws {
+        let json = #"{"centerX":0.5,"centerY":0.85}"#
+        let style = try JSONDecoder().decode(SubtitleStyle.self, from: Data(json.utf8))
+        #expect(style.boxWidth == 0.9)
     }
 
     @Test func textBlockNewFieldsRoundTrip() throws {
