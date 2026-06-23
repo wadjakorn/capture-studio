@@ -429,6 +429,22 @@ struct StudioView: View {
                     .foregroundStyle(.secondary)
             }
             .help("Zoom magnification for the selected block")
+
+            HStack(spacing: 4) {
+                Image(systemName: "hand.draw")
+                    .foregroundStyle(.secondary)
+                Slider(
+                    value: Binding(get: { model.selectedZoomSensitivity },
+                                   set: { model.setZoomSensitivity($0) }),
+                    in: 0...1,
+                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
+                )
+                .frame(width: 90)
+                Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .help("Follow sensitivity — how aggressively the zoom pans toward the cursor (low = calm, high = snappy)")
         }
     }
 
