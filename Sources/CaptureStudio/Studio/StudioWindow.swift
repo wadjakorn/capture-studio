@@ -42,7 +42,8 @@ struct StudioView: View {
         }
         // Esc deselects any selected block (the text input owns Esc while open).
         .background {
-            if model.editingTextBlockID == nil {
+            // The inline caption field owns Esc while a text block is selected.
+            if model.selectedTextBlock == nil {
                 Button("") { model.deselectAll() }
                     .keyboardShortcut(.cancelAction).opacity(0)
             }
@@ -118,12 +119,6 @@ struct StudioView: View {
             }
             if !model.textBlocks.isEmpty {
                 laneRow("textformat") { TextTimelineLane(model: model) }
-                    .popover(isPresented: Binding(
-                        get: { model.editingTextBlockID != nil },
-                        set: { if !$0 { model.endEditingText() } }
-                    ), arrowEdge: .top) {
-                        textEditorPopover
-                    }
             }
 
             Divider().padding(.vertical, 2)
@@ -372,6 +367,22 @@ struct StudioView: View {
         .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
             textStylePopover
         }
+
+        // Inline caption input — shown only while a text block is selected.
+        // Selecting a block (timeline or canvas) reveals it; deselecting hides it.
+        if model.selectedTextBlock != nil {
+            CaptionTextEditor(
+                text: Binding(
+                    get: { model.selectedTextBlock?.text ?? "" },
+                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
+                ),
+                onSubmit: { model.commitTextEdit() }
+            )
+            .frame(width: 220, height: 44)
+            .overlay(RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
+            .help("Edit caption text · Shift+Return for a new line")
+        }
     }
 
     @ViewBuilder private var cursorControls: some View {
@@ -539,31 +550,6 @@ struct StudioView: View {
                 if !editing { model.commitCameraEdit() }
             }
         }
-    }
-
-    // MARK: - Text input
-
-    /// The dedicated caption input, shown as a popover off the text lane when a
-    /// block is selected. Return / Esc / click-outside apply; Shift+Return adds
-    /// a newline. Text updates the preview live as you type.
-    @ViewBuilder
-    private var textEditorPopover: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Caption text").font(.caption).foregroundStyle(.secondary)
-            CaptionTextEditor(
-                text: Binding(
-                    get: { model.selectedTextBlock?.text ?? "" },
-                    set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
-                ),
-                onSubmit: { model.endEditingText() }
-            )
-            .frame(width: 280, height: 92)
-            .overlay(RoundedRectangle(cornerRadius: 5)
-                .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
-            Text("Return to apply · Shift+Return for a new line · Esc to apply")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-        .padding(12)
     }
 
     // MARK: - Text style

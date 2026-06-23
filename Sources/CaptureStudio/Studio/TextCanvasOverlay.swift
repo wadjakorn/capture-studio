@@ -59,15 +59,6 @@ struct TextCanvasOverlay: View {
                 }
             }
             .coordinateSpace(name: space)   // stable frame for the move drag
-            // Return deselects the text block (Esc is handled globally by the
-            // editor), but only when the text input is closed — it owns those
-            // keys while open.
-            .background {
-                if model.editingTextBlockID == nil {
-                    Button("") { model.deselectAll() }
-                        .keyboardShortcut(.return, modifiers: []).opacity(0)
-                }
-            }
         }
     }
 

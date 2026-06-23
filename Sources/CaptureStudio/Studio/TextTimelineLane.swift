@@ -139,8 +139,8 @@ struct TextTimelineLane: View {
                 }
             }
             .onEnded { _ in
-                // Tap (no drag) selects the block and opens its text input.
-                if dragMoved { model.commitTextEdit() } else { model.beginEditingText(block.id) }
+                // Tap (no drag) only selects; editing happens in the tool group.
+                if dragMoved { model.commitTextEdit() } else { model.selectTextBlock(block.id) }
                 dragMoved = false
             }
     }

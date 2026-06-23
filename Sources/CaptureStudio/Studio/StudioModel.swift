@@ -51,7 +51,6 @@ final class StudioModel: ObservableObject {
     // block is the one with its inline canvas editor open. Persisted to edit.json.
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
-    @Published var editingTextBlockID: UUID?
     /// Set while a text block is being dragged on the canvas, so the compositor
     /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
     /// (no per-tick recomposite). Cleared on drop.
@@ -703,6 +702,7 @@ final class StudioModel: ObservableObject {
     /// Select a text block (clears any camera-block selection) and park the
     /// playhead inside its span so the preview shows it. Pass nil to deselect.
     func selectTextBlock(_ id: UUID?) {
+        if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
         if id != nil { selectedBlockID = nil }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
@@ -720,12 +720,10 @@ final class StudioModel: ObservableObject {
         let added = TextTimeline.add(textBlocks, atTime: t, width: Self.defaultTextWidth,
                                      duration: duration, template: template)
         setTextBlocks(added.blocks, select: added.id)
-        editingTextBlockID = added.id   // (removed in Task 5)
     }
 
     func removeTextBlock(_ id: UUID) {
         let list = TextTimeline.remove(textBlocks, id: id)
-        if editingTextBlockID == id { editingTextBlockID = nil }
         setTextBlocks(list, select: selectedTextBlockID == id ? nil : selectedTextBlockID)
     }
 
@@ -748,21 +746,6 @@ final class StudioModel: ObservableObject {
     }
 
     func commitTextEdit() {
-        saveEdit()
-    }
-
-    /// Open the text input popover for a block (select it and mark it editing).
-    /// The input is off-canvas, so the baked text stays visible and updates live
-    /// as the user types — no suppression needed.
-    func beginEditingText(_ id: UUID) {
-        selectTextBlock(id)
-        editingTextBlockID = id
-    }
-
-    /// Close the text input popover and persist (text was applied live).
-    func endEditingText() {
-        guard editingTextBlockID != nil else { return }
-        editingTextBlockID = nil
         saveEdit()
     }
 
@@ -792,7 +775,6 @@ final class StudioModel: ObservableObject {
     /// drives motion.
     func beginDraggingText(_ id: UUID) {
         selectTextBlock(id)
-        editingTextBlockID = nil
         draggingTextBlockID = id
         applyVideoComposition()
     }
@@ -817,8 +799,8 @@ final class StudioModel: ObservableObject {
 
     /// Deselect any text block (closing the inline editor / drag first).
     func deselectText() {
-        if editingTextBlockID != nil { endEditingText() }
         if draggingTextBlockID != nil { endDraggingText() }
+        if selectedTextBlockID != nil { saveEdit() }   // persist any live text edit
         selectedTextBlockID = nil
     }
 
