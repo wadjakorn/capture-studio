@@ -112,6 +112,12 @@ final class StudioModel: ObservableObject {
         guard let s = subtitles else { return false }
         return !s.cues.isEmpty
     }
+    /// Cues shifted by the track offset and clamped to the clip — exactly what
+    /// renders. Empty when there is no track or every cue falls outside the clip.
+    var effectiveSubtitleCues: [SubtitleCue] {
+        guard let s = subtitles else { return [] }
+        return SubtitleTimeline.effective(s.cues, offset: s.offset, duration: duration)
+    }
     /// The static "home" placement — the camera's resting state, held before the
     /// first block and used as the first block's "from".
     var cameraHome: CameraSample {
@@ -353,13 +359,15 @@ final class StudioModel: ObservableObject {
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
-            // Clamp cues to the actual clip; a track whose cues all fall past the
-            // end loads as no subtitles (the .srt file is left in the bundle).
+            // Keep cues raw; the offset is applied at consumption. A track whose
+            // cues all fall outside the clip (after offset) loads as no subtitles
+            // (the .srt file is left in the bundle).
             if let track = edit.subtitles {
-                let cues = SubtitleTimeline.effective(track.cues, offset: 0, duration: duration)
-                subtitles = cues.isEmpty ? nil
-                    : SubtitleTrack(srtFilename: track.srtFilename,
-                                    style: track.style, cues: cues)
+                let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
+                                                           duration: duration)
+                subtitles = surviving.isEmpty ? nil
+                    : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
+                                    cues: track.cues, offset: track.offset)
             }
             applyVideoComposition()
             applyAudioMix()
@@ -964,6 +972,7 @@ final class StudioModel: ObservableObject {
         let bundle = self.bundle
         let duration = self.duration
         let existingStyle = subtitles?.style
+        let existingOffset = subtitles?.offset ?? 0
         Task { @MainActor in
             let track: SubtitleTrack? = await Task.detached {
                 guard let name = try? bundle.writeSubtitleFile(from: url) else { return nil }
@@ -976,10 +985,12 @@ final class StudioModel: ObservableObject {
                 } else {
                     raw = ""
                 }
-                let cues = SubtitleTimeline.effective(SubtitleParser.parse(raw), offset: 0, duration: duration)
-                guard !cues.isEmpty else { return nil }
+                let parsed = SubtitleParser.parse(raw)
+                guard !SubtitleTimeline.effective(parsed, offset: existingOffset,
+                                                  duration: duration).isEmpty else { return nil }
                 return SubtitleTrack(srtFilename: name,
-                                     style: existingStyle ?? SubtitleStyle(), cues: cues)
+                                     style: existingStyle ?? SubtitleStyle(),
+                                     cues: parsed, offset: existingOffset)
             }.value
 
             guard let track else {
@@ -1520,8 +1531,11 @@ final class StudioModel: ObservableObject {
         // Subtitle cues (rendered below text blocks). Suppressed entirely while
         // the canvas position box is being dragged — the smooth overlay drives
         // motion, the cue re-bakes at the dropped position.
-        if let track = subtitles, !track.cues.isEmpty, !draggingSubtitle {
-            layout.subtitles = SubtitleTimelineSpec(style: track.style, cues: track.cues)
+        if let track = subtitles, !draggingSubtitle {
+            let cues = effectiveSubtitleCues
+            if !cues.isEmpty {
+                layout.subtitles = SubtitleTimelineSpec(style: track.style, cues: cues)
+            }
         }
 
         let instruction = StudioCompositionInstruction(

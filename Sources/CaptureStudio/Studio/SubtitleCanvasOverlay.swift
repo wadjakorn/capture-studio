@@ -49,8 +49,9 @@ struct SubtitleCanvasOverlay: View {
 
     /// The cue under the playhead (so the box aligns with what's on screen).
     private var activeCue: SubtitleCue? {
-        guard let cues = model.subtitles?.cues else { return nil }
-        return cues.first { $0.begin <= model.currentTime && model.currentTime < $0.end }
+        model.effectiveSubtitleCues.first {
+            $0.begin <= model.currentTime && model.currentTime < $0.end
+        }
     }
 
     private func moveGesture(viewScale: CGFloat) -> some Gesture {

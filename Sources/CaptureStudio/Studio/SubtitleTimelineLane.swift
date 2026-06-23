@@ -14,7 +14,7 @@ struct SubtitleTimelineLane: View {
     private let maxVisibleRows = 3
     private let laneSpace = "subtitleLane"
 
-    private var cues: [SubtitleCue] { model.subtitles?.cues ?? [] }
+    private var cues: [SubtitleCue] { model.effectiveSubtitleCues }
     private var rows: [[SubtitleCue]] { SubtitleTimeline.subRows(cues) }
 
     private var contentHeight: CGFloat {
