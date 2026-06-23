@@ -58,21 +58,23 @@ struct StudioView: View {
             ZStack {
                 ZStack {
                     PlayerView(player: player)
-                    // Click empty canvas to deselect.
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.deselectAll() }
-                    if model.cropPannable {
-                        CropPanOverlay(model: model)
-                    }
+                    // Bottom: tap deselects, left-drag pans the inspection view.
+                    CanvasNavigationLayer(model: model)
+                    // Click a visible caption to select it (above navigation).
+                    TextSelectHitLayer(model: model)
                     if model.showsCameraOverlay {
                         CameraPipOverlay(model: model)
                     }
                     if model.selectedTextBlock != nil {
                         TextCanvasOverlay(model: model)
                     }
-                    // Topmost: reels safe-area guide (studio-only).
+                    // Reels safe-area guide (studio-only).
                     ReelsSafeAreaOverlay(model: model)
+                    // Pan-video mode: a top grab layer that wins all drags in the
+                    // video rect while the mode is on.
+                    if model.panVideoMode {
+                        CropPanOverlay(model: model)
+                    }
                 }
                 .scaleEffect(model.canvasZoom)
                 .offset(x: model.canvasPanX, y: model.canvasPanY)
