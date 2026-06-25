@@ -1,0 +1,82 @@
+name: Update Homebrew Cask
+
+# Fires after a GitHub Release is published (not draft). Computes the SHA256 of
+# the macOS .dmg asset and pushes a bumped Casks/capture-studio.rb to the
+# wadjakorn/homebrew-capture-studio tap on its main branch.
+#
+# Prereqs:
+#   1. A tap repo: wadjakorn/homebrew-capture-studio with Casks/capture-studio.rb
+#      (version "x.y.z", a sha256 "...", and the release-asset url).
+#   2. Repo secret HOMEBREW_TAP_TOKEN: a fine-grained PAT with Contents: write
+#      on wadjakorn/homebrew-capture-studio.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.2)"
+        required: true
+
+jobs:
+  update-cask:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download dmg and compute SHA256
+        id: sha
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${{ steps.tag.outputs.version }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          DMG="CaptureStudio-${VERSION}.dmg"
+          curl -fL -o "$DMG" "${BASE}/${DMG}"
+          SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: wadjakorn/homebrew-capture-studio
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Patch cask
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          path = "tap/Casks/capture-studio.rb"
+          s = open(path).read()
+          s = re.sub(r'version "[^"]+"', f'version "{os.environ["VERSION"]}"', s, count=1)
+          s = re.sub(r'sha256 "[0-9a-f]+"', f'sha256 "{os.environ["SHA"]}"', s, count=1)
+          open(path, "w").write(s)
+          PY
+          cat tap/Casks/capture-studio.rb
+
+      - name: Commit and push
+        run: |
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git add Casks/capture-studio.rb
+          git commit -m "capture-studio ${{ steps.tag.outputs.version }}"
+          git push

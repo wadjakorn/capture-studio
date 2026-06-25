@@ -16,6 +16,15 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN" "$APP/Contents/MacOS/CaptureStudio"
 
+# Stamp a monotonic build number (git commit count) into the packaged plist.
+# Marketing version (CFBundleShortVersionString) is managed by bump-version.sh.
+# Skipped outside a git checkout (e.g. source tarball) — the plist value stands.
+if BUILD_NUM="$(git rev-list --count HEAD 2>/dev/null)"; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Contents/Info.plist"
+fi
+VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
+echo "Version $VERSION (build ${BUILD_NUM:-unknown})"
+
 # Sign with the stable self-signed cert so TCC permissions survive rebuilds.
 # Falls back to ad-hoc if the cert is missing from the login keychain.
 IDENTITY="Capture Studio Dev"
