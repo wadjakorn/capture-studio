@@ -16,6 +16,15 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN" "$APP/Contents/MacOS/CaptureStudio"
 
+# Copy SwiftPM resource bundles (e.g. KeyboardShortcuts_KeyboardShortcuts.bundle)
+# into Contents/Resources. Without them, Bundle.module can't resolve and the app
+# fatalErrors at launch the moment the hotkey recorder view renders.
+shopt -s nullglob
+for bundle in "$(dirname "$BIN")"/*.bundle; do
+    cp -R "$bundle" "$APP/Contents/Resources/"
+done
+shopt -u nullglob
+
 # Stamp a monotonic build number (git commit count) into the packaged plist.
 # Marketing version (CFBundleShortVersionString) is managed by bump-version.sh.
 # Skipped outside a git checkout (e.g. source tarball) — the plist value stands.
