@@ -16,6 +16,15 @@ cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN" "$APP/Contents/MacOS/CaptureStudio"
 
+# Copy SwiftPM resource bundles (e.g. KeyboardShortcuts_KeyboardShortcuts.bundle)
+# into Contents/Resources. Without them, Bundle.module can't resolve and the app
+# fatalErrors at launch the moment the hotkey recorder view renders.
+shopt -s nullglob
+for bundle in "$(dirname "$BIN")"/*.bundle; do
+    cp -R "$bundle" "$APP/Contents/Resources/"
+done
+shopt -u nullglob
+
 # Stamp a monotonic build number (git commit count) into the packaged plist.
 # Marketing version (CFBundleShortVersionString) is managed by bump-version.sh.
 # Skipped outside a git checkout (e.g. source tarball) — the plist value stands.
@@ -26,9 +35,14 @@ VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/
 echo "Version $VERSION (build ${BUILD_NUM:-unknown})"
 
 # Sign with the stable self-signed cert so TCC permissions survive rebuilds.
-# Falls back to ad-hoc if the cert is missing from the login keychain.
+# Falls back to ad-hoc if the cert is missing from the keychain.
+#
+# NOTE: no -v on find-identity. A freshly-imported, untrusted self-signed cert
+# (e.g. on a CI runner) is omitted by `find-identity -v` ("valid only") but is
+# perfectly usable for signing — codesign needs only the cert + private key, not
+# a trust setting. With -v, CI silently fell back to ad-hoc and TCC grants died.
 IDENTITY="Capture Studio Dev"
-if security find-identity -v -p codesigning | grep -q "$IDENTITY"; then
+if security find-identity -p codesigning | grep -q "$IDENTITY"; then
     codesign --force --sign "$IDENTITY" "$APP"
 else
     echo "warning: '$IDENTITY' cert not found; ad-hoc signing (TCC will re-prompt)" >&2

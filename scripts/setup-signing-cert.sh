@@ -44,7 +44,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -days "$DAYS" \
   -addext "extendedKeyUsage=critical,codeSigning" \
   -addext "basicConstraints=critical,CA:false" 2>/dev/null
 
-openssl pkcs12 -export \
+# OpenSSL 3 defaults to a PKCS#12 MAC/cipher that Apple's `security import`
+# rejects ("MAC verification failed during PKCS12 import (wrong password?)" —
+# misleading; the password is fine). -legacy switches to 3DES/RC2/SHA1, which
+# both macOS and the GitHub runner accept. LibreSSL has no -legacy flag and
+# already emits a compatible p12, so only add it when the flag exists.
+LEGACY=""
+if openssl pkcs12 -help 2>&1 | grep -q -- -legacy; then
+  LEGACY="-legacy"
+fi
+
+openssl pkcs12 -export $LEGACY \
   -inkey "$WORK/key.pem" -in "$WORK/cert.pem" \
   -name "$CN" -out "$WORK/capture-studio-signing.p12" \
   -passout "pass:${P12_PASS}"
