@@ -90,30 +90,149 @@ enum CameraAspect: String, Codable, CaseIterable, Equatable {
     }
 }
 
-/// One camera transition span on the screen-track timeline. The camera eases
-/// from the previous block's settled placement (or the static "home" placement
-/// for the first block) into this block's placement over `[begin, end]`, then
-/// holds it until the next block. `begin == end` is a hard cut. Blocks never
-/// overlap (camera is a single instance). Position/scale match the static
-/// `cameraCenterX/Y` / `cameraScale` units; `visible` drives a show/hide fade.
+/// The frame composition at a given timestamp — what the layout timeline picks
+/// per block (and the static "home" state). Replaces the old binary camera
+/// show/hide: instead of just "camera on/off", a block chooses one of four
+/// arrangements of the main video and the camera.
+enum CameraLayout: String, Codable, CaseIterable, Equatable {
+    /// Main video with a floating, moveable camera PiP. The legacy default.
+    case mainAndFloat
+    /// Main video only — no camera (the old `visible == false`).
+    case mainOnly
+    /// Floating, moveable camera over the background fill — no main video.
+    case floatCamera
+    /// Camera centered and enlarged (contain-fit, padded) over the background
+    /// fill — no main video. Position/scale are auto-computed.
+    case cameraStatic
+
+    /// Whether the main screen video is part of this layout.
+    var showsMainVideo: Bool { self == .mainAndFloat || self == .mainOnly }
+    /// Whether the camera is drawn in this layout.
+    var showsCamera: Bool { self != .mainOnly }
+    /// Whether the camera is a moveable floating PiP — gates the move-block
+    /// action and the on-canvas position handles.
+    var cameraFloats: Bool { self == .mainAndFloat || self == .floatCamera }
+    /// Layouts that suppress the main video or full-screen the camera need the
+    /// Core Image compositor even with no timeline blocks (the cheap layer-
+    /// instruction path can only place a PiP over the unmodified screen).
+    var needsCompositor: Bool { self == .floatCamera || self == .cameraStatic }
+
+    var label: String {
+        switch self {
+        case .mainAndFloat: return "Main + Camera"
+        case .mainOnly: return "Main Only"
+        case .floatCamera: return "Camera Float"
+        case .cameraStatic: return "Camera Static"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .mainAndFloat: return "pip"
+        case .mainOnly: return "rectangle"
+        case .floatCamera: return "person.crop.rectangle"
+        case .cameraStatic: return "person.crop.square"
+        }
+    }
+}
+
+/// One layout span on the screen-track timeline. The camera eases from the
+/// previous block's settled placement (or the static "home" placement for the
+/// first block) into this block's placement over `[begin, end]`, then holds it
+/// until the next block. `begin == end` is a hard cut. Blocks never overlap
+/// (camera is a single instance). Position/scale match the static
+/// `cameraCenterX/Y` / `cameraScale` units (used only by the floating layouts);
+/// `layout` picks the frame composition.
 struct CameraBlock: Codable, Equatable, Identifiable {
     var id: UUID
     var begin: Double
     var end: Double
-    var visible: Bool
+    var layout: CameraLayout
     var centerX: Double
     var centerY: Double
     var scale: Double
 
-    init(id: UUID = UUID(), begin: Double, end: Double, visible: Bool,
+    init(id: UUID = UUID(), begin: Double, end: Double,
+         layout: CameraLayout = .mainAndFloat,
          centerX: Double, centerY: Double, scale: Double) {
         self.id = id
         self.begin = begin
         self.end = end
-        self.visible = visible
+        self.layout = layout
         self.centerX = centerX
         self.centerY = centerY
         self.scale = scale
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, begin, end, layout, visible, centerX, centerY, scale
+    }
+
+    /// Migrates legacy bundles: a block written with `visible` (and no `layout`)
+    /// decodes to `mainAndFloat` when shown, `mainOnly` when hidden.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        begin = try c.decodeIfPresent(Double.self, forKey: .begin) ?? 0
+        end = try c.decodeIfPresent(Double.self, forKey: .end) ?? 0
+        if let lay = try c.decodeIfPresent(CameraLayout.self, forKey: .layout) {
+            layout = lay
+        } else {
+            let visible = try c.decodeIfPresent(Bool.self, forKey: .visible) ?? true
+            layout = visible ? .mainAndFloat : .mainOnly
+        }
+        centerX = try c.decodeIfPresent(Double.self, forKey: .centerX) ?? 0.85
+        centerY = try c.decodeIfPresent(Double.self, forKey: .centerY) ?? 0.82
+        scale = try c.decodeIfPresent(Double.self, forKey: .scale) ?? 0.24
+    }
+
+    /// Writes `layout` plus a legacy `visible` mirror so an older build still
+    /// shows/hides the camera roughly correctly.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(begin, forKey: .begin)
+        try c.encode(end, forKey: .end)
+        try c.encode(layout, forKey: .layout)
+        try c.encode(layout.showsCamera, forKey: .visible)
+        try c.encode(centerX, forKey: .centerX)
+        try c.encode(centerY, forKey: .centerY)
+        try c.encode(scale, forKey: .scale)
+    }
+}
+
+/// One span on the **layout timeline**: over `[begin, end)` the frame uses
+/// `layout` (one of the four `CameraLayout` modes). Blocks never overlap (a
+/// single layout at a time); the clamps in `LayoutTimeline` enforce this. Time
+/// not covered by any block renders blank (solid black) — except when there are
+/// no blocks at all, where the static `cameraHomeLayout` applies. Unlike
+/// `CameraBlock`, a layout is held flat across its span (categorical, never
+/// interpolated); `begin == end` is inert.
+struct LayoutBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var layout: CameraLayout
+
+    init(id: UUID = UUID(), begin: Double, end: Double,
+         layout: CameraLayout = .mainAndFloat) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.layout = layout
+    }
+
+    // Custom decode so a block missing newer fields (or carrying an unknown
+    // future layout value) still loads, mirroring the other block types.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        begin = try c.decodeIfPresent(Double.self, forKey: .begin) ?? 0
+        end = try c.decodeIfPresent(Double.self, forKey: .end) ?? 0
+        // Raw-string decode so an unknown future layout degrades to the default
+        // rather than failing the whole bundle load.
+        let layoutRaw = try c.decodeIfPresent(String.self, forKey: .layout)
+        layout = layoutRaw.flatMap(CameraLayout.init(rawValue:)) ?? .mainAndFloat
     }
 }
 
@@ -422,6 +541,9 @@ struct EditState: Codable, Equatable {
     /// render space (top-left origin); scale is PiP width as a fraction of
     /// the screen width.
     var cameraVisible: Bool = true
+    /// The layout used before the first timeline block (and when the timeline is
+    /// empty). Legacy bundles without this field derive it from `cameraVisible`.
+    var cameraHomeLayout: CameraLayout = .mainAndFloat
     var cameraCenterX: Double = 0.85
     var cameraCenterY: Double = 0.82
     var cameraScale: Double = 0.24
@@ -484,9 +606,15 @@ struct EditState: Codable, Equatable {
     /// Auto-zoom blocks. Empty = no auto zoom/pan. Non-overlapping; during each
     /// block the canvas zooms + pans to follow the cursor.
     var zoomBlocks: [ZoomBlock] = []
+    /// Layout timeline. Empty = the whole clip uses `cameraHomeLayout`. Non-empty
+    /// = each block sets the frame layout over its span; uncovered gaps render
+    /// blank (black). Non-overlapping (a single layout at a time).
+    var layoutBlocks: [LayoutBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
-         cameraVisible: Bool = true, cameraCenterX: Double = 0.85,
+         cameraVisible: Bool = true,
+         cameraHomeLayout: CameraLayout = .mainAndFloat,
+         cameraCenterX: Double = 0.85,
          cameraCenterY: Double = 0.82, cameraScale: Double = 0.24,
          cameraZoom: Double = 1.0, cameraFeedX: Double = 0.5,
          cameraFeedY: Double = 0.5,
@@ -503,10 +631,11 @@ struct EditState: Codable, Equatable {
          canvasBackgroundImage: String? = nil,
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
          subtitles: SubtitleTrack? = nil,
-         zoomBlocks: [ZoomBlock] = []) {
+         zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.cameraVisible = cameraVisible
+        self.cameraHomeLayout = cameraHomeLayout
         self.cameraCenterX = cameraCenterX
         self.cameraCenterY = cameraCenterY
         self.cameraScale = cameraScale
@@ -536,6 +665,7 @@ struct EditState: Codable, Equatable {
         self.textBlocks = textBlocks
         self.subtitles = subtitles
         self.zoomBlocks = zoomBlocks
+        self.layoutBlocks = layoutBlocks
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -546,6 +676,11 @@ struct EditState: Codable, Equatable {
         trimIn = try c.decodeIfPresent(Double.self, forKey: .trimIn) ?? 0
         trimOut = try c.decodeIfPresent(Double.self, forKey: .trimOut)
         cameraVisible = try c.decodeIfPresent(Bool.self, forKey: .cameraVisible) ?? true
+        if let home = try c.decodeIfPresent(CameraLayout.self, forKey: .cameraHomeLayout) {
+            cameraHomeLayout = home
+        } else {
+            cameraHomeLayout = cameraVisible ? .mainAndFloat : .mainOnly
+        }
         cameraCenterX = try c.decodeIfPresent(Double.self, forKey: .cameraCenterX) ?? 0.85
         cameraCenterY = try c.decodeIfPresent(Double.self, forKey: .cameraCenterY) ?? 0.82
         cameraScale = try c.decodeIfPresent(Double.self, forKey: .cameraScale) ?? 0.24
@@ -580,6 +715,7 @@ struct EditState: Codable, Equatable {
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
         subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
         zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
+        layoutBlocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .layoutBlocks) ?? []
     }
 }
 

@@ -8,6 +8,9 @@ struct CameraSample: Equatable {
     var centerY: Double
     var scale: Double
     var opacity: Double
+    /// The frame composition at this instant. Held across a block's span (layout
+    /// is categorical — not interpolated); only position/scale/opacity ease.
+    var layout: CameraLayout = .mainAndFloat
 }
 
 /// Pure block math: evaluate the camera state at a time, and the add / move /
@@ -40,7 +43,8 @@ enum CameraTimeline {
                 centerX: lerp(from.centerX, target.centerX, f),
                 centerY: lerp(from.centerY, target.centerY, f),
                 scale: lerp(from.scale, target.scale, f),
-                opacity: lerp(from.opacity, target.opacity, f)
+                opacity: lerp(from.opacity, target.opacity, f),
+                layout: block.layout
             )
         }
         return target   // settled — hold until the next block
@@ -103,17 +107,18 @@ enum CameraTimeline {
     }
 
     /// Insert a block at `atTime`, `width` wide, taking `placement` as its
-    /// target. Pushed past any block it lands inside and clamped to the next
-    /// block / duration, so the result never overlaps.
+    /// target position and `layout` as its composition. Pushed past any block it
+    /// lands inside and clamped to the next block / duration, so the result never
+    /// overlaps.
     static func add(_ blocks: [CameraBlock], atTime: Double, width: Double,
-                    duration: Double, placement: CameraSample)
-        -> (blocks: [CameraBlock], id: UUID) {
+                    duration: Double, placement: CameraSample,
+                    layout: CameraLayout) -> (blocks: [CameraBlock], id: UUID) {
         let lowerBound = blocks.filter { $0.begin <= atTime }.map(\.end).max() ?? 0
         let begin = min(max(atTime, lowerBound, 0), max(0, duration))
         let nextBegin = blocks.filter { $0.begin > begin }.map(\.begin).min() ?? duration
         let end = min(begin + max(0, width), nextBegin, duration)
         let block = CameraBlock(begin: begin, end: max(begin, end),
-                                visible: placement.opacity > 0.5,
+                                layout: layout,
                                 centerX: placement.centerX, centerY: placement.centerY,
                                 scale: placement.scale)
         return (sortedByBegin(blocks + [block]), block.id)
@@ -123,7 +128,8 @@ enum CameraTimeline {
 
     private static func state(_ b: CameraBlock) -> CameraSample {
         CameraSample(centerX: b.centerX, centerY: b.centerY,
-                     scale: b.scale, opacity: b.visible ? 1 : 0)
+                     scale: b.scale, opacity: b.layout.showsCamera ? 1 : 0,
+                     layout: b.layout)
     }
 
     private static func lerp(_ a: Double, _ b: Double, _ f: Double) -> Double {

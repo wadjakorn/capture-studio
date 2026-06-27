@@ -147,6 +147,9 @@ struct StudioView: View {
             // Stacked lanes share a fixed leading icon gutter so every track
             // starts at the same x — keeping the playheads vertically aligned.
             laneRow("display") { timeline }
+            if model.showsLayoutTimeline {
+                laneRow("rectangle.on.rectangle") { LayoutTimelineLane(model: model) }
+            }
             if model.showsCameraTimeline {
                 laneRow("video.fill") { CameraTimelineLane(model: model) }
             }
@@ -369,29 +372,67 @@ struct StudioView: View {
         }
     }
 
-    @ViewBuilder private var cameraControls: some View {
-        Toggle(isOn: Binding(get: { model.cameraVisible },
-                             set: { _ in model.toggleCamera() })) {
-            Image(systemName: "video.circle")
-        }
-        .toggleStyle(.button)
-        .help("Show/hide camera overlay")
+    /// The layout the toolbar picker edits: the selected block's, else the home
+    /// (empty-timeline / before-first-block) layout.
+    private var layoutBinding: Binding<CameraLayout> {
+        Binding(
+            get: { model.selectedLayoutBlock?.layout ?? model.cameraHomeLayout },
+            set: { newValue in
+                if let id = model.selectedLayoutBlockID { model.setLayoutBlockLayout(id, newValue) }
+                else { model.setHomeLayout(newValue) }
+            })
+    }
 
-        // Style dropdown — all global camera config (zoom + frame style).
+    @ViewBuilder private var cameraControls: some View {
+        // Layout picker — picks the frame layout for the selected layout block
+        // (or the home/default state when no layout block is selected).
+        Picker("Layout", selection: layoutBinding) {
+            ForEach(CameraLayout.allCases, id: \.self) { layout in
+                Label(layout.label, systemImage: layout.symbol).tag(layout)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .frame(width: 150)
+        .disabled(model.selectedLayoutBlockID == nil)
+        .help(model.selectedLayoutBlockID == nil
+              ? "Select a layout block to change its frame layout"
+              : "Frame layout for the selected layout block")
+
+        // Add / remove layout blocks — a layout block sets the frame layout over
+        // a span; gaps render blank. Add is disabled when the timeline is full.
+        Button { model.addLayoutBlock() } label: {
+            Label("Add layout", systemImage: "rectangle.stack.badge.plus")
+        }
+        .disabled(!model.canAddLayoutBlock)
+        .help("Add a layout block at the playhead")
+
+        Button {
+            if let id = model.selectedLayoutBlockID { model.removeLayoutBlock(id) }
+        } label: {
+            Image(systemName: "rectangle.stack.badge.minus")
+        }
+        .disabled(model.selectedLayoutBlockID == nil)
+        .help("Delete the selected layout block")
+
+        Divider().frame(height: 16)
+
+        // Style dropdown — global camera config (zoom + frame style), editable
+        // in every layout per the design (applies wherever the camera renders).
         Button { showCameraStyle.toggle() } label: {
             Image(systemName: "slider.horizontal.3")
         }
-        .disabled(!model.cameraVisible)
         .help("Camera style — zoom, frame & shape")
         .popover(isPresented: $showCameraStyle, arrowEdge: .bottom) {
             cameraStylePopover
         }
 
-        // Motion action group — add / delete / hide camera blocks.
+        // Camera move keyframes — position/scale only; only meaningful while the
+        // camera floats (main+float / float-camera) at the playhead.
         Button { model.addBlock() } label: {
             Label("Add move", systemImage: "plus.rectangle")
         }
-        .disabled(!model.cameraVisible)
+        .disabled(!model.layoutAtPlayhead.cameraFloats)
         .help("Add a camera move block at the playhead")
 
         Button {
@@ -399,14 +440,8 @@ struct StudioView: View {
         } label: {
             Image(systemName: "minus.rectangle")
         }
-        .disabled(!model.cameraVisible || model.selectedBlockID == nil)
-        .help("Delete the selected move block")
-
-        Button { model.addHideBlock() } label: {
-            Image(systemName: "eye.slash")
-        }
-        .disabled(!model.cameraVisible || model.blockAtPlayhead != nil)
-        .help("Insert a temporary hide-camera block at the playhead")
+        .disabled(model.selectedBlockID == nil)
+        .help("Delete the selected camera move block")
     }
 
     @ViewBuilder private var textControls: some View {
