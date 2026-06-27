@@ -5,9 +5,9 @@ import Foundation
 @Suite struct CameraTimelineTests {
     private let home = CameraSample(centerX: 0.85, centerY: 0.82, scale: 0.24, opacity: 1)
 
-    private func block(_ begin: Double, _ end: Double, visible: Bool = true,
+    private func block(_ begin: Double, _ end: Double, layout: CameraLayout = .mainAndFloat,
                        cx: Double = 0.5, cy: Double = 0.5, scale: Double = 0.3) -> CameraBlock {
-        CameraBlock(begin: begin, end: end, visible: visible, centerX: cx, centerY: cy, scale: scale)
+        CameraBlock(begin: begin, end: end, layout: layout, centerX: cx, centerY: cy, scale: scale)
     }
 
     // MARK: ease
@@ -73,12 +73,22 @@ import Foundation
         #expect(abs(mid.scale - 0.3) < 1e-9)
     }
 
-    @Test func hideBlockCrossfadesOpacityDown() {
-        let blocks = [block(10, 14, visible: false)]
+    @Test func mainOnlyBlockCrossfadesOpacityDown() {
+        let blocks = [block(10, 14, layout: .mainOnly)]
         let mid = CameraTimeline.sample(at: 12, blocks: blocks, home: home)
         #expect(abs(mid.opacity - 0.5) < 1e-9)
         let after = CameraTimeline.sample(at: 20, blocks: blocks, home: home)
         #expect(after.opacity == 0)
+        #expect(after.layout == .mainOnly)
+    }
+
+    @Test func sampleCarriesActiveBlockLayout() {
+        let blocks = [block(0, 2, layout: .mainAndFloat),
+                      block(10, 12, layout: .cameraStatic)]
+        #expect(CameraTimeline.sample(at: 1, blocks: blocks, home: home).layout == .mainAndFloat)
+        // Layout is held (not interpolated) across the whole span, incl. the ramp.
+        #expect(CameraTimeline.sample(at: 11, blocks: blocks, home: home).layout == .cameraStatic)
+        #expect(CameraTimeline.sample(at: 30, blocks: blocks, home: home).layout == .cameraStatic)
     }
 
     @Test func zeroWidthBlockIsAHardCut() {
@@ -143,7 +153,8 @@ import Foundation
 
     @Test func addPlacesBlockAtPlayheadWithWidth() {
         let placement = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 1)
-        let r = CameraTimeline.add([], atTime: 5, width: 2, duration: 30, placement: placement)
+        let r = CameraTimeline.add([], atTime: 5, width: 2, duration: 30,
+                                   placement: placement, layout: .mainAndFloat)
         #expect(r.blocks.count == 1)
         #expect(r.blocks[0].begin == 5)
         #expect(r.blocks[0].end == 7)
@@ -151,24 +162,28 @@ import Foundation
 
     @Test func addPushesPastBlockItLandsInside() {
         let placement = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 1)
-        let first = CameraTimeline.add([], atTime: 5, width: 2, duration: 30, placement: placement)
-        let second = CameraTimeline.add(first.blocks, atTime: 6, width: 2, duration: 30, placement: placement)
+        let first = CameraTimeline.add([], atTime: 5, width: 2, duration: 30,
+                                       placement: placement, layout: .mainAndFloat)
+        let second = CameraTimeline.add(first.blocks, atTime: 6, width: 2, duration: 30,
+                                        placement: placement, layout: .mainAndFloat)
         #expect(second.blocks.map(\.begin) == [5, 7])
         #expect(second.blocks[1].end == 9)
     }
 
-    @Test func addWithZeroOpacityPlacementMakesHiddenBlock() {
-        let hidden = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 0)
-        let r = CameraTimeline.add([], atTime: 5, width: 2, duration: 30, placement: hidden)
+    @Test func addUsesGivenLayout() {
+        let placement = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 1)
+        let r = CameraTimeline.add([], atTime: 5, width: 2, duration: 30,
+                                   placement: placement, layout: .mainOnly)
         #expect(r.blocks.count == 1)
-        #expect(r.blocks[0].visible == false)
+        #expect(r.blocks[0].layout == .mainOnly)
         #expect(r.blocks[0].begin == 5)
         #expect(r.blocks[0].end == 7)
     }
 
     @Test func addClampsToDuration() {
         let placement = CameraSample(centerX: 0.5, centerY: 0.5, scale: 0.3, opacity: 1)
-        let r = CameraTimeline.add([], atTime: 29, width: 2, duration: 30, placement: placement)
+        let r = CameraTimeline.add([], atTime: 29, width: 2, duration: 30,
+                                   placement: placement, layout: .mainAndFloat)
         #expect(r.blocks[0].begin == 29)
         #expect(r.blocks[0].end == 30)
     }

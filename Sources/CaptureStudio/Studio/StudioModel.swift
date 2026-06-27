@@ -36,7 +36,13 @@ final class StudioModel: ObservableObject {
 
     // Camera PiP — center normalized 0–1 in render space, scale = width
     // fraction of screen width. Persisted to edit.json.
-    @Published var cameraVisible = true
+    /// The layout used before the first timeline block (and when the timeline is
+    /// empty). The old binary show/hide toggle is now the `mainOnly` ↔ camera
+    /// distinction within this. Persisted to edit.json.
+    @Published var cameraHomeLayout: CameraLayout = .mainAndFloat
+    /// Back-compat alias: the home state shows the camera unless `mainOnly`.
+    /// Drives the many gates that only care whether a camera is present.
+    var cameraVisible: Bool { cameraHomeLayout.showsCamera }
     @Published var cameraCenterX = 0.85
     @Published var cameraCenterY = 0.82
     @Published var cameraScale = 0.24
@@ -52,6 +58,9 @@ final class StudioModel: ObservableObject {
     @Published var cameraSelected = false
     /// Default width of a newly added block (seconds).
     static let defaultBlockWidth = 0.5
+    /// Default width of a newly added layout block (seconds) — wider than a
+    /// camera move block so it's easy to see and grab on the lane.
+    static let defaultLayoutWidth = 3.0
     // Text/caption timeline. Multiple instances, MAY overlap in time; array
     // order is the z-order (later = on top) and is never re-sorted. The selected
     // block is the one the lane + style bar + canvas overlay edit. Persisted to edit.json.
@@ -61,6 +70,11 @@ final class StudioModel: ObservableObject {
     // Persisted to edit.json.
     @Published private(set) var zoomBlocks: [ZoomBlock] = []
     @Published var selectedZoomBlockID: UUID?
+    // Layout timeline. Each block sets the frame layout (main / camera mix) over
+    // its span; uncovered gaps render blank. Empty = the whole clip uses
+    // `cameraHomeLayout`. Non-overlapping. Persisted to edit.json.
+    @Published private(set) var layoutBlocks: [LayoutBlock] = []
+    @Published var selectedLayoutBlockID: UUID?
     /// Set while a text block is being dragged on the canvas, so the compositor
     /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
     /// (no per-tick recomposite). Cleared on drop.
@@ -118,12 +132,19 @@ final class StudioModel: ObservableObject {
     // Camera orientation, degrees clockwise: 0/90/180/270. 90/270 swap w/h.
     @Published private(set) var cameraRotation = 0
 
-    var cameraShown: Bool { cameraVisible && cameraTrackID != nil }
+    /// Whether the camera is drawn at any point — the home layout or any block
+    /// layout shows it. Gates passing the camera track to the compositor.
+    var anyCameraVisible: Bool {
+        layoutBlocks.isEmpty
+            ? cameraHomeLayout.showsCamera
+            : layoutBlocks.contains { $0.layout.showsCamera }
+    }
+    var cameraShown: Bool { anyCameraVisible && cameraTrackID != nil }
     /// The camera has a block timeline driving it (vs. a static placement).
     var cameraHasTimeline: Bool { cameraTrackID != nil && !cameraBlocks.isEmpty }
-    /// The camera lane is shown only when the camera is visible *and* has a
-    /// block timeline. Toggling the camera off hides the lane (blocks retained).
-    var showsCameraTimeline: Bool { cameraVisible && cameraHasTimeline }
+    /// The layout lane is shown whenever there are blocks to edit (the home
+    /// layout is set from the toolbar, independent of the lane).
+    var showsCameraTimeline: Bool { cameraHasTimeline }
     /// The zoom lane is shown only when there is at least one zoom block.
     var showsZoomTimeline: Bool { !zoomBlocks.isEmpty }
 
@@ -159,32 +180,56 @@ final class StudioModel: ObservableObject {
     /// first block and used as the first block's "from".
     var cameraHome: CameraSample {
         CameraSample(centerX: cameraCenterX, centerY: cameraCenterY,
-                     scale: cameraScale, opacity: cameraVisible ? 1 : 0)
+                     scale: cameraScale, opacity: cameraHomeLayout.showsCamera ? 1 : 0,
+                     layout: cameraHomeLayout)
     }
     /// Placement the PiP overlay shows + edits: the selected block's target when
     /// the timeline is active, else the home placement.
     var editingCameraSample: CameraSample {
         if cameraHasTimeline, let b = selectedBlock {
             return CameraSample(centerX: b.centerX, centerY: b.centerY,
-                                scale: b.scale, opacity: b.visible ? 1 : 0)
+                                scale: b.scale, opacity: b.layout.showsCamera ? 1 : 0,
+                                layout: b.layout)
         }
         return cameraHome
     }
-    /// Whether the camera placement can be edited at the current playhead: always
-    /// in static mode; in timeline mode only before the first block (where the
-    /// home placement applies). Drives the select hit-target and overlay gating.
+    /// The layout in effect at the playhead — the selected/under-playhead block,
+    /// or the home layout before the first block. Drives toolbar gating.
+    var layoutAtPlayhead: CameraLayout {
+        LayoutTimeline.sample(at: currentTime, blocks: layoutBlocks) ?? cameraHomeLayout
+    }
+    /// The layout the toolbar picker reflects + edits: the selected layout
+    /// block's, else the layout at the playhead (a covering block or home).
+    var editingLayout: CameraLayout {
+        selectedLayoutBlock?.layout ?? layoutAtPlayhead
+    }
+    var selectedLayoutBlock: LayoutBlock? {
+        guard let id = selectedLayoutBlockID else { return nil }
+        return layoutBlocks.first { $0.id == id }
+    }
+    /// The layout lane shows only when there is at least one layout block.
+    var showsLayoutTimeline: Bool { !layoutBlocks.isEmpty }
+    /// Whether a new layout block would fit — gates the "add layout" button.
+    var canAddLayoutBlock: Bool {
+        LayoutTimeline.hasSpace(layoutBlocks, duration: duration)
+    }
+    /// Whether the camera placement can be edited at the current playhead. Only
+    /// the floating layouts have a moveable PiP; static / main-only have none.
+    /// Static mode is always editable; timeline mode only before the first block
+    /// (where the home placement applies). Drives the select hit-target and
+    /// overlay gating.
     var cameraOverlayEditableAtPlayhead: Bool {
-        guard hasCameraTrack, cameraVisible else { return false }
+        guard hasCameraTrack, layoutAtPlayhead.cameraFloats else { return false }
         guard cameraHasTimeline else { return true }
         if let first = cameraBlocks.first { return currentTime < first.begin }
         return true
     }
-    /// Whether the interactive PiP box is shown. Timeline mode: a block is
-    /// selected (edits its target). Home/static: only while the camera is
-    /// explicitly selected — so it can be deselected like every other element
+    /// Whether the interactive PiP box is shown. Timeline mode: a floating-layout
+    /// block is selected (edits its target). Home/static: only while the camera
+    /// is explicitly selected — so it can be deselected like every other element
     /// (Esc / empty canvas / empty timeline / inert UI).
     var showsCameraOverlay: Bool {
-        if cameraHasTimeline, selectedBlock != nil { return true }
+        if cameraHasTimeline, selectedBlock != nil { return layoutAtPlayhead.cameraFloats }
         return cameraSelected && cameraOverlayEditableAtPlayhead
     }
     /// Camera feed size after the 90° orientation step — width/height swapped
@@ -200,7 +245,8 @@ final class StudioModel: ObservableObject {
     var cameraNeedsCompositor: Bool {
         cameraShown && (cameraShape != .rectangle || cameraCornerRadius > 0
                         || cameraBorderWidth > 0 || cameraShadow
-                        || cameraRotation != 0)
+                        || cameraRotation != 0
+                        || cameraHomeLayout.needsCompositor)
     }
     /// Camera feed crop aspect — circle forces 1:1, then an explicit preset,
     /// else the native feed aspect.
@@ -316,6 +362,8 @@ final class StudioModel: ObservableObject {
     var needsCompositor: Bool {
         cameraNeedsCompositor
             || cameraHasTimeline
+            || !layoutBlocks.isEmpty
+            || cameraHomeLayout.needsCompositor
             || !textBlocks.isEmpty
             || showsSubtitleTimeline
             || !zoomBlocks.isEmpty
@@ -372,7 +420,7 @@ final class StudioModel: ObservableObject {
             trimIn = min(max(0, edit.trimIn), duration)
             trimOut = min(edit.trimOut ?? duration, duration)
             if trimOut <= trimIn { trimIn = 0; trimOut = duration }
-            cameraVisible = edit.cameraVisible
+            cameraHomeLayout = edit.cameraHomeLayout
             cameraCenterX = edit.cameraCenterX
             cameraCenterY = edit.cameraCenterY
             cameraScale = edit.cameraScale
@@ -414,6 +462,7 @@ final class StudioModel: ObservableObject {
                                     cues: track.cues, offset: track.offset)
             }
             zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
+            layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
             applyVideoComposition()
             applyAudioMix()
 
@@ -699,35 +748,93 @@ final class StudioModel: ObservableObject {
         CameraTimeline.sample(at: t, blocks: cameraBlocks, home: cameraHome)
     }
 
-    /// Add a block at the playhead, taking the camera's current look as its
-    /// target so nothing jumps until the user edits it. Home (the static
-    /// placement) covers the time before the first block, so no seeding needed.
+    /// Add a camera **move** block at the playhead, seeding it with the camera's
+    /// current placement so nothing jumps until the user repositions the PiP.
+    /// Camera move blocks carry position/scale only — the frame layout lives on
+    /// the separate layout timeline.
     func addBlock() {
         let t = min(max(currentTime, 0), duration)
         let placement = sampledCameraState(at: t)
         let added = CameraTimeline.add(cameraBlocks, atTime: t,
                                        width: Self.defaultBlockWidth,
-                                       duration: duration, placement: placement)
+                                       duration: duration, placement: placement,
+                                       layout: .mainAndFloat)
         setBlocks(added.blocks, select: added.id)
     }
 
     /// The block whose span strictly contains the playhead, if any. Used to
-    /// gate hide-block insertion (no overlapping blocks).
+    /// gate block insertion (no overlapping blocks).
     var blockAtPlayhead: CameraBlock? {
         cameraBlocks.first { $0.begin <= currentTime && currentTime < $0.end }
     }
 
-    /// Insert a "temporary hide" block at the playhead — a zero-opacity
-    /// placement so `CameraTimeline.add` produces a `visible == false` block,
-    /// fading the camera out over the block. Caller gates on `blockAtPlayhead`.
-    func addHideBlock() {
+    // MARK: - Layout timeline (blocks)
+
+    /// Add a layout block at the playhead, defaulting to the layout currently in
+    /// effect there (a covering block or home) so nothing jumps until edited.
+    /// Snapped into the first free gap; no-op when the timeline is full.
+    func addLayoutBlock(layout: CameraLayout? = nil) {
         let t = min(max(currentTime, 0), duration)
-        var placement = sampledCameraState(at: t)
-        placement.opacity = 0
-        let added = CameraTimeline.add(cameraBlocks, atTime: t,
-                                       width: Self.defaultBlockWidth,
-                                       duration: duration, placement: placement)
-        setBlocks(added.blocks, select: added.id)
+        guard let added = LayoutTimeline.add(layoutBlocks, atTime: t,
+                                             width: Self.defaultLayoutWidth,
+                                             duration: duration,
+                                             layout: layout ?? layoutAtPlayhead)
+        else { return }
+        setLayoutBlocks(added.blocks, select: added.id)
+    }
+
+    /// Change a layout block's layout (the lane's per-block / toolbar picker).
+    func setLayoutBlockLayout(_ id: UUID, _ layout: CameraLayout) {
+        guard let i = layoutBlocks.firstIndex(where: { $0.id == id }) else { return }
+        layoutBlocks[i].layout = layout
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    func moveLayoutBlockBegin(_ id: UUID, toTime: Double) {
+        layoutBlocks = LayoutTimeline.moveBegin(layoutBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveLayoutBlockEnd(_ id: UUID, toTime: Double) {
+        layoutBlocks = LayoutTimeline.moveEnd(layoutBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    func moveLayoutBlock(_ id: UUID, toBegin: Double) {
+        layoutBlocks = LayoutTimeline.moveBlock(layoutBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitLayoutEdit() { saveEdit() }
+
+    func removeLayoutBlock(_ id: UUID) {
+        let list = LayoutTimeline.remove(layoutBlocks, id: id)
+        setLayoutBlocks(list, select: selectedLayoutBlockID == id ? nil : selectedLayoutBlockID)
+    }
+
+    /// Select a layout block (clears other selections) and park the playhead
+    /// inside its span so the preview shows that layout.
+    func selectLayoutBlock(_ id: UUID?) {
+        selectedLayoutBlockID = id
+        if id != nil {
+            selectedBlockID = nil; selectedTextBlockID = nil
+            selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false
+        }
+        if let id, let b = layoutBlocks.first(where: { $0.id == id }) {
+            seek(to: min((b.begin + b.end) / 2, duration))
+        }
+    }
+
+    private func setLayoutBlocks(_ list: [LayoutBlock], select id: UUID?) {
+        layoutBlocks = list.sorted { $0.begin < $1.begin }
+        selectedLayoutBlockID = id
+        if id != nil {
+            selectedBlockID = nil; selectedTextBlockID = nil
+            selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false
+        }
+        applyVideoComposition()
+        saveEdit()
     }
 
     /// Live begin-edge drag; persist with `commitBlockEdit`.
@@ -755,13 +862,6 @@ final class StudioModel: ObservableObject {
     func removeBlock(_ id: UUID) {
         let list = CameraTimeline.remove(cameraBlocks, id: id)
         setBlocks(list, select: selectedBlockID == id ? nil : selectedBlockID)
-    }
-
-    func toggleBlockVisible(_ id: UUID) {
-        guard let i = cameraBlocks.firstIndex(where: { $0.id == id }) else { return }
-        cameraBlocks[i].visible.toggle()
-        applyVideoComposition()
-        saveEdit()
     }
 
     // MARK: - Zoom timeline (auto zoom/pan blocks)
@@ -1014,6 +1114,7 @@ final class StudioModel: ObservableObject {
         deselectText()
         selectedBlockID = nil
         selectedZoomBlockID = nil
+        selectedLayoutBlockID = nil
         cameraSelected = false
         if draggingSubtitle { endDraggingSubtitle() }
         subtitleSelected = false
@@ -1300,8 +1401,10 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    func toggleCamera() {
-        cameraVisible.toggle()
+    /// Set the home layout (the toolbar layout picker for the empty-timeline /
+    /// before-first-block state).
+    func setHomeLayout(_ layout: CameraLayout) {
+        cameraHomeLayout = layout
         applyVideoComposition()
         saveEdit()
     }
@@ -1389,24 +1492,73 @@ final class StudioModel: ObservableObject {
     /// Like `applyCameraStyle`, but watches `needsCompositor` (cursor/click
     /// overlays toggle the compositor and the preview canvas cap).
     private func applyOverlayChange(_ mutate: () -> Void) {
-        let was = needsCompositor
         mutate()
-        if needsCompositor != was {
+        rerenderPausedFrame()
+    }
+
+    private func applyCameraStyle(_ mutate: () -> Void) {
+        mutate()
+        // While a slider is being dragged, use the cheap live path (smooth);
+        // the reliable item-swap runs once on release (`endStyleEdit`).
+        if styleEditing { liveRerenderPausedFrame() } else { rerenderPausedFrame() }
+    }
+
+    /// Marks the start of a continuous style-slider drag — switches the per-tick
+    /// re-render to the cheap live path so dragging stays smooth.
+    func beginStyleEdit() { styleEditing = true }
+
+    /// Ends a style-slider drag: do one reliable (item-swap) re-render so the
+    /// final frame is correct, then persist.
+    func endStyleEdit() {
+        styleEditing = false
+        rerenderPausedFrame()
+        saveEdit()
+    }
+
+    private var styleEditing = false
+    private var reseekScheduled = false
+    private var reseekToggle = false
+
+    /// Re-render the current frame after a discrete style / overlay edit.
+    ///
+    /// The custom video compositor (`StudioCompositor`) does NOT repaint a paused
+    /// frame when `videoComposition` is merely reassigned — AVFoundation only
+    /// re-runs it when the player's time changes. So when the compositor is
+    /// engaged (a styled camera, layout blocks, cursor/click overlays …) we swap
+    /// in a fresh player item: that rebuilds the composition pipeline and renders
+    /// the current frame immediately — the same path the shape toggle already
+    /// used. The cheap layer-instruction path repaints on reassignment, so when
+    /// the compositor isn't engaged a plain composition update suffices.
+    private func rerenderPausedFrame() {
+        if needsCompositor {
             refreshPlayerItemForCanvasChange()
         }
         applyVideoComposition()
     }
 
-    /// Applies a camera-style mutation; if it engages/disengages the custom
-    /// compositor, swap the player item so AVPlayer re-evaluates the
-    /// compositor class, then reapply the composition.
-    private func applyCameraStyle(_ mutate: () -> Void) {
-        let was = cameraNeedsCompositor
-        mutate()
-        if cameraNeedsCompositor != was {
-            refreshPlayerItemForCanvasChange()
-        }
+    /// Cheap re-render for live slider drags: reassign the composition, then
+    /// (next runloop, coalesced) nudge the playhead by ~one frame so the now-
+    /// applied composition re-runs — no per-tick player-item swap, so it stays
+    /// smooth. Seeking in the SAME runloop as the reassignment renders against the
+    /// stale pipeline, hence the deferral.
+    private func liveRerenderPausedFrame() {
         applyVideoComposition()
+        guard needsCompositor, player != nil, !isPlaying else { return }
+        if reseekScheduled { return }
+        reseekScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.reseekScheduled = false
+            guard self.styleEditing, let player = self.player, !self.isPlaying else { return }
+            let cur = player.currentTime().seconds
+            self.reseekToggle.toggle()
+            let step = (self.reseekToggle ? 1.0 : -1.0) * 0.04   // ~1 frame
+            var t = cur + step
+            if t < 0 || t > self.duration { t = cur - step }
+            t = min(max(0, t), max(0, self.duration))
+            player.seek(to: CMTime(seconds: t, preferredTimescale: 600),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        }
     }
 
     // MARK: - Reframe crop
@@ -1572,7 +1724,7 @@ final class StudioModel: ObservableObject {
               let screenTrack = composition.track(withTrackID: screenTrackID) else {
             return nil
         }
-        let cameraShown = cameraTrackID != nil && cameraVisible
+        let cameraShown = self.cameraShown
         guard cameraShown || hasReframeCanvas || needsCompositor else { return nil }
         let canvas = canvasOverride ?? renderSize
         guard canvas.width > 0 else { return nil }
@@ -1685,13 +1837,24 @@ final class StudioModel: ObservableObject {
             layout.shadow = cameraShadow
             layout.shadowRadius = CGFloat(cameraShadowRadius)
             layout.cameraQuarterTurns = cameraRotation / 90
-            // Time-varying camera: hand the compositor the blocks so it can
-            // place + fade the PiP per frame, easing from the home placement.
-            if cameraHasTimeline {
+            // Hand the compositor the blocks + home so it can resolve the layout
+            // and place/fade the camera per frame. Also provided for a non-default
+            // home layout with no blocks (so the compositor suppresses the main
+            // video / full-screens the camera per the static home layout).
+            if cameraHasTimeline || cameraHomeLayout != .mainAndFloat {
                 layout.cameraTimeline = CameraTimelineSpec(blocks: cameraBlocks, home: cameraHome)
             }
         } else {
             layout.cameraTrackID = nil
+        }
+
+        // Frame-layout timeline — set whenever blocks exist or the home layout
+        // isn't the default, so the compositor suppresses the main video,
+        // full-screens the camera, or blacks out gaps per the sampled layout.
+        // Independent of the camera track (a gap / main-only needs it too).
+        if !layoutBlocks.isEmpty || cameraHomeLayout != .mainAndFloat {
+            layout.layoutTimeline = LayoutTimelineSpec(blocks: layoutBlocks,
+                                                       home: cameraHomeLayout)
         }
 
         // Cursor / click overlay payload.
@@ -1852,6 +2015,7 @@ final class StudioModel: ObservableObject {
             trimIn: trimIn,
             trimOut: trimOut >= duration - 0.001 ? nil : trimOut,
             cameraVisible: cameraVisible,
+            cameraHomeLayout: cameraHomeLayout,
             cameraCenterX: cameraCenterX,
             cameraCenterY: cameraCenterY,
             cameraScale: cameraScale,
@@ -1880,7 +2044,8 @@ final class StudioModel: ObservableObject {
             cameraBlocks: cameraBlocks,
             textBlocks: textBlocks,
             subtitles: subtitles,
-            zoomBlocks: zoomBlocks
+            zoomBlocks: zoomBlocks,
+            layoutBlocks: layoutBlocks
         )
         try? bundle.writeEdit(edit)
     }

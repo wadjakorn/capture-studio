@@ -78,7 +78,7 @@ struct CameraTimelineLane: View {
             let bodyW = x1 - x0
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill((block.visible ? accent : Color.secondary)
+                    .fill((block.layout.showsCamera ? accent : Color.secondary)
                         .opacity(selected ? 0.5 : 0.3))
                     .overlay(
                         RoundedRectangle(cornerRadius: 3)
@@ -88,10 +88,11 @@ struct CameraTimelineLane: View {
                     .contentShape(Rectangle())
                     .gesture(bodyGesture(block, width: width))
 
-                if !block.visible {
-                    Image(systemName: "eye.slash")
+                // The block's layout, as an SF Symbol, when there's room.
+                if bodyW > 16 {
+                    Image(systemName: block.layout.symbol)
                         .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(block.layout.showsCamera ? .primary : .secondary)
                         .frame(width: bodyW, height: laneHeight - 2)
                         .allowsHitTesting(false)
                 }

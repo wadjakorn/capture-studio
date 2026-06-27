@@ -200,8 +200,8 @@ import Foundation
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let blocks = [
-            CameraBlock(begin: 0, end: 1, visible: true, centerX: 0.2, centerY: 0.3, scale: 0.25),
-            CameraBlock(begin: 4.5, end: 5.2, visible: false, centerX: 0.8, centerY: 0.7, scale: 0.4),
+            CameraBlock(begin: 0, end: 1, layout: .mainAndFloat, centerX: 0.2, centerY: 0.3, scale: 0.25),
+            CameraBlock(begin: 4.5, end: 5.2, layout: .cameraStatic, centerX: 0.8, centerY: 0.7, scale: 0.4),
         ]
         let edit = EditState(cameraBlocks: blocks)
         try bundle.writeEdit(edit)
@@ -212,6 +212,28 @@ import Foundation
         let json = #"{"schemaVersion":1,"trimIn":2.0}"#
         let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
         #expect(edit.cameraBlocks.isEmpty)
+        #expect(edit.cameraHomeLayout == .mainAndFloat)
+    }
+
+    @Test func legacyVisibleBlocksMigrateToLayout() throws {
+        // A bundle written before layouts: blocks carry `visible`, no `layout`;
+        // top-level `cameraVisible:false` → the home becomes main-only.
+        let json = #"""
+        {"schemaVersion":1,"cameraVisible":false,"cameraBlocks":[
+          {"id":"00000000-0000-0000-0000-000000000001","begin":0,"end":1,"visible":true,"centerX":0.2,"centerY":0.3,"scale":0.25},
+          {"id":"00000000-0000-0000-0000-000000000002","begin":2,"end":3,"visible":false,"centerX":0.8,"centerY":0.7,"scale":0.4}
+        ]}
+        """#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.cameraHomeLayout == .mainOnly)
+        #expect(edit.cameraBlocks[0].layout == .mainAndFloat)
+        #expect(edit.cameraBlocks[1].layout == .mainOnly)
+    }
+
+    @Test func legacyVisibleTrueMigratesHomeToMainAndFloat() throws {
+        let json = #"{"schemaVersion":1,"cameraVisible":true}"#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.cameraHomeLayout == .mainAndFloat)
     }
 
     @Test func subtitlesRoundTrip() throws {
@@ -345,6 +367,31 @@ import Foundation
         let json = #"{"schemaVersion":1,"trimIn":0}"#.data(using: .utf8)!
         let decoded = try JSONDecoder().decode(EditState.self, from: json)
         #expect(decoded.zoomBlocks.isEmpty)
+    }
+
+    @Test func layoutBlocksRoundTrip() throws {
+        var state = EditState()
+        state.layoutBlocks = [
+            LayoutBlock(begin: 0, end: 2, layout: .mainOnly),
+            LayoutBlock(begin: 4, end: 6, layout: .cameraStatic),
+        ]
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.layoutBlocks == state.layoutBlocks)
+    }
+
+    @Test func layoutBlocksDefaultEmptyOnOldBundle() throws {
+        // edit.json written before layoutBlocks existed → decodes to [].
+        let json = #"{"schemaVersion":1,"trimIn":0}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.layoutBlocks.isEmpty)
+    }
+
+    @Test func layoutBlockUnknownLayoutFallsBackToMainAndFloat() throws {
+        let json = #"{"layoutBlocks":[{"begin":0,"end":2,"layout":"someFutureMode"}]}"#
+            .data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(EditState.self, from: json)
+        #expect(decoded.layoutBlocks.first?.layout == .mainAndFloat)
     }
 
     @Test func zoomBlockSensitivityRoundTrip() throws {

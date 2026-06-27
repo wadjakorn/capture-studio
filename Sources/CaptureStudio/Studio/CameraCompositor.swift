@@ -46,6 +46,9 @@ struct CompositorLayout {
     /// When set, the camera PiP rect + opacity are evaluated per frame from
     /// breakpoints instead of the static `pip`. nil = static placement.
     var cameraTimeline: CameraTimelineSpec?
+    /// When set, the frame layout (main / camera arrangement) is evaluated per
+    /// frame from the layout blocks. nil = the legacy main+float composition.
+    var layoutTimeline: LayoutTimelineSpec?
 
     /// On-screen text/caption blocks (rendered topmost). nil / empty = none.
     var textTimeline: TextTimelineSpec?
@@ -69,6 +72,14 @@ struct CompositorLayout {
 struct CameraTimelineSpec {
     var blocks: [CameraBlock]
     var home: CameraSample
+}
+
+/// Per-frame frame-layout selection: the layout blocks plus the home layout that
+/// applies when there are no blocks. Uncovered gaps (blocks present but none
+/// covering the frame) render blank (black).
+struct LayoutTimelineSpec {
+    var blocks: [LayoutBlock]
+    var home: CameraLayout
 }
 
 /// The on-screen text/caption blocks for a composition. Array order is the
@@ -291,25 +302,61 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                              canvas: layout.canvas)
             }
 
-            var output = zoomed(screenCanvasImage(screenBuf, layout: layout,
-                                                  backgroundImage: instruction.overlay.backgroundImage))
+            // Camera placement (position/scale) from the camera move timeline.
+            let camSample: CameraSample? = layout.cameraTimeline.map {
+                CameraTimeline.sample(at: now, blocks: $0.blocks, home: $0.home)
+            }
+            // Frame layout from the layout timeline: a covering block's layout,
+            // else the home layout when there are no blocks, else a blank gap
+            // (blocks exist but none covers this frame → solid black).
+            let frameLayout: CameraLayout
+            let blankGap: Bool
+            if let spec = layout.layoutTimeline {
+                if let covered = LayoutTimeline.sample(at: now, blocks: spec.blocks) {
+                    frameLayout = covered; blankGap = false
+                } else if spec.blocks.isEmpty {
+                    frameLayout = spec.home; blankGap = false
+                } else {
+                    frameLayout = .mainOnly; blankGap = true
+                }
+            } else {
+                frameLayout = .mainAndFloat; blankGap = false
+            }
 
-            if let cameraID = layout.cameraTrackID,
+            // Base: solid black for a gap; the main video for layouts that include
+            // it; else the background fill (camera-only layouts suppress the screen).
+            var output: CIImage
+            if blankGap {
+                output = CIImage(color: .black)
+                    .cropped(to: CGRect(origin: .zero, size: layout.canvas))
+            } else if frameLayout.showsMainVideo {
+                output = zoomed(screenCanvasImage(screenBuf, layout: layout,
+                                                  backgroundImage: instruction.overlay.backgroundImage))
+            } else {
+                output = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
+                                        layout: layout,
+                                        image: instruction.overlay.backgroundImage)
+            }
+
+            if !blankGap, frameLayout.showsCamera, let cameraID = layout.cameraTrackID,
                let cameraBuf = request.sourceFrame(byTrackID: cameraID),
-               let camera = cameraImage(cameraBuf, at: now, layout: layout,
-                                        instruction: instruction) {
+               let camera = cameraImage(cameraBuf, sample: camSample, frameLayout: frameLayout,
+                                        layout: layout, instruction: instruction) {
                 output = camera.composited(over: output)   // camera is NOT zoomed
             }
 
-            // Click rings sit under the cursor; both ride the screen zoom.
-            if layout.clickFeedback {
-                for ring in clickRings(at: now, layout: layout, overlay: instruction.overlay) {
-                    output = zoomed(ring).composited(over: output)
+            // Click rings + cursor belong to the screen — only when it's shown.
+            if !blankGap, frameLayout.showsMainVideo {
+                // Click rings sit under the cursor; both ride the screen zoom.
+                if layout.clickFeedback {
+                    for ring in clickRings(at: now, layout: layout, overlay: instruction.overlay) {
+                        output = zoomed(ring).composited(over: output)
+                    }
                 }
-            }
-            if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
-                                                           overlay: instruction.overlay) {
-                output = zoomed(cursor).composited(over: output)
+                if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
+                                                               overlay: instruction.overlay) {
+                    output = zoomed(cursor).composited(over: output)
+                }
             }
 
             // Subtitles sit above cursor/camera but below manual text blocks.
@@ -401,17 +448,19 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    private func cameraImage(_ buffer: CVPixelBuffer, at now: Double,
+    private func cameraImage(_ buffer: CVPixelBuffer, sample: CameraSample?,
+                             frameLayout: CameraLayout = .mainAndFloat,
                              layout: CompositorLayout,
                              instruction: StudioCompositionInstruction) -> CIImage? {
         let pip: CGRect
         let decorations: CameraDecorations
         let opacity: CGFloat
-        if let spec = layout.cameraTimeline {
-            let sample = CameraTimeline.sample(at: now, blocks: spec.blocks, home: spec.home)
+        if let sample {
             opacity = CGFloat(sample.opacity)
             guard opacity > 0.001 else { return nil }
-            pip = Self.timelinePip(canvas: layout.canvas, feedCrop: layout.feedCrop,
+            pip = frameLayout == .cameraStatic
+                ? Self.staticPip(canvas: layout.canvas, feedCrop: layout.feedCrop)
+                : Self.timelinePip(canvas: layout.canvas, feedCrop: layout.feedCrop,
                                    centerX: sample.centerX, centerY: sample.centerY,
                                    scale: sample.scale)
             decorations = self.decorations(for: pip, layout: layout)
@@ -422,6 +471,21 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         }
         return composeCamera(buffer, layout: layout, pip: pip,
                              decorations: decorations, opacity: opacity)
+    }
+
+    /// Static-layout placement: the camera contain-fit into the canvas inset by a
+    /// padding margin and centered. Small feeds are enlarged to fill the padded
+    /// area (the fit starts from the available width, so any feed scales up).
+    private static func staticPip(canvas: CGSize, feedCrop: CGRect) -> CGRect {
+        let pad = canvas.width * 0.06
+        let availW = max(0, canvas.width - 2 * pad)
+        let availH = max(0, canvas.height - 2 * pad)
+        let aspect = feedCrop.height > 0 ? feedCrop.width / feedCrop.height : 1
+        var w = availW
+        var h = aspect > 0 ? w / aspect : w
+        if h > availH { h = availH; w = h * aspect }
+        return CGRect(x: (canvas.width - w) / 2, y: (canvas.height - h) / 2,
+                      width: w, height: h)
     }
 
     private func composeCamera(_ buffer: CVPixelBuffer, layout: CompositorLayout,
