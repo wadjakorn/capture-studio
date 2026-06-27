@@ -679,7 +679,7 @@ struct StudioView: View {
                 Slider(value: Binding(get: { model.cameraZoom },
                                       set: { model.setCameraZoom($0) }),
                        in: 1.0...4.0) { editing in
-                    if !editing { model.commitCameraEdit() }
+                    if editing { model.beginStyleEdit() } else { model.endStyleEdit() }
                 }
             }
 
@@ -787,7 +787,7 @@ struct StudioView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Slider(value: value, in: range) { editing in
-                if !editing { model.commitCameraEdit() }
+                if editing { model.beginStyleEdit() } else { model.endStyleEdit() }
             }
         }
     }

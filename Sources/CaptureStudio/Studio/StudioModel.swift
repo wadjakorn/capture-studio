@@ -1498,10 +1498,28 @@ final class StudioModel: ObservableObject {
 
     private func applyCameraStyle(_ mutate: () -> Void) {
         mutate()
-        rerenderPausedFrame()
+        // While a slider is being dragged, use the cheap live path (smooth);
+        // the reliable item-swap runs once on release (`endStyleEdit`).
+        if styleEditing { liveRerenderPausedFrame() } else { rerenderPausedFrame() }
     }
 
-    /// Re-render the current frame after a style / overlay edit.
+    /// Marks the start of a continuous style-slider drag — switches the per-tick
+    /// re-render to the cheap live path so dragging stays smooth.
+    func beginStyleEdit() { styleEditing = true }
+
+    /// Ends a style-slider drag: do one reliable (item-swap) re-render so the
+    /// final frame is correct, then persist.
+    func endStyleEdit() {
+        styleEditing = false
+        rerenderPausedFrame()
+        saveEdit()
+    }
+
+    private var styleEditing = false
+    private var reseekScheduled = false
+    private var reseekToggle = false
+
+    /// Re-render the current frame after a discrete style / overlay edit.
     ///
     /// The custom video compositor (`StudioCompositor`) does NOT repaint a paused
     /// frame when `videoComposition` is merely reassigned — AVFoundation only
@@ -1516,6 +1534,31 @@ final class StudioModel: ObservableObject {
             refreshPlayerItemForCanvasChange()
         }
         applyVideoComposition()
+    }
+
+    /// Cheap re-render for live slider drags: reassign the composition, then
+    /// (next runloop, coalesced) nudge the playhead by ~one frame so the now-
+    /// applied composition re-runs — no per-tick player-item swap, so it stays
+    /// smooth. Seeking in the SAME runloop as the reassignment renders against the
+    /// stale pipeline, hence the deferral.
+    private func liveRerenderPausedFrame() {
+        applyVideoComposition()
+        guard needsCompositor, player != nil, !isPlaying else { return }
+        if reseekScheduled { return }
+        reseekScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.reseekScheduled = false
+            guard self.styleEditing, let player = self.player, !self.isPlaying else { return }
+            let cur = player.currentTime().seconds
+            self.reseekToggle.toggle()
+            let step = (self.reseekToggle ? 1.0 : -1.0) * 0.04   // ~1 frame
+            var t = cur + step
+            if t < 0 || t > self.duration { t = cur - step }
+            t = min(max(0, t), max(0, self.duration))
+            player.seek(to: CMTime(seconds: t, preferredTimescale: 600),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        }
     }
 
     // MARK: - Reframe crop
