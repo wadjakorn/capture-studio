@@ -13,6 +13,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { RecordingSession.shared?.tearDownForQuit() }
     }
+
+    /// Finder double-click (and `open file.capturestudio`) routes the document
+    /// here. Info.plist declares the `.capturestudio` doc type so AppKit
+    /// dispatches the URL; without this handler it would be silently dropped —
+    /// the app would launch but no Studio window appears. Fires for both cold
+    /// launch (around didFinishLaunching) and while already running.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            for url in urls where url.pathExtension.lowercased() == ProjectBundle.pathExtension {
+                StudioLauncher.open(bundleURL: url)
+            }
+        }
+    }
 }
 
 @main
