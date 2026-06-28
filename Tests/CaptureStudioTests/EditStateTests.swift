@@ -14,6 +14,30 @@ import Foundation
         #expect(bundle.loadEdit() == edit)
     }
 
+    @Test func committedTrimRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let edit = EditState(committedTrimStart: 2.5, committedTrimEnd: 9.0)
+        try bundle.writeEdit(edit)
+        let loaded = bundle.loadEdit()
+        #expect(loaded.committedTrimStart == 2.5)
+        #expect(loaded.committedTrimEnd == 9.0)
+    }
+
+    @Test func missingCommittedTrimDefaults() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let edit = bundle.loadEdit()
+        #expect(edit.committedTrimStart == 0)
+        #expect(edit.committedTrimEnd == nil)
+    }
+
     @Test func missingEditFileYieldsDefaults() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
