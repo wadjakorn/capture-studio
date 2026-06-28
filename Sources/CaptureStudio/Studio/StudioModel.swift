@@ -420,6 +420,10 @@ final class StudioModel: ObservableObject {
             committedTrimStart = max(0, min(edit.committedTrimStart, fullDuration))
             let committedEnd = min(edit.committedTrimEnd ?? fullDuration, fullDuration)
             committedTrimEnd = edit.committedTrimEnd
+            // Remove the tail first, then the head: the tail range sits at higher
+            // timestamps, so cutting it leaves the head range's coordinates (at
+            // t = 0) untouched. Cutting the head first would shift everything left
+            // and invalidate the still-absolute tail coordinates.
             if committedEnd > committedTrimStart,
                committedTrimStart > 0.001 || committedEnd < fullDuration - 0.001 {
                 if committedEnd < fullDuration - 0.001 {
