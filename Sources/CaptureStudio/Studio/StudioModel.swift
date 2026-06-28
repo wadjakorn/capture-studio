@@ -419,7 +419,9 @@ final class StudioModel: ObservableObject {
             let fullDuration = built.composition.duration.seconds
             committedTrimStart = max(0, min(edit.committedTrimStart, fullDuration))
             let committedEnd = min(edit.committedTrimEnd ?? fullDuration, fullDuration)
-            committedTrimEnd = edit.committedTrimEnd
+            // Clamp to the master length so the in-memory window can't exceed the
+            // composition we actually cut; keep nil ("to master end") as nil.
+            committedTrimEnd = edit.committedTrimEnd.map { min($0, fullDuration) }
             // Remove the tail first, then the head: the tail range sits at higher
             // timestamps, so cutting it leaves the head range's coordinates (at
             // t = 0) untouched. Cutting the head first would shift everything left
