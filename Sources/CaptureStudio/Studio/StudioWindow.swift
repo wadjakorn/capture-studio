@@ -230,6 +230,9 @@ struct StudioView: View {
         Button("Set Out") { model.setTrimOut(model.currentTime) }
         Button { model.resetTrim() } label: { Image(systemName: "arrow.uturn.backward") }
             .help("Reset trim")
+        Button { model.applyTrim() } label: { Image(systemName: "scissors") }
+            .disabled(!model.canApplyTrim)
+            .help("Apply trim — cut everything outside In/Out off the timeline")
         Text("\(timecode(model.trimIn)) – \(timecode(model.trimOut))")
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)

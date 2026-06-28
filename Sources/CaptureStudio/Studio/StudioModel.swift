@@ -32,6 +32,15 @@ final class StudioModel: ObservableObject {
     @Published var panVideoMode = false
     @Published private(set) var trimIn: Double = 0
     @Published private(set) var trimOut: Double = 0
+    /// Committed trim window in absolute master seconds (the masters are cut to
+    /// `[committedTrimStart, committedTrimEnd)` to form this timeline). `nil` end
+    /// = master end. Persisted; drives composition re-derivation on load and is
+    /// narrowed by `applyTrim()`. See `TrimTimeline`.
+    private(set) var committedTrimStart: Double = 0
+    private(set) var committedTrimEnd: Double? = nil
+    /// True once any in/out markers carve a sub-range of the current timeline —
+    /// gates the "Apply Trim" affordance.
+    var canApplyTrim: Bool { trimIn > 0.001 || trimOut < duration - 0.001 }
     @Published private(set) var exportState: ExportState = .idle
 
     // Camera PiP — center normalized 0–1 in render space, scale = width
@@ -401,6 +410,29 @@ final class StudioModel: ObservableObject {
             }
             let meta = try bundle.loadMeta()
             let built = try await Self.makeComposition(bundle: bundle, meta: meta)
+            let edit = bundle.loadEdit()
+            // Re-derive the trimmed timeline: cut the masters down to the
+            // committed window before anything observes the composition. Blocks
+            // and cursor samples are then expressed relative to this window's
+            // t = 0 (committedTrimStart). No re-encode — removeTimeRange edits
+            // the composition's edit lists.
+            let fullDuration = built.composition.duration.seconds
+            committedTrimStart = max(0, min(edit.committedTrimStart, fullDuration))
+            let committedEnd = min(edit.committedTrimEnd ?? fullDuration, fullDuration)
+            committedTrimEnd = edit.committedTrimEnd
+            if committedEnd > committedTrimStart,
+               committedTrimStart > 0.001 || committedEnd < fullDuration - 0.001 {
+                if committedEnd < fullDuration - 0.001 {
+                    built.composition.removeTimeRange(CMTimeRange(
+                        start: CMTime(seconds: committedEnd, preferredTimescale: 600),
+                        end: CMTime(seconds: fullDuration, preferredTimescale: 600)))
+                }
+                if committedTrimStart > 0.001 {
+                    built.composition.removeTimeRange(CMTimeRange(
+                        start: .zero,
+                        end: CMTime(seconds: committedTrimStart, preferredTimescale: 600)))
+                }
+            }
             let item = AVPlayerItem(asset: built.composition)
             let player = AVPlayer(playerItem: item)
 
@@ -416,7 +448,6 @@ final class StudioModel: ObservableObject {
             self.player = player
             self.duration = built.composition.duration.seconds
 
-            let edit = bundle.loadEdit()
             trimIn = min(max(0, edit.trimIn), duration)
             trimOut = min(edit.trimOut ?? duration, duration)
             if trimOut <= trimIn { trimIn = 0; trimOut = duration }
@@ -594,8 +625,20 @@ final class StudioModel: ObservableObject {
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
-        cursorSamples = s.cursor
-        clickSamples = s.clicks
+        // events.jsonl is in absolute master time; rebase onto the committed
+        // trim window (t = 0 at committedTrimStart) and drop samples outside it.
+        let head = committedTrimStart, dur = duration
+        cursorSamples = s.cursor.compactMap { sample in
+            let t = sample.t - head
+            guard t >= -0.001, t <= dur + 0.001 else { return nil }
+            var c = sample; c.t = t; return c
+        }
+        clickSamples = s.clicks.compactMap { sample in
+            let t = sample.t - head
+            // Keep clicks whose expanding ring still overlaps the window.
+            guard t >= -CursorOverlay.ringDuration, t <= dur + 0.001 else { return nil }
+            var c = sample; c.t = t; return c
+        }
 
         var glyphs: [String: CursorGlyph] = [:]
         for name in Set(cursorSamples.map(\.cursor)) {
@@ -2010,10 +2053,82 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    /// Commit the current in/out markers: cut the head `[0, trimIn)` and tail
+    /// `[trimOut, duration)` off the timeline, shrink the project duration, and
+    /// rebase every lane + cursor overlay so the clip starts at the in-point.
+    /// Destructive — blocks outside the window are dropped, straddlers clamped.
+    /// The masters are untouched; the committed window is persisted so the cut
+    /// survives reload. Reversible only before commit (Reset restores markers).
+    func applyTrim() {
+        guard let composition, duration > 0, canApplyTrim else { return }
+        let inP = min(max(0, trimIn), duration)
+        let outP = min(max(inP + 0.1, trimOut), duration)
+        let oldDuration = duration
+        let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
+
+        // Cut the composition (tail first so the head cut's coordinates hold).
+        if outP < oldDuration - 0.001 {
+            composition.removeTimeRange(CMTimeRange(start: ts(outP), end: ts(oldDuration)))
+        }
+        if inP > 0.001 {
+            composition.removeTimeRange(CMTimeRange(start: .zero, end: ts(inP)))
+        }
+
+        // Rebase the edit model through the pure transform, then read it back.
+        let trimmed = TrimTimeline.apply(currentEdit(), in: inP, out: outP, duration: oldDuration)
+        committedTrimStart = trimmed.committedTrimStart
+        committedTrimEnd = trimmed.committedTrimEnd
+        cameraBlocks = trimmed.cameraBlocks
+        layoutBlocks = trimmed.layoutBlocks
+        zoomBlocks = trimmed.zoomBlocks
+        textBlocks = trimmed.textBlocks
+        subtitles = trimmed.subtitles
+
+        // Rebase cursor / click overlays onto the new t = 0.
+        let newDuration = composition.duration.seconds
+        cursorSamples = cursorSamples.compactMap { sample in
+            let t = sample.t - inP
+            guard t >= -0.001, t <= newDuration + 0.001 else { return nil }
+            var c = sample; c.t = t; return c
+        }
+        clickSamples = clickSamples.compactMap { sample in
+            let t = sample.t - inP
+            guard t >= -CursorOverlay.ringDuration, t <= newDuration + 0.001 else { return nil }
+            var c = sample; c.t = t; return c
+        }
+
+        duration = newDuration
+        trimIn = 0
+        trimOut = newDuration
+        // Drop selections that pointed at now-removed blocks.
+        if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
+        if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
+        if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
+        if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
+
+        // Swap in a fresh player item for the mutated composition, then rebuild
+        // overlays / audio against the new duration.
+        let newItem = AVPlayerItem(asset: composition)
+        playerItem = newItem
+        player?.replaceCurrentItem(with: newItem)
+        applyVideoComposition()
+        applyAudioMix()
+        seek(to: 0)
+        saveEdit()
+        Log.studio.info("applyTrim: window [\(self.committedTrimStart, format: .fixed(precision: 2)), \(self.committedTrimEnd ?? -1, format: .fixed(precision: 2))] newDuration=\(newDuration, format: .fixed(precision: 2))s")
+    }
+
     private func saveEdit() {
-        let edit = EditState(
+        try? bundle.writeEdit(currentEdit())
+    }
+
+    /// Snapshot the live model into an `EditState` for persistence / transforms.
+    private func currentEdit() -> EditState {
+        EditState(
             trimIn: trimIn,
             trimOut: trimOut >= duration - 0.001 ? nil : trimOut,
+            committedTrimStart: committedTrimStart,
+            committedTrimEnd: committedTrimEnd,
             cameraVisible: cameraVisible,
             cameraHomeLayout: cameraHomeLayout,
             cameraCenterX: cameraCenterX,
@@ -2047,7 +2162,6 @@ final class StudioModel: ObservableObject {
             zoomBlocks: zoomBlocks,
             layoutBlocks: layoutBlocks
         )
-        try? bundle.writeEdit(edit)
     }
 
     // MARK: - Export

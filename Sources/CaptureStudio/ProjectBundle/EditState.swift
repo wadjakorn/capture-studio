@@ -533,10 +533,21 @@ struct SubtitleTrack: Codable, Equatable {
 /// All edits are metadata — master files are never mutated.
 struct EditState: Codable, Equatable {
     var schemaVersion: Int = 1
-    /// Trim in-point, seconds on the screen-track timeline.
+    /// Trim in-point, seconds on the (already-committed) studio timeline. These
+    /// are the live, reversible export markers — distinct from the committed cut
+    /// below.
     var trimIn: Double = 0
-    /// Trim out-point; nil means end of recording.
+    /// Trim out-point; nil means end of the timeline.
     var trimOut: Double?
+    /// Committed trim window, absolute seconds in the master source. The studio
+    /// timeline is the masters cut to `[committedTrimStart, committedTrimEnd)`:
+    /// the loader re-derives the trimmed composition from these and every block
+    /// below is stored relative to `committedTrimStart` (t = 0). `committedTrimEnd
+    /// == nil` means "to the master end". Default 0 / nil = no committed trim, so
+    /// legacy bundles (blocks in absolute source time) load unchanged. Applying a
+    /// trim (TrimTimeline.apply) narrows this window and rebases the blocks.
+    var committedTrimStart: Double = 0
+    var committedTrimEnd: Double? = nil
     /// Camera PiP overlay. Position is the PiP center, normalized 0–1 in
     /// render space (top-left origin); scale is PiP width as a fraction of
     /// the screen width.
@@ -612,6 +623,7 @@ struct EditState: Codable, Equatable {
     var layoutBlocks: [LayoutBlock] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
+         committedTrimStart: Double = 0, committedTrimEnd: Double? = nil,
          cameraVisible: Bool = true,
          cameraHomeLayout: CameraLayout = .mainAndFloat,
          cameraCenterX: Double = 0.85,
@@ -634,6 +646,8 @@ struct EditState: Codable, Equatable {
          zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
+        self.committedTrimStart = committedTrimStart
+        self.committedTrimEnd = committedTrimEnd
         self.cameraVisible = cameraVisible
         self.cameraHomeLayout = cameraHomeLayout
         self.cameraCenterX = cameraCenterX
@@ -675,6 +689,8 @@ struct EditState: Codable, Equatable {
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         trimIn = try c.decodeIfPresent(Double.self, forKey: .trimIn) ?? 0
         trimOut = try c.decodeIfPresent(Double.self, forKey: .trimOut)
+        committedTrimStart = try c.decodeIfPresent(Double.self, forKey: .committedTrimStart) ?? 0
+        committedTrimEnd = try c.decodeIfPresent(Double.self, forKey: .committedTrimEnd)
         cameraVisible = try c.decodeIfPresent(Bool.self, forKey: .cameraVisible) ?? true
         if let home = try c.decodeIfPresent(CameraLayout.self, forKey: .cameraHomeLayout) {
             cameraHomeLayout = home
