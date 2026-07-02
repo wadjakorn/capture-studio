@@ -56,6 +56,14 @@ struct CompositorLayout {
     /// the composited preview so the moving SwiftUI overlay isn't doubled by a
     /// stale baked copy. nil = render all active.
     var suppressedTextBlockID: UUID?
+    /// Shape overlays (rectangle / ellipse / blur), rendered below subtitles and
+    /// text but above the screen / camera / cursor so a blur censors those.
+    /// nil / empty = none.
+    var shapeTimeline: ShapeTimelineSpec?
+    /// A shape block being dragged / resized live on the canvas, suppressed in
+    /// the composited preview so the moving SwiftUI overlay isn't doubled by a
+    /// stale baked copy. nil = render all active.
+    var suppressedShapeBlockID: UUID?
     /// Subtitle cues (rendered below text blocks). nil / empty = none.
     var subtitles: SubtitleTimelineSpec?
 
@@ -93,6 +101,13 @@ struct LayoutTimelineSpec {
 /// frame time.
 struct TextTimelineSpec {
     var blocks: [TextBlock]
+}
+
+/// The on-screen shape overlays for a composition. Array order is the z-order
+/// (later draws on top); the compositor renders all blocks active at the frame
+/// time, below subtitles / text.
+struct ShapeTimelineSpec {
+    var blocks: [ShapeBlock]
 }
 
 /// The subtitle cues + shared style for a composition. Cues are read-only; the
@@ -382,6 +397,16 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                                overlay: instruction.overlay) {
                     output = framed(zoomed(cursor)).composited(over: output)
+                }
+            }
+
+            // Shape overlays sit above the screen/camera/cursor (so a blur
+            // censors them) but below subtitles and text. All blocks active at
+            // `now`, in array (z) order, except the one being edited live.
+            if let spec = layout.shapeTimeline {
+                for block in ShapeTimeline.active(at: now, blocks: spec.blocks)
+                where block.id != layout.suppressedShapeBlockID {
+                    output = Self.applyShape(block, to: output, canvas: layout.canvas)
                 }
             }
 
@@ -757,6 +782,108 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         let tx = topLeftX
         let ty = canvas.height - topLeftY - h
         return base.transformed(by: CGAffineTransform(translationX: tx.rounded(), y: ty.rounded()))
+    }
+
+    // MARK: - Shape overlays
+
+    /// Composite one shape block over `output`. Rectangle / ellipse draw a filled
+    /// and/or stroked shape; blur replaces its rectangular region with a blurred
+    /// or pixellated copy of what's underneath (censoring the screen / camera /
+    /// cursor). Geometry is normalized against the canvas so preview and export
+    /// match. Returns `output` unchanged if the shape is degenerate.
+    private static func applyShape(_ block: ShapeBlock, to output: CIImage,
+                                   canvas: CGSize) -> CIImage {
+        let w = CGFloat(block.width) * canvas.width
+        let h = CGFloat(block.height) * canvas.height
+        guard w > 1, h > 1 else { return output }
+        let topLeftX = CGFloat(block.centerX) * canvas.width - w / 2
+        let topLeftY = CGFloat(block.centerY) * canvas.height - h / 2
+        let rectCI = flip(CGRect(x: topLeftX, y: topLeftY, width: w, height: h),
+                          in: canvas.height)
+
+        switch block.kind {
+        case .blur:
+            let region = output.cropped(to: rectCI)
+            guard region.extent.width > 0, region.extent.height > 0 else { return output }
+            let strength = max(0, CGFloat(block.blurStrength)) * canvas.height
+            let processed: CIImage
+            switch block.blurStyle {
+            case .gaussian:
+                processed = region.clampedToExtent()
+                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, strength)])
+                    .cropped(to: rectCI)
+            case .pixellate:
+                processed = region.clampedToExtent()
+                    .applyingFilter("CIPixellate", parameters: [
+                        kCIInputScaleKey: max(2, strength),
+                        kCIInputCenterKey: CIVector(x: rectCI.midX, y: rectCI.midY),
+                    ])
+                    .cropped(to: rectCI)
+            }
+            return processed.composited(over: output)
+        case .rectangle, .ellipse:
+            guard let img = makeShapeImage(block, sizePx: rectCI.size, canvasH: canvas.height)
+            else { return output }
+            return img.transformed(by: CGAffineTransform(translationX: rectCI.minX.rounded(),
+                                                         y: rectCI.minY.rounded()))
+                .composited(over: output)
+        }
+    }
+
+    /// Rasterize a rectangle / ellipse (optional fill + optional stroke) at the
+    /// origin, `sizePx` extent. `strokeWidth` / `cornerRadius` resolve to pixels
+    /// against the canvas height / shape short side (matching `applyShape`).
+    private static func makeShapeImage(_ block: ShapeBlock, sizePx: CGSize,
+                                       canvasH: CGFloat) -> CIImage? {
+        let w = sizePx.width, h = sizePx.height
+        guard w > 1, h > 1, let ctx = makeShapeContext(size: sizePx) else { return nil }
+        let strokeWidthPx = CGFloat(block.strokeWidth) * canvasH
+        let cornerPx = min(max(0, CGFloat(block.cornerRadius)) * min(w, h), min(w, h) / 2)
+
+        func addPath(_ rect: CGRect, radius: CGFloat) {
+            if block.kind == .ellipse {
+                ctx.addPath(CGPath(ellipseIn: rect, transform: nil))
+            } else {
+                ctx.addPath(CGPath(roundedRect: rect, cornerWidth: radius,
+                                   cornerHeight: radius, transform: nil))
+            }
+        }
+
+        let full = CGRect(x: 0, y: 0, width: w, height: h)
+        let fillAlpha = CGFloat(block.fillOpacity)
+        if fillAlpha > 0.001, let fill = parseHex(block.fillHex, alpha: fillAlpha) {
+            ctx.setFillColor(fill)
+            addPath(full, radius: cornerPx)
+            ctx.fillPath()
+        }
+        if strokeWidthPx > 0.5, let stroke = parseHex(block.strokeHex, alpha: 1) {
+            let inset = full.insetBy(dx: strokeWidthPx / 2, dy: strokeWidthPx / 2)
+            let r = max(0, cornerPx - strokeWidthPx / 2)
+            ctx.setStrokeColor(stroke)
+            ctx.setLineWidth(strokeWidthPx)
+            addPath(inset, radius: r)
+            ctx.strokePath()
+        }
+        return ctx.makeImage().map { CIImage(cgImage: $0) }
+    }
+
+    private static func makeShapeContext(size: CGSize) -> CGContext? {
+        CGContext(data: nil,
+                  width: Int(size.width.rounded()),
+                  height: Int(size.height.rounded()),
+                  bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+
+    /// Parse "#RRGGBB" (or "RRGGBB") into a CGColor at `alpha`; nil on malformed.
+    private static func parseHex(_ hex: String, alpha: CGFloat) -> CGColor? {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        return CGColor(red: CGFloat((v >> 16) & 0xFF) / 255,
+                       green: CGFloat((v >> 8) & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: alpha)
     }
 
     /// Top-left rect → Core Image bottom-left rect, given the container height.

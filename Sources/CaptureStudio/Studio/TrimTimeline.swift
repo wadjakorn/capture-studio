@@ -21,6 +21,7 @@ enum TrimTimeline {
         e.layoutBlocks = edit.layoutBlocks.compactMap { rebase($0, lo: lo, hi: hi) }
         e.zoomBlocks   = edit.zoomBlocks.compactMap   { rebase($0, lo: lo, hi: hi) }
         e.textBlocks   = edit.textBlocks.compactMap   { rebase($0, lo: lo, hi: hi) }
+        e.shapeBlocks  = edit.shapeBlocks.compactMap  { rebase($0, lo: lo, hi: hi) }
         if var track = edit.subtitles {
             // Cues are kept verbatim and clamped at consumption; shifting the
             // track offset re-aligns them to the new t = 0.
@@ -61,6 +62,10 @@ enum TrimTimeline {
         var n = blk; n.begin = b; n.end = e; return n
     }
     private static func rebase(_ blk: TextBlock, lo: Double, hi: Double) -> TextBlock? {
+        guard let (b, e) = span(begin: blk.begin, end: blk.end, lo: lo, hi: hi) else { return nil }
+        var n = blk; n.begin = b; n.end = e; return n
+    }
+    private static func rebase(_ blk: ShapeBlock, lo: Double, hi: Double) -> ShapeBlock? {
         guard let (b, e) = span(begin: blk.begin, end: blk.end, lo: lo, hi: hi) else { return nil }
         var n = blk; n.begin = b; n.end = e; return n
     }

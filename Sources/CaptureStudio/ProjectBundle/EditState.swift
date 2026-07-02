@@ -394,6 +394,124 @@ struct TextBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// Kind of on-canvas shape overlay. `rectangle` / `ellipse` are drawn outlines
+/// or fills; `blur` censors the underlying content in its rect. Unknown raw
+/// strings (future versions) decode as `rectangle`.
+enum ShapeKind: String, Codable, CaseIterable, Equatable {
+    case rectangle, ellipse, blur
+
+    var displayName: String {
+        switch self {
+        case .rectangle: return "Rectangle"
+        case .ellipse: return "Ellipse"
+        case .blur: return "Blur"
+        }
+    }
+}
+
+/// How a `blur` shape obscures its region. `gaussian` softens; `pixellate`
+/// mosaics. Unknown raw strings (future versions) decode as `gaussian`.
+enum ShapeBlurStyle: String, Codable, CaseIterable, Equatable {
+    case gaussian, pixellate
+
+    var displayName: String {
+        switch self {
+        case .gaussian: return "Gaussian"
+        case .pixellate: return "Pixellate"
+        }
+    }
+}
+
+/// One on-screen shape overlay with a `[begin, end)` span. Like `TextBlock` (and
+/// unlike `CameraBlock`), shapes MAY overlap in time — many can be active at
+/// once — and there is no single-instance constraint. Z-order is the array order
+/// in `EditState.shapeBlocks` (a later element draws on top). Geometry is
+/// normalized 0–1 in render space (top-left origin), matching the camera / text
+/// placement units: `centerX`/`centerY` is the shape center; `width`/`height`
+/// are fractions of the canvas width / height, so a shape looks identical at
+/// preview size and full export resolution. `strokeWidth` is a fraction of the
+/// canvas height; `cornerRadius` a fraction of the shape's shorter side (only
+/// meaningful for `rectangle`); `blurStrength` a fraction of the canvas height
+/// (only meaningful for `blur`). `begin == end` is inert (never rendered).
+struct ShapeBlock: Codable, Equatable, Identifiable {
+    var id: UUID
+    var begin: Double
+    var end: Double
+    var kind: ShapeKind
+    var centerX: Double
+    var centerY: Double
+    var width: Double
+    var height: Double
+    // Style (rectangle / ellipse).
+    var fillHex: String
+    var fillOpacity: Double
+    var strokeHex: String
+    var strokeWidth: Double
+    /// Corner radius as a fraction of the shape's shorter side (0…0.5).
+    /// Rectangle only; ignored for ellipse / blur.
+    var cornerRadius: Double
+    // Style (blur).
+    var blurStyle: ShapeBlurStyle
+    /// Blur/pixellate strength as a fraction of the canvas height. Blur only.
+    var blurStrength: Double
+
+    init(id: UUID = UUID(), begin: Double, end: Double,
+         kind: ShapeKind = .rectangle,
+         centerX: Double = 0.5, centerY: Double = 0.5,
+         width: Double = 0.3, height: Double = 0.2,
+         fillHex: String = "#000000", fillOpacity: Double = 0,
+         strokeHex: String = "#FF3B30", strokeWidth: Double = 0.008,
+         cornerRadius: Double = 0,
+         blurStyle: ShapeBlurStyle = .gaussian, blurStrength: Double = 0.04) {
+        self.id = id
+        self.begin = begin
+        self.end = end
+        self.kind = kind
+        self.centerX = centerX
+        self.centerY = centerY
+        self.width = width
+        self.height = height
+        self.fillHex = fillHex
+        self.fillOpacity = fillOpacity
+        self.strokeHex = strokeHex
+        self.strokeWidth = strokeWidth
+        self.cornerRadius = cornerRadius
+        self.blurStyle = blurStyle
+        self.blurStrength = blurStrength
+    }
+
+    /// A 3 s block at `atTime`, clamped to the clip, centered.
+    static func makeDefault(at atTime: Double, duration: Double,
+                            kind: ShapeKind = .rectangle) -> ShapeBlock {
+        let begin = min(max(0, atTime), max(0, duration))
+        let end = min(begin + 3, max(begin, duration))
+        return ShapeBlock(begin: begin, end: end, kind: kind)
+    }
+
+    // Custom decode so bundles missing newer fields (or carrying an unknown
+    // future enum value) still load with sensible defaults, mirroring TextBlock.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        begin = try c.decodeIfPresent(Double.self, forKey: .begin) ?? 0
+        end = try c.decodeIfPresent(Double.self, forKey: .end) ?? 0
+        let kindRaw = try c.decodeIfPresent(String.self, forKey: .kind)
+        kind = kindRaw.flatMap(ShapeKind.init(rawValue:)) ?? .rectangle
+        centerX = try c.decodeIfPresent(Double.self, forKey: .centerX) ?? 0.5
+        centerY = try c.decodeIfPresent(Double.self, forKey: .centerY) ?? 0.5
+        width = try c.decodeIfPresent(Double.self, forKey: .width) ?? 0.3
+        height = try c.decodeIfPresent(Double.self, forKey: .height) ?? 0.2
+        fillHex = try c.decodeIfPresent(String.self, forKey: .fillHex) ?? "#000000"
+        fillOpacity = try c.decodeIfPresent(Double.self, forKey: .fillOpacity) ?? 0
+        strokeHex = try c.decodeIfPresent(String.self, forKey: .strokeHex) ?? "#FF3B30"
+        strokeWidth = try c.decodeIfPresent(Double.self, forKey: .strokeWidth) ?? 0.008
+        cornerRadius = try c.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 0
+        let blurRaw = try c.decodeIfPresent(String.self, forKey: .blurStyle)
+        blurStyle = blurRaw.flatMap(ShapeBlurStyle.init(rawValue:)) ?? .gaussian
+        blurStrength = try c.decodeIfPresent(Double.self, forKey: .blurStrength) ?? 0.04
+    }
+}
+
 /// One subtitle cue parsed from an `.srt`: a `[begin, end)` span and read-only
 /// text. Unlike `TextBlock`, a cue carries no style — the whole subtitle track
 /// shares one `SubtitleStyle`.
@@ -611,6 +729,10 @@ struct EditState: Codable, Equatable {
     /// time (unlike `cameraBlocks`); render / z-order is the array order here
     /// (later element = on top), so this is never re-sorted on store.
     var textBlocks: [TextBlock] = []
+    /// On-screen shape overlays (rectangle / ellipse / blur). Empty = no shapes.
+    /// Blocks MAY overlap in time (like `textBlocks`); render / z-order is the
+    /// array order here (later element = on top), so this is never re-sorted.
+    var shapeBlocks: [ShapeBlock] = []
     /// Imported subtitle track (nil = none). Cues are read-only; `style` is the
     /// shared look. The `.srt` itself lives in the bundle (see ProjectBundle).
     var subtitles: SubtitleTrack? = nil
@@ -652,6 +774,7 @@ struct EditState: Codable, Equatable {
          canvasBackgroundBlur: Double = 0.03,
          canvasBackgroundImage: String? = nil,
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
+         shapeBlocks: [ShapeBlock] = [],
          subtitles: SubtitleTrack? = nil,
          zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = [],
          frameEnabled: Bool = false, frameCenterX: Double = 0.5,
@@ -690,6 +813,7 @@ struct EditState: Codable, Equatable {
         self.canvasBackgroundImage = canvasBackgroundImage
         self.cameraBlocks = cameraBlocks
         self.textBlocks = textBlocks
+        self.shapeBlocks = shapeBlocks
         self.subtitles = subtitles
         self.zoomBlocks = zoomBlocks
         self.layoutBlocks = layoutBlocks
@@ -747,6 +871,7 @@ struct EditState: Codable, Equatable {
         canvasBackgroundImage = try c.decodeIfPresent(String.self, forKey: .canvasBackgroundImage)
         cameraBlocks = try c.decodeIfPresent([CameraBlock].self, forKey: .cameraBlocks) ?? []
         textBlocks = try c.decodeIfPresent([TextBlock].self, forKey: .textBlocks) ?? []
+        shapeBlocks = try c.decodeIfPresent([ShapeBlock].self, forKey: .shapeBlocks) ?? []
         subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
         zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
         layoutBlocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .layoutBlocks) ?? []
