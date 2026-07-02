@@ -99,6 +99,10 @@ struct StudioView: View {
                     if model.subtitleSelected {
                         SubtitleCanvasOverlay(model: model)
                     }
+                    // Framing window transform handles (studio-only, edit mode).
+                    if model.frameEnabled && model.frameEditMode {
+                        FrameCanvasOverlay(model: model)
+                    }
                     // Topmost: reels safe-area guide (studio-only).
                     ReelsSafeAreaOverlay(model: model)
                     // Pan-video mode: a top grab layer that wins all drags in the
@@ -296,6 +300,28 @@ struct StudioView: View {
         .toggleStyle(.button)
         .disabled(model.cropAspect != .nineBySixteenTemplate)
         .help("Toggle reels safe-area guide")
+
+        // Framing window: mask the main video to a static rectangle.
+        Toggle(isOn: Binding(get: { model.frameEnabled },
+                             set: { model.setFrameEnabled($0) })) {
+            Image(systemName: "inset.filled.rectangle")
+        }
+        .toggleStyle(.button)
+        .help("Framing window — mask the main video to a static rectangle it pans behind")
+
+        if model.frameEnabled {
+            Toggle(isOn: Binding(get: { model.frameEditMode },
+                                 set: { model.frameEditMode = $0 })) {
+                Image(systemName: "slider.horizontal.below.rectangle")
+            }
+            .toggleStyle(.button)
+            .help("Show framing window transform handles")
+
+            Button { model.resetFrame() } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .help("Reset framing window to full center")
+        }
 
         if model.cropPannable {
             HStack(spacing: 4) {

@@ -621,6 +621,16 @@ struct EditState: Codable, Equatable {
     /// = each block sets the frame layout over its span; uncovered gaps render
     /// blank (black). Non-overlapping (a single layout at a time).
     var layoutBlocks: [LayoutBlock] = []
+    /// Framing window: a single static rectangle (normalized 0–1 canvas coords,
+    /// center + size, top-left origin) that masks the main screen video for the
+    /// whole timeline. The video pans behind it via auto zoom; texts, subtitles
+    /// and camera are never clipped. Off by default; the background fill shows
+    /// outside the window.
+    var frameEnabled: Bool = false
+    var frameCenterX: Double = 0.5
+    var frameCenterY: Double = 0.5
+    var frameWidth: Double = 0.6
+    var frameHeight: Double = 0.6
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          committedTrimStart: Double = 0, committedTrimEnd: Double? = nil,
@@ -643,7 +653,10 @@ struct EditState: Codable, Equatable {
          canvasBackgroundImage: String? = nil,
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
          subtitles: SubtitleTrack? = nil,
-         zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = []) {
+         zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = [],
+         frameEnabled: Bool = false, frameCenterX: Double = 0.5,
+         frameCenterY: Double = 0.5, frameWidth: Double = 0.6,
+         frameHeight: Double = 0.6) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.committedTrimStart = committedTrimStart
@@ -680,6 +693,11 @@ struct EditState: Codable, Equatable {
         self.subtitles = subtitles
         self.zoomBlocks = zoomBlocks
         self.layoutBlocks = layoutBlocks
+        self.frameEnabled = frameEnabled
+        self.frameCenterX = frameCenterX
+        self.frameCenterY = frameCenterY
+        self.frameWidth = frameWidth
+        self.frameHeight = frameHeight
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -732,6 +750,11 @@ struct EditState: Codable, Equatable {
         subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
         zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
         layoutBlocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .layoutBlocks) ?? []
+        frameEnabled = try c.decodeIfPresent(Bool.self, forKey: .frameEnabled) ?? false
+        frameCenterX = try c.decodeIfPresent(Double.self, forKey: .frameCenterX) ?? 0.5
+        frameCenterY = try c.decodeIfPresent(Double.self, forKey: .frameCenterY) ?? 0.5
+        frameWidth = try c.decodeIfPresent(Double.self, forKey: .frameWidth) ?? 0.6
+        frameHeight = try c.decodeIfPresent(Double.self, forKey: .frameHeight) ?? 0.6
     }
 }
 

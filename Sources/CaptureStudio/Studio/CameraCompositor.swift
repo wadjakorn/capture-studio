@@ -59,6 +59,12 @@ struct CompositorLayout {
     /// Subtitle cues (rendered below text blocks). nil / empty = none.
     var subtitles: SubtitleTimelineSpec?
 
+    /// Framing window in canvas pixels (top-left). When set, the main-video
+    /// group (screen + click rings + cursor) is masked to this rect and the
+    /// background fill shows outside it; camera / subtitles / text are never
+    /// clipped. nil = no framing.
+    var screenFrame: CGRect?
+
     // Cursor / click overlays (composited from events.jsonl).
     var showCursor: Bool = false
     var clickFeedback: Bool = false
@@ -301,6 +307,16 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
                              canvas: layout.canvas)
             }
+            // Framing window: every main-video layer (screen, click rings,
+            // cursor) is cropped to this rect after the zoom, so the video pans
+            // behind a static window. CI bottom-left space.
+            let frameCI: CGRect? = layout.screenFrame.map {
+                Self.flip($0, in: layout.canvas.height)
+            }
+            func framed(_ img: CIImage) -> CIImage {
+                guard let frameCI else { return img }
+                return img.cropped(to: frameCI)
+            }
 
             // Camera placement (position/scale) from the camera move timeline.
             let camSample: CameraSample? = layout.cameraTimeline.map {
@@ -330,8 +346,18 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 output = CIImage(color: .black)
                     .cropped(to: CGRect(origin: .zero, size: layout.canvas))
             } else if frameLayout.showsMainVideo {
-                output = zoomed(screenCanvasImage(screenBuf, layout: layout,
-                                                  backgroundImage: instruction.overlay.backgroundImage))
+                let screen = zoomed(screenCanvasImage(screenBuf, layout: layout,
+                                                      backgroundImage: instruction.overlay.backgroundImage))
+                if frameCI != nil {
+                    // Framing on: the windowed screen sits over the background
+                    // fill (what shows outside the window).
+                    let bg = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
+                                            layout: layout,
+                                            image: instruction.overlay.backgroundImage)
+                    output = framed(screen).composited(over: bg)
+                } else {
+                    output = screen
+                }
             } else {
                 output = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
                                         layout: layout,
@@ -350,12 +376,12 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 // Click rings sit under the cursor; both ride the screen zoom.
                 if layout.clickFeedback {
                     for ring in clickRings(at: now, layout: layout, overlay: instruction.overlay) {
-                        output = zoomed(ring).composited(over: output)
+                        output = framed(zoomed(ring)).composited(over: output)
                     }
                 }
                 if layout.showCursor, let cursor = cursorImage(at: now, layout: layout,
                                                                overlay: instruction.overlay) {
-                    output = zoomed(cursor).composited(over: output)
+                    output = framed(zoomed(cursor)).composited(over: output)
                 }
             }
 
