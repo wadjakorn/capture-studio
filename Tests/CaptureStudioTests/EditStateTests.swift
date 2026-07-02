@@ -71,6 +71,34 @@ import Foundation
         #expect(edit.trimIn == 2.0)
     }
 
+    @Test func frameWindowRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let edit = EditState(frameEnabled: true, frameCenterX: 0.4, frameCenterY: 0.6,
+                             frameWidth: 0.5, frameHeight: 0.3)
+        try bundle.writeEdit(edit)
+        let loaded = bundle.loadEdit()
+        #expect(loaded.frameEnabled == true)
+        #expect(loaded.frameCenterX == 0.4)
+        #expect(loaded.frameCenterY == 0.6)
+        #expect(loaded.frameWidth == 0.5)
+        #expect(loaded.frameHeight == 0.3)
+    }
+
+    @Test func legacyEditJSONDefaultsFrameOff() throws {
+        // edit.json written before framing fields existed.
+        let json = #"{"schemaVersion":1,"trimIn":0}"#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.frameEnabled == false)
+        #expect(edit.frameCenterX == 0.5)
+        #expect(edit.frameCenterY == 0.5)
+        #expect(edit.frameWidth == 0.6)
+        #expect(edit.frameHeight == 0.6)
+    }
+
     @Test func cameraReframeRoundTrip() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

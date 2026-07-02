@@ -298,6 +298,18 @@ final class StudioModel: ObservableObject {
     /// never exported); auto-on when the template aspect is selected.
     @Published var templateGuideVisible = false
 
+    // Framing window: a single static rectangle (normalized 0–1 canvas coords,
+    // center + size) masking the main video for the whole timeline. The video
+    // pans behind it via auto zoom; texts/subtitles/camera are never clipped.
+    // Persisted to edit.json. `frameEditMode` shows the on-canvas transform
+    // handles and is ephemeral (never persisted).
+    @Published private(set) var frameEnabled = false
+    @Published private(set) var frameCenterX = 0.5
+    @Published private(set) var frameCenterY = 0.5
+    @Published private(set) var frameWidth = 0.6
+    @Published private(set) var frameHeight = 0.6
+    @Published var frameEditMode = false
+
     // Background behind the fitted video in template/fit mode (letterbox bars).
     // Persisted to edit.json. The photo file lives in the bundle; its name is
     // `canvasBackgroundImage`, loaded into `backgroundCIImage` for rendering.
@@ -379,6 +391,7 @@ final class StudioModel: ObservableObject {
             || (showCursor && hasCursorData)
             || (clickFeedback && hasClickData)
             || (cropAspect.isFit && canvasBackground != .black)
+            || frameEnabled
     }
 
     private var screenTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
@@ -500,6 +513,15 @@ final class StudioModel: ObservableObject {
             }
             zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
             layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
+            frameEnabled = edit.frameEnabled
+            let frame = FrameMath.clamped(centerX: edit.frameCenterX,
+                                          centerY: edit.frameCenterY,
+                                          width: edit.frameWidth,
+                                          height: edit.frameHeight)
+            frameCenterX = frame.centerX
+            frameCenterY = frame.centerY
+            frameWidth = frame.width
+            frameHeight = frame.height
             applyVideoComposition()
             applyAudioMix()
 
@@ -861,6 +883,56 @@ final class StudioModel: ObservableObject {
         let list = LayoutTimeline.remove(layoutBlocks, id: id)
         setLayoutBlocks(list, select: selectedLayoutBlockID == id ? nil : selectedLayoutBlockID)
     }
+
+    // MARK: - Framing window
+
+    /// Toggle the framing window. Turning it on enters edit mode (handles
+    /// visible) and seeds a default rect if the persisted one is degenerate;
+    /// turning it off leaves edit mode.
+    func setFrameEnabled(_ on: Bool) {
+        frameEnabled = on
+        if on {
+            let f = FrameMath.clamped(centerX: frameCenterX, centerY: frameCenterY,
+                                      width: frameWidth, height: frameHeight)
+            frameCenterX = f.centerX; frameCenterY = f.centerY
+            frameWidth = f.width; frameHeight = f.height
+            frameEditMode = true
+        } else {
+            frameEditMode = false
+        }
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Reset the window to a centered 60% rect.
+    func resetFrame() {
+        frameCenterX = 0.5; frameCenterY = 0.5
+        frameWidth = 0.6; frameHeight = 0.6
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Live move of the window during an on-canvas drag (no persist). Center is
+    /// clamped so the whole rect stays inside the canvas.
+    func dragFrameCenter(x: Double, y: Double) {
+        let f = FrameMath.clamped(centerX: x, centerY: y,
+                                  width: frameWidth, height: frameHeight)
+        frameCenterX = f.centerX; frameCenterY = f.centerY
+        applyVideoComposition()
+    }
+
+    /// Live corner-resize of the window during an on-canvas drag (no persist):
+    /// the opposite corner stays anchored while the dragged corner moves.
+    func dragFrameCorner(anchor: CGPoint, dragged: CGPoint) {
+        let f = FrameMath.resized(anchor: anchor, dragged: dragged)
+        frameCenterX = f.centerX; frameCenterY = f.centerY
+        frameWidth = f.width; frameHeight = f.height
+        applyVideoComposition()
+    }
+
+    /// Persist framing geometry; call at gesture end (mirrors the camera
+    /// drag/commit split).
+    func commitFrameEdit() { saveEdit() }
 
     /// Select a layout block (clears other selections) and park the playhead
     /// inside its span so the preview shows that layout.
@@ -1872,6 +1944,18 @@ final class StudioModel: ObservableObject {
             layout.background = canvasBackground
             layout.backgroundBlurRadius = CGFloat(canvasBackgroundBlur) * canvas.width
         }
+        // Framing window: mask the main-video group to a static canvas rect.
+        // The configured background fill shows outside the window, so the
+        // background settings apply here too (even outside fit mode).
+        if frameEnabled {
+            layout.screenFrame = FrameMath.rectInCanvas(canvas,
+                                                        centerX: frameCenterX,
+                                                        centerY: frameCenterY,
+                                                        width: frameWidth,
+                                                        height: frameHeight)
+            layout.background = canvasBackground
+            layout.backgroundBlurRadius = CGFloat(canvasBackgroundBlur) * canvas.width
+        }
         // Camera styling only when a (styled) camera is actually shown.
         if cameraTrackID != nil, let oriented = cameraOrientedSize {
             let pip = pipRect(in: canvas, cameraSize: oriented)
@@ -2166,7 +2250,12 @@ final class StudioModel: ObservableObject {
             textBlocks: textBlocks,
             subtitles: subtitles,
             zoomBlocks: zoomBlocks,
-            layoutBlocks: layoutBlocks
+            layoutBlocks: layoutBlocks,
+            frameEnabled: frameEnabled,
+            frameCenterX: frameCenterX,
+            frameCenterY: frameCenterY,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight
         )
     }
 
