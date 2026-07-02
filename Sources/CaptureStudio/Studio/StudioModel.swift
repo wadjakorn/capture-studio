@@ -75,6 +75,12 @@ final class StudioModel: ObservableObject {
     // block is the one the lane + style bar + canvas overlay edit. Persisted to edit.json.
     @Published private(set) var textBlocks: [TextBlock] = []
     @Published var selectedTextBlockID: UUID?
+    // Shape overlay timeline (rectangle / ellipse / blur). Multiple instances,
+    // MAY overlap in time; array order is the z-order (later = on top) and is
+    // never re-sorted. The selected block is the one the lane + style bar +
+    // canvas overlay edit. Persisted to edit.json.
+    @Published private(set) var shapeBlocks: [ShapeBlock] = []
+    @Published var selectedShapeBlockID: UUID?
     // Zoom/pan timeline. Blocks drive an auto-zoom track in the compositor.
     // Persisted to edit.json.
     @Published private(set) var zoomBlocks: [ZoomBlock] = []
@@ -90,6 +96,16 @@ final class StudioModel: ObservableObject {
     @Published private(set) var draggingTextBlockID: UUID?
     /// Default width of a newly added text block (seconds).
     static let defaultTextWidth = 3.0
+    /// Set while a shape block is being dragged / resized on the canvas, so the
+    /// compositor suppresses its baked copy and the smooth SwiftUI overlay drives
+    /// motion (no per-tick recomposite). Cleared on drop.
+    @Published private(set) var draggingShapeBlockID: UUID?
+    /// Default width of a newly added shape block (seconds).
+    static let defaultShapeWidth = 3.0
+    /// Style/position template for the next added shape block — every shape edit
+    /// snapshots into it so a new block clones the most recent one. In-memory
+    /// only: resets each launch (no cross-session memory).
+    private var lastShapeStyle = ShapeBlock(begin: 0, end: 0)
     /// Subtitle states for the loader gate while importing/removing.
     enum SubtitleState: Equatable { case idle, applying, removing }
     /// Imported subtitle track (nil = none, lane hidden). Cues are read-only;
@@ -174,6 +190,12 @@ final class StudioModel: ObservableObject {
         guard let id = selectedTextBlockID else { return nil }
         return textBlocks.first { $0.id == id }
     }
+    var selectedShapeBlock: ShapeBlock? {
+        guard let id = selectedShapeBlockID else { return nil }
+        return shapeBlocks.first { $0.id == id }
+    }
+    /// The shape lane is shown whenever there is at least one shape block.
+    var showsShapeTimeline: Bool { !shapeBlocks.isEmpty }
     /// The subtitle lane shows only when a track with at least one cue exists.
     var showsSubtitleTimeline: Bool {
         guard let s = subtitles else { return false }
@@ -374,6 +396,7 @@ final class StudioModel: ObservableObject {
             || !layoutBlocks.isEmpty
             || cameraHomeLayout.needsCompositor
             || !textBlocks.isEmpty
+            || !shapeBlocks.isEmpty
             || showsSubtitleTimeline
             || !zoomBlocks.isEmpty
             || (showCursor && hasCursorData)
@@ -488,6 +511,7 @@ final class StudioModel: ObservableObject {
             cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
             // Stored verbatim — array order is the z-order, never re-sorted.
             textBlocks = edit.textBlocks
+            shapeBlocks = edit.shapeBlocks
             // Keep cues raw; the offset is applied at consumption. A track whose
             // cues all fall outside the clip (after offset) loads as no subtitles
             // (the .srt file is left in the bundle).
@@ -867,7 +891,7 @@ final class StudioModel: ObservableObject {
     func selectLayoutBlock(_ id: UUID?) {
         selectedLayoutBlockID = id
         if id != nil {
-            selectedBlockID = nil; selectedTextBlockID = nil
+            selectedBlockID = nil; selectedTextBlockID = nil; selectedShapeBlockID = nil
             selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false
         }
         if let id, let b = layoutBlocks.first(where: { $0.id == id }) {
@@ -879,7 +903,7 @@ final class StudioModel: ObservableObject {
         layoutBlocks = list.sorted { $0.begin < $1.begin }
         selectedLayoutBlockID = id
         if id != nil {
-            selectedBlockID = nil; selectedTextBlockID = nil
+            selectedBlockID = nil; selectedTextBlockID = nil; selectedShapeBlockID = nil
             selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false
         }
         applyVideoComposition()
@@ -949,7 +973,7 @@ final class StudioModel: ObservableObject {
     /// inside its span so the preview shows the zoom.
     func selectZoomBlock(_ id: UUID?) {
         selectedZoomBlockID = id
-        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false; cameraSelected = false }
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; selectedShapeBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if let id, let b = zoomBlocks.first(where: { $0.id == id }) {
             seek(to: min((b.begin + b.end) / 2, duration))
         }
@@ -1017,7 +1041,7 @@ final class StudioModel: ObservableObject {
         zoomBlocks = list
         selectedZoomBlockID = id
         // One selection at a time (see `setBlocks`).
-        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; subtitleSelected = false; cameraSelected = false }
+        if id != nil { selectedBlockID = nil; selectedTextBlockID = nil; selectedShapeBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
@@ -1035,7 +1059,7 @@ final class StudioModel: ObservableObject {
         textBlocks = list
         selectedTextBlockID = id
         // One selection at a time (see `setBlocks`).
-        if id != nil { selectedBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
+        if id != nil { selectedBlockID = nil; selectedZoomBlockID = nil; selectedShapeBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
@@ -1048,7 +1072,7 @@ final class StudioModel: ObservableObject {
     func selectTextBlock(_ id: UUID?) {
         if id != selectedTextBlockID { saveEdit() }   // persist the prior block's live text
         selectedTextBlockID = id
-        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil; cameraSelected = false }
+        if id != nil { selectedBlockID = nil; subtitleSelected = false; selectedZoomBlockID = nil; selectedShapeBlockID = nil; cameraSelected = false }
         if let id, let b = textBlocks.first(where: { $0.id == id }),
            !(b.begin <= currentTime && currentTime < b.end) {
             // Align to the composition frame grid so the caption is visible at
@@ -1161,6 +1185,7 @@ final class StudioModel: ObservableObject {
     /// nothing selected. Backs the empty-canvas tap and the Esc key.
     func deselectAll() {
         deselectText()
+        deselectShape()
         selectedBlockID = nil
         selectedZoomBlockID = nil
         selectedLayoutBlockID = nil
@@ -1238,6 +1263,169 @@ final class StudioModel: ObservableObject {
         setTextBlocks(TextTimeline.moveToBack(textBlocks, id: id), select: selectedTextBlockID)
     }
 
+    // MARK: - Shape timeline (rectangle / ellipse / blur overlays)
+
+    /// Replace the shape-block list (preserving its array order = z-order).
+    /// Adding the first / removing the last flips the compositor on/off, so
+    /// refresh the player item when `needsCompositor` changes, mirroring
+    /// `setTextBlocks`.
+    private func setShapeBlocks(_ list: [ShapeBlock], select id: UUID?) {
+        let was = needsCompositor
+        shapeBlocks = list
+        selectedShapeBlockID = id
+        if id != nil { clearNonShapeSelections() }
+        if needsCompositor != was {
+            refreshPlayerItemForCanvasChange()
+        }
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Clear every selection except the shape one (shapes obey the same single-
+    /// selection rule as the other lanes).
+    private func clearNonShapeSelections() {
+        selectedBlockID = nil; selectedTextBlockID = nil; selectedZoomBlockID = nil
+        selectedLayoutBlockID = nil; subtitleSelected = false; cameraSelected = false
+    }
+
+    /// Select a shape block (clears other selections) and park the playhead
+    /// inside its span so the preview shows it. Pass nil to deselect.
+    func selectShapeBlock(_ id: UUID?) {
+        selectedShapeBlockID = id
+        if id != nil { clearNonShapeSelections() }
+        if let id, let b = shapeBlocks.first(where: { $0.id == id }),
+           !(b.begin <= currentTime && currentTime < b.end) {
+            // Align to the composition frame grid so the shape is visible at the
+            // seeked frame (see `selectTextBlock`).
+            let aligned = TextTimeline.firstVisibleTime(begin: b.begin,
+                                                        fps: Self.compositionFrameRate)
+            seek(to: min(aligned < b.end ? aligned : b.begin, duration))
+        }
+    }
+
+    /// Add a default shape block of `kind` at the playhead and select it. The new
+    /// block clones the last-edited style / position.
+    func addShapeBlock(kind: ShapeKind = .rectangle) {
+        let t = min(max(currentTime, 0), duration)
+        var template = lastShapeStyle
+        template.kind = kind
+        let added = ShapeTimeline.add(shapeBlocks, atTime: t, width: Self.defaultShapeWidth,
+                                      duration: duration, template: template)
+        setShapeBlocks(added.blocks, select: added.id)
+    }
+
+    func removeShapeBlock(_ id: UUID) {
+        let list = ShapeTimeline.remove(shapeBlocks, id: id)
+        setShapeBlocks(list, select: selectedShapeBlockID == id ? nil : selectedShapeBlockID)
+    }
+
+    /// Live begin-edge drag; persist with `commitShapeEdit`.
+    func moveShapeBlockBegin(_ id: UUID, toTime: Double) {
+        shapeBlocks = ShapeTimeline.moveBegin(shapeBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live end-edge drag; persist with `commitShapeEdit`.
+    func moveShapeBlockEnd(_ id: UUID, toTime: Double) {
+        shapeBlocks = ShapeTimeline.moveEnd(shapeBlocks, id: id, toTime: toTime, duration: duration)
+        applyVideoComposition()
+    }
+
+    /// Live whole-block drag (keeps width); persist with `commitShapeEdit`.
+    func moveShapeBlock(_ id: UUID, toBegin: Double) {
+        shapeBlocks = ShapeTimeline.moveBlock(shapeBlocks, id: id, toBegin: toBegin, duration: duration)
+        applyVideoComposition()
+    }
+
+    func commitShapeEdit() { saveEdit() }
+
+    /// Mutate one shape block in place (preserves array order / z-order) and
+    /// refresh the preview live. Does NOT persist — call `commitShapeEdit` at
+    /// gesture / edit end, mirroring the text drag/commit split.
+    private func updateShapeBlock(_ id: UUID, _ mutate: (inout ShapeBlock) -> Void) {
+        guard let i = shapeBlocks.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&shapeBlocks[i])
+        lastShapeStyle = shapeBlocks[i]   // template tracks the last-edited block
+        applyVideoComposition()
+    }
+
+    /// Begin a canvas drag/resize: select and suppress the baked copy (one
+    /// recomposite) so the smooth SwiftUI overlay drives motion.
+    func beginDraggingShape(_ id: UUID) {
+        selectShapeBlock(id)
+        draggingShapeBlockID = id
+        applyVideoComposition()
+    }
+
+    /// Live position update during a drag — moves only the published model (the
+    /// overlay follows). No recomposite, so it stays smooth.
+    func dragShapePosition(x: Double, y: Double, for id: UUID) {
+        guard let i = shapeBlocks.firstIndex(where: { $0.id == id }) else { return }
+        shapeBlocks[i].centerX = min(max(0, x), 1)
+        shapeBlocks[i].centerY = min(max(0, y), 1)
+    }
+
+    /// Live size update during a resize — published only (no recomposite).
+    func dragShapeSize(width: Double, height: Double, for id: UUID) {
+        guard let i = shapeBlocks.firstIndex(where: { $0.id == id }) else { return }
+        shapeBlocks[i].width = min(max(0.02, width), 1)
+        shapeBlocks[i].height = min(max(0.02, height), 1)
+    }
+
+    /// End a canvas drag/resize: un-suppress, recomposite once at the final
+    /// geometry, and persist.
+    func endDraggingShape() {
+        guard let id = draggingShapeBlockID else { return }
+        draggingShapeBlockID = nil
+        if let b = shapeBlocks.first(where: { $0.id == id }) { lastShapeStyle = b }
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Deselect any shape block (ending a live drag first).
+    func deselectShape() {
+        if draggingShapeBlockID != nil { endDraggingShape() }
+        selectedShapeBlockID = nil
+    }
+
+    // MARK: Shape z-order
+
+    func bringShapeForward(_ id: UUID) {
+        setShapeBlocks(ShapeTimeline.bringForward(shapeBlocks, id: id), select: selectedShapeBlockID)
+    }
+
+    func sendShapeBackward(_ id: UUID) {
+        setShapeBlocks(ShapeTimeline.sendBackward(shapeBlocks, id: id), select: selectedShapeBlockID)
+    }
+
+    func moveShapeToFront(_ id: UUID) {
+        setShapeBlocks(ShapeTimeline.moveToFront(shapeBlocks, id: id), select: selectedShapeBlockID)
+    }
+
+    func moveShapeToBack(_ id: UUID) {
+        setShapeBlocks(ShapeTimeline.moveToBack(shapeBlocks, id: id), select: selectedShapeBlockID)
+    }
+
+    // MARK: Shape style (operate on the selected block)
+
+    /// Mutate the selected shape block live. Discrete edits pass `commit: true`
+    /// to persist immediately; slider drags pass `false` and persist on end via
+    /// `commitShapeEdit`.
+    private func updateSelectedShape(commit: Bool, _ mutate: (inout ShapeBlock) -> Void) {
+        guard let id = selectedShapeBlockID else { return }
+        updateShapeBlock(id, mutate)
+        if commit { saveEdit() }
+    }
+
+    func setShapeKind(_ kind: ShapeKind) { updateSelectedShape(commit: true) { $0.kind = kind } }
+    func setShapeFillHex(_ hex: String) { updateSelectedShape(commit: true) { $0.fillHex = hex } }
+    func setShapeFillOpacity(_ v: Double) { updateSelectedShape(commit: false) { $0.fillOpacity = min(max(0, v), 1) } }
+    func setShapeStrokeHex(_ hex: String) { updateSelectedShape(commit: true) { $0.strokeHex = hex } }
+    func setShapeStrokeWidth(_ v: Double) { updateSelectedShape(commit: false) { $0.strokeWidth = min(max(0, v), 0.1) } }
+    func setShapeCornerRadius(_ v: Double) { updateSelectedShape(commit: false) { $0.cornerRadius = min(max(0, v), 0.5) } }
+    func setShapeBlurStyle(_ s: ShapeBlurStyle) { updateSelectedShape(commit: true) { $0.blurStyle = s } }
+    func setShapeBlurStrength(_ v: Double) { updateSelectedShape(commit: false) { $0.blurStrength = min(max(0.005, v), 0.2) } }
+
     // MARK: Text style (operate on the selected block)
 
     /// Mutate the selected text block live. Discrete edits pass `commit: true`
@@ -1305,6 +1493,7 @@ final class StudioModel: ObservableObject {
             subtitles = track
             subtitleSelected = true
             selectedTextBlockID = nil
+            selectedShapeBlockID = nil
             selectedBlockID = nil
             selectedZoomBlockID = nil
             cameraSelected = false
@@ -1338,6 +1527,7 @@ final class StudioModel: ObservableObject {
         subtitleSelected = on
         if on {
             selectedTextBlockID = nil
+            selectedShapeBlockID = nil
             selectedBlockID = nil
             selectedZoomBlockID = nil
             cameraSelected = false
@@ -1350,6 +1540,7 @@ final class StudioModel: ObservableObject {
         cameraSelected = true
         selectedBlockID = nil
         selectedTextBlockID = nil
+        selectedShapeBlockID = nil
         selectedZoomBlockID = nil
         subtitleSelected = false
     }
@@ -1427,7 +1618,7 @@ final class StudioModel: ObservableObject {
     func selectBlock(_ id: UUID?) {
         selectedBlockID = id
         // camera vs text vs zoom vs subtitle: one selection at a time
-        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
+        if id != nil { selectedTextBlockID = nil; selectedShapeBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if let id, let b = cameraBlocks.first(where: { $0.id == id }) {
             seek(to: min(b.end, duration))
         }
@@ -1442,7 +1633,7 @@ final class StudioModel: ObservableObject {
         selectedBlockID = id
         // One selection at a time: the add/set paths bypass `selectBlock`, so
         // clear the other kinds here too (else add-while-other-selected = both).
-        if id != nil { selectedTextBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
+        if id != nil { selectedTextBlockID = nil; selectedShapeBlockID = nil; selectedZoomBlockID = nil; subtitleSelected = false; cameraSelected = false }
         if needsCompositor != was {
             refreshPlayerItemForCanvasChange()
         }
@@ -1930,6 +2121,13 @@ final class StudioModel: ObservableObject {
             layout.textTimeline = TextTimelineSpec(blocks: textBlocks)
             layout.suppressedTextBlockID = draggingTextBlockID
         }
+        // Shape overlays (rendered below subtitles / text, above screen / camera /
+        // cursor). Suppress only the block being dragged / resized — the smooth
+        // overlay drives its motion.
+        if !shapeBlocks.isEmpty {
+            layout.shapeTimeline = ShapeTimelineSpec(blocks: shapeBlocks)
+            layout.suppressedShapeBlockID = draggingShapeBlockID
+        }
         // Subtitle cues (rendered below text blocks). Suppressed entirely while
         // the canvas position box is being dragged — the smooth overlay drives
         // motion, the cue re-bakes at the dropped position.
@@ -2088,6 +2286,7 @@ final class StudioModel: ObservableObject {
         layoutBlocks = trimmed.layoutBlocks
         zoomBlocks = trimmed.zoomBlocks
         textBlocks = trimmed.textBlocks
+        shapeBlocks = trimmed.shapeBlocks
         subtitles = trimmed.subtitles
 
         // Rebase cursor / click overlays onto the new t = 0.
@@ -2109,6 +2308,7 @@ final class StudioModel: ObservableObject {
         // Drop selections that pointed at now-removed blocks.
         if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
         if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
+        if let id = selectedShapeBlockID, !shapeBlocks.contains(where: { $0.id == id }) { selectedShapeBlockID = nil }
         if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
         if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
 
@@ -2164,6 +2364,7 @@ final class StudioModel: ObservableObject {
             canvasBackgroundImage: canvasBackgroundImage,
             cameraBlocks: cameraBlocks,
             textBlocks: textBlocks,
+            shapeBlocks: shapeBlocks,
             subtitles: subtitles,
             zoomBlocks: zoomBlocks,
             layoutBlocks: layoutBlocks

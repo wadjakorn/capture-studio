@@ -16,12 +16,14 @@ struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var showCameraStyle = false
     @State private var showTextStyle = false
+    @State private var showShapeStyle = false
     @State private var showSubtitleStyle = false
     @State private var showZoomStyle = false
     @State private var confirmRemoveSubtitles = false
     // Measured content heights for the style popovers; drive a content-fitting,
     // capped frame so they never clip their last row or leave empty slack.
     @State private var textPopoverHeight: CGFloat = 0
+    @State private var shapePopoverHeight: CGFloat = 0
     @State private var subtitlePopoverHeight: CGFloat = 0
 
     init(bundleURL: URL) {
@@ -85,6 +87,8 @@ struct StudioView: View {
                     CanvasNavigationLayer(model: model)
                     // Click a visible caption to select it (above navigation).
                     TextSelectHitLayer(model: model)
+                    // Click a visible shape to select it.
+                    ShapeSelectHitLayer(model: model)
                     // Click the camera to select it; the full overlay (handles)
                     // only appears once selected, so it can be deselected.
                     if model.cameraOverlayEditableAtPlayhead && !model.showsCameraOverlay {
@@ -95,6 +99,9 @@ struct StudioView: View {
                     }
                     if model.selectedTextBlock != nil {
                         TextCanvasOverlay(model: model)
+                    }
+                    if model.selectedShapeBlock != nil {
+                        ShapeCanvasOverlay(model: model)
                     }
                     if model.subtitleSelected {
                         SubtitleCanvasOverlay(model: model)
@@ -156,6 +163,9 @@ struct StudioView: View {
             if !model.textBlocks.isEmpty {
                 laneRow("textformat") { TextTimelineLane(model: model) }
             }
+            if model.showsShapeTimeline {
+                laneRow("square.on.circle") { ShapeTimelineLane(model: model) }
+            }
             if model.showsZoomTimeline {
                 laneRow("plus.magnifyingglass") { ZoomTimelineLane(model: model) }
             }
@@ -195,7 +205,8 @@ struct StudioView: View {
                     .onChange(of: model.selectedZoomBlockID == nil) { _, nowNil in
                         if nowNil { showZoomStyle = false }
                     }
-                toolGroup { textControls }              // text — last group
+                toolGroup { textControls }              // text
+                toolGroup { shapeControls }             // shapes — last group
             }
         }
         .padding(12)
@@ -500,6 +511,120 @@ struct StudioView: View {
         .help(model.selectedTextBlock == nil
               ? "Select a text block to edit its caption"
               : "Edit caption text · Shift+Return for a new line")
+    }
+
+    @ViewBuilder private var shapeControls: some View {
+        Menu {
+            Button { model.addShapeBlock(kind: .rectangle) } label: {
+                Label("Rectangle", systemImage: "rectangle")
+            }
+            Button { model.addShapeBlock(kind: .ellipse) } label: {
+                Label("Ellipse", systemImage: "oval")
+            }
+            Button { model.addShapeBlock(kind: .blur) } label: {
+                Label("Blur (censor)", systemImage: "drop.halffull")
+            }
+        } label: {
+            Image(systemName: "square.on.circle")
+        }
+        .menuIndicator(.hidden)
+        .frame(width: 44)
+        .help("Add a shape overlay (rectangle / ellipse / blur) at the playhead")
+
+        Button { showShapeStyle.toggle() } label: {
+            Image(systemName: "slider.horizontal.3")
+        }
+        .disabled(model.selectedShapeBlock == nil)
+        .help("Edit shape style")
+        .popover(isPresented: $showShapeStyle, arrowEdge: .bottom) {
+            shapeStylePopover
+        }
+
+        // Z-order + delete for the selected block — always shown, disabled until
+        // a block is selected.
+        Button {
+            if let id = model.selectedShapeBlockID { model.sendShapeBackward(id) }
+        } label: { Image(systemName: "arrow.down.square") }
+            .disabled(model.selectedShapeBlock == nil)
+            .help("Send backward")
+        Button {
+            if let id = model.selectedShapeBlockID { model.bringShapeForward(id) }
+        } label: { Image(systemName: "arrow.up.square") }
+            .disabled(model.selectedShapeBlock == nil)
+            .help("Bring forward")
+        Button(role: .destructive) {
+            if let id = model.selectedShapeBlockID { model.removeShapeBlock(id) }
+        } label: { Image(systemName: "trash") }
+            .disabled(model.selectedShapeBlock == nil)
+            .help("Delete this shape block")
+    }
+
+    @ViewBuilder
+    private var shapeStylePopover: some View {
+        let block = model.selectedShapeBlock
+        let kind = block?.kind ?? .rectangle
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Kind", selection: Binding(
+                    get: { kind },
+                    set: { model.setShapeKind($0) }
+                )) {
+                    ForEach(ShapeKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+
+                if kind == .blur {
+                    Picker("Blur style", selection: Binding(
+                        get: { block?.blurStyle ?? .gaussian },
+                        set: { model.setShapeBlurStyle($0) }
+                    )) {
+                        ForEach(ShapeBlurStyle.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+
+                    styleSliderText("Strength", value: Binding(
+                        get: { block?.blurStrength ?? 0.04 },
+                        set: { model.setShapeBlurStrength($0) }
+                    ), range: 0.005...0.2)
+                } else {
+                    styleSliderText("Fill opacity", value: Binding(
+                        get: { block?.fillOpacity ?? 0 },
+                        set: { model.setShapeFillOpacity($0) }
+                    ), range: 0...1)
+                    if (block?.fillOpacity ?? 0) > 0 {
+                        textColorRow("Fill color", hex: block?.fillHex ?? "#000000") {
+                            model.setShapeFillHex($0)
+                        }
+                    }
+
+                    styleSliderText("Outline", value: Binding(
+                        get: { block?.strokeWidth ?? 0 },
+                        set: { model.setShapeStrokeWidth($0) }
+                    ), range: 0...0.1)
+                    if (block?.strokeWidth ?? 0) > 0 {
+                        textColorRow("Outline color", hex: block?.strokeHex ?? "#FF3B30") {
+                            model.setShapeStrokeHex($0)
+                        }
+                    }
+
+                    if kind == .rectangle {
+                        styleSliderText("Corner radius", value: Binding(
+                            get: { block?.cornerRadius ?? 0 },
+                            set: { model.setShapeCornerRadius($0) }
+                        ), range: 0...0.5)
+                    }
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
+            })
+        }
+        .frame(width: 320, height: min(shapePopoverHeight == 0 ? 320 : shapePopoverHeight, 500))
+        .scrollBounceBehavior(.basedOnSize)
+        .onPreferenceChange(StylePopoverHeightKey.self) { shapePopoverHeight = $0 }
     }
 
     @ViewBuilder private var zoomControls: some View {
