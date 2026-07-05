@@ -318,16 +318,31 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             // Resolve auto-zoom for this frame (identity when scale == 1).
             let zoom = AutoZoomTrack.sample(at: now, track: instruction.overlay.autoZoom)
             let focusCanvas = Self.sourceToCanvas(zoom.focus, layout: layout)
+            let canvasRect = CGRect(origin: .zero, size: layout.canvas)
+            // The zoom recenters the focus (cursor) onto a region centre so it sits
+            // in the middle of what the viewer sees. `overflow` picks the region:
+            //  - contained (default): the framing window (else the whole canvas),
+            //    with the pan clamped so the video always covers it — no empty edge.
+            //  - overflow: the whole canvas, unclamped — the video may pan past the
+            //    window/canvas edge and the background shows where it stops.
+            // The recenter is blended by `zoom.weight` so it ramps with the scale.
+            let region = zoom.overflow ? canvasRect : (layout.screenFrame ?? canvasRect)
+            let content = layout.screenFit ?? canvasRect      // where the source sits pre-zoom
+            let targetCanvas = Self.recenterTarget(focus: focusCanvas, weight: zoom.weight,
+                                                   scale: zoom.scale, content: content,
+                                                   region: region, clamp: !zoom.overflow)
             func zoomed(_ img: CIImage) -> CIImage {
                 Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
-                             canvas: layout.canvas)
+                             targetCanvas: targetCanvas, canvas: layout.canvas)
             }
-            // Framing window: every main-video layer (screen, click rings,
-            // cursor) is cropped to this rect after the zoom, so the video pans
-            // behind a static window. CI bottom-left space.
-            let frameCI: CGRect? = layout.screenFrame.map {
-                Self.flip($0, in: layout.canvas.height)
-            }
+            // Clip every main-video layer (screen, click rings, cursor) after the
+            // zoom. Contained → the framing window; overflow → the whole canvas.
+            // Background shows through wherever the clipped video doesn't cover.
+            // CI bottom-left space.
+            let frameCI: CGRect? = zoom.overflow
+                ? canvasRect
+                : layout.screenFrame.map { Self.flip($0, in: layout.canvas.height) }
+            let revealsBackground = zoom.overflow || layout.screenFrame != nil
             func framed(_ img: CIImage) -> CIImage {
                 guard let frameCI else { return img }
                 return img.cropped(to: frameCI)
@@ -363,9 +378,9 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             } else if frameLayout.showsMainVideo {
                 let screen = zoomed(screenCanvasImage(screenBuf, layout: layout,
                                                       backgroundImage: instruction.overlay.backgroundImage))
-                if frameCI != nil {
-                    // Framing on: the windowed screen sits over the background
-                    // fill (what shows outside the window).
+                if revealsBackground {
+                    // Framing window and/or overflow: the clipped screen sits over
+                    // the background fill (what shows where the video doesn't cover).
                     let bg = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
                                             layout: layout,
                                             image: instruction.overlay.backgroundImage)
@@ -643,18 +658,55 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         return CGPoint(x: pl.origin.x + p.x * pl.scale, y: pl.origin.y + p.y * pl.scale)
     }
 
-    /// Magnify an already-placed canvas-space image by `scale` around a canvas
-    /// focus point (top-left origin). Identity when `scale <= 1`. Used to apply
-    /// auto-zoom to the screen + cursor + click layers (camera/text are not
-    /// passed through this, so they stay fixed).
+    /// Where the focus point should land on the canvas after the zoom. The focus
+    /// eases toward `region`'s centre by `weight` (0 = stay on the focus, i.e. an
+    /// in-place zoom; 1 = fully centred). When `clamp` is set the target is bounded
+    /// so the scaled `content` rect still fully covers `region` — the video never
+    /// pulls away from the region edge, so no background shows inside it. With
+    /// `clamp` off the target is free, letting the video pan past the edge and
+    /// reveal the background. All rects/points are canvas top-left space; pure and
+    /// unit-tested (no Core Image).
+    static func recenterTarget(focus: CGPoint, weight: CGFloat, scale: CGFloat,
+                               content: CGRect, region: CGRect, clamp: Bool) -> CGPoint {
+        let centre = CGPoint(x: region.midX, y: region.midY)
+        var target = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
+                             y: focus.y + (centre.y - focus.y) * weight)
+        guard clamp else { return target }
+        // Cover constraint per axis: content.min·scale-mapped ≤ region.min and
+        // content.max·scale-mapped ≥ region.max. Solving for the target gives a
+        // [lower, upper] band; if the scaled content is too small to cover the
+        // region the band inverts → fall back to the region centre.
+        func bound(_ t: CGFloat, _ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
+                   _ rMin: CGFloat, _ rMax: CGFloat, _ centre: CGFloat) -> CGFloat {
+            let lower = rMax - scale * (cMax - f)
+            let upper = rMin - scale * (cMin - f)
+            return lower <= upper ? min(max(t, lower), upper) : centre
+        }
+        target.x = bound(target.x, focus.x, content.minX, content.maxX,
+                         region.minX, region.maxX, centre.x)
+        target.y = bound(target.y, focus.y, content.minY, content.maxY,
+                         region.minY, region.maxY, centre.y)
+        return target
+    }
+
+    /// Magnify an already-placed canvas-space image by `scale`, mapping the
+    /// `focusCanvas` point onto `targetCanvas` (both top-left origin). The result
+    /// satisfies `out(p) = target + scale·(p − focus)`, so the focus lands on the
+    /// target at the given zoom. Passing `target == focus` gives an in-place zoom
+    /// (fixed point). Identity when `scale <= 1`. Used to apply auto-zoom to the
+    /// screen + cursor + click layers (camera/text are not passed through this,
+    /// so they stay fixed).
     private static func magnify(_ image: CIImage, scale: CGFloat,
-                                focusCanvas: CGPoint, canvas: CGSize) -> CIImage {
+                                focusCanvas: CGPoint, targetCanvas: CGPoint,
+                                canvas: CGSize) -> CIImage {
         guard scale > 1.0001 else { return image }
         let fx = focusCanvas.x
         let fy = canvas.height - focusCanvas.y          // top-left → CI bottom-left
+        let tx = targetCanvas.x
+        let ty = canvas.height - targetCanvas.y
         let t = CGAffineTransform(translationX: -fx, y: -fy)
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-            .concatenating(CGAffineTransform(translationX: fx, y: fy))
+            .concatenating(CGAffineTransform(translationX: tx, y: ty))
         return image.transformed(by: t)
     }
 

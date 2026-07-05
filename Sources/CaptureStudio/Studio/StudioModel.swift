@@ -1105,6 +1105,23 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    /// Whether the selected block lets the zoom overflow the framing window
+    /// (pan past the edges, revealing the background). Off by default.
+    var selectedZoomOverflow: Bool {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else { return false }
+        return b.overflow ?? false
+    }
+
+    /// Toggle the selected block's overflow (live; persist via commitZoomEdit).
+    func setZoomOverflow(_ on: Bool) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].overflow = on
+        applyVideoComposition()
+        saveEdit()
+    }
+
     /// Replace the zoom-block list. Adding the first / removing the last flips
     /// the compositor on/off, so refresh the player item when `needsCompositor`
     /// changes, mirroring `setBlocks`.
