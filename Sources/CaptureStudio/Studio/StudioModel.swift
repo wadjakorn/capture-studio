@@ -42,6 +42,22 @@ final class StudioModel: ObservableObject {
     /// gates the "Apply Trim" affordance.
     var canApplyTrim: Bool { trimIn > 0.001 || trimOut < duration - 0.001 }
     @Published private(set) var exportState: ExportState = .idle
+    /// True while an export runs. The editor hard-locks: every mutating control
+    /// is disabled and the window refuses to close until the export finishes or
+    /// is stopped (`cancelExport`). Minimizing stays allowed — the window (and
+    /// this model) survive, so restoring shows the same locked, in-progress state.
+    var isExporting: Bool {
+        if case .exporting = exportState { return true }
+        return false
+    }
+    /// The running export task, retained so `cancelExport` can stop it.
+    private var exportTask: Task<Void, Never>?
+
+    #if DEBUG
+    /// Test seam: enter the export lock without running a real AVFoundation
+    /// export (which needs a loaded composition). Used only by unit tests.
+    func beginExportLockForTests() { exportState = .exporting(0) }
+    #endif
 
     // Camera PiP — center normalized 0–1 in render space, scale = width
     // fraction of screen width. Persisted to edit.json.
@@ -1308,6 +1324,7 @@ final class StudioModel: ObservableObject {
 
     /// Multiply the canvas zoom (center-anchored), clamped to [1, max].
     func zoomCanvas(by factor: CGFloat) {
+        guard !isExporting else { return }
         guard factor.isFinite, factor > 0 else { return }
         canvasZoom = min(max(canvasZoom * factor, 1), Self.maxCanvasZoom)
         clampCanvasPan()
@@ -1315,6 +1332,7 @@ final class StudioModel: ObservableObject {
 
     /// Pan the zoomed canvas by a view-point delta (no-op at fit).
     func panCanvas(by delta: CGSize) {
+        guard !isExporting else { return }
         guard canvasZoomed else { return }
         canvasPanX += delta.width
         canvasPanY += delta.height
@@ -2343,16 +2361,19 @@ final class StudioModel: ObservableObject {
     // MARK: - Trim (persisted to edit.json; masters untouched)
 
     func setTrimIn(_ value: Double) {
+        guard !isExporting else { return }
         trimIn = min(max(0, value), trimOut - 0.1)
         saveEdit()
     }
 
     func setTrimOut(_ value: Double) {
+        guard !isExporting else { return }
         trimOut = max(min(duration, value), trimIn + 0.1)
         saveEdit()
     }
 
     func resetTrim() {
+        guard !isExporting else { return }
         trimIn = 0
         trimOut = duration
         saveEdit()
@@ -2501,7 +2522,7 @@ final class StudioModel: ObservableObject {
             videoComposition = buildVideoComposition(canvasOverride: sourceSize)
             avPresetOverride = nil
         }
-        Task {
+        exportTask = Task {
             do {
                 let url = try await Exporter.export(
                     composition: composition,
@@ -2519,10 +2540,23 @@ final class StudioModel: ObservableObject {
                     }
                 }
                 exportState = .done(url)
+            } catch is CancellationError {
+                // Stopped by the user; `cancelExport` already unlocked the editor
+                // and Exporter removed the partial file. Nothing to report.
             } catch {
                 exportState = .failed(error.localizedDescription)
             }
+            exportTask = nil
         }
+    }
+
+    /// Stop a running export: cancels the session (Exporter removes the partial
+    /// file), unlocks the editor, and re-enables closing the window.
+    func cancelExport() {
+        guard isExporting else { return }
+        exportTask?.cancel()
+        exportTask = nil
+        exportState = .idle
     }
 
     /// Export canvas when reframing: 1080/2160-wide for the quality presets,

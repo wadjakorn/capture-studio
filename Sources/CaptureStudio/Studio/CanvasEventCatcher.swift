@@ -53,6 +53,9 @@ final class CanvasInputView: NSView {
     /// Returns nil to consume an event we handled, else the event to pass on.
     private func handle(_ event: NSEvent) -> NSEvent? {
         guard let model, let window, event.window == window else { return event }
+        // Editor is hard-locked during export — leave every event to its own
+        // responder (this NSView monitor bypasses SwiftUI's `.disabled`).
+        guard !model.isExporting else { return event }
         // Only act when the cursor is over the canvas region; anything else
         // (timeline scroll, control bar) stays with its own responders.
         let local = convert(event.locationInWindow, from: nil)
