@@ -55,6 +55,17 @@ import CoreGraphics
         #expect(minX <= window.minX + 0.001)
     }
 
+    @Test func overflowCentresOnFrameNotCanvas() {
+        // New semantics (defect #1 fix): overflow keeps the region = the framing
+        // window, so the cursor eases to the FRAME centre — not the canvas centre —
+        // and the video stays clipped to the frame with bg revealed inside it.
+        let window = CGRect(x: 250, y: 250, width: 500, height: 500)
+        let t = StudioCompositor.recenterTarget(focus: rightEdge, weight: 1, scale: 2,
+                                                content: canvas, region: window, clamp: false)
+        #expect(abs(t.x - window.midX) < 0.001)   // -> 500
+        #expect(abs(t.y - window.midY) < 0.001)   // -> 500
+    }
+
     @Test func zeroWeightIsAnInPlaceZoom() {
         // weight 0 (block edge / un-zoomed) → target == focus regardless of mode.
         let free = StudioCompositor.recenterTarget(focus: rightEdge, weight: 0, scale: 2,
