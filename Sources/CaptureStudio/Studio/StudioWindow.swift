@@ -55,6 +55,8 @@ struct StudioView: View {
         VStack(spacing: 0) {
             if let player = model.player {
                 canvas(player: player)
+                    // Hard-lock the preview/editing surface while exporting.
+                    .disabled(model.isExporting)
             }
             controlBar
         }
@@ -72,6 +74,8 @@ struct StudioView: View {
                 Button("") { model.deselectAll() }
                     .keyboardShortcut(.cancelAction).opacity(0)
             }
+            // Block window close while exporting (minimize stays allowed).
+            StudioWindowCloseGuard(isExporting: { model.isExporting })
         }
     }
 
@@ -157,35 +161,40 @@ struct StudioView: View {
         VStack(spacing: 8) {
             // Stacked lanes share a fixed leading icon gutter so every track
             // starts at the same x — keeping the playheads vertically aligned.
-            laneRow("display") { timeline }
-            if model.showsLayoutTimeline {
-                laneRow("rectangle.on.rectangle") { LayoutTimelineLane(model: model) }
+            // Locked during export (all but the output/Stop group below).
+            Group {
+                laneRow("display") { timeline }
+                if model.showsLayoutTimeline {
+                    laneRow("rectangle.on.rectangle") { LayoutTimelineLane(model: model) }
+                }
+                if model.showsCameraTimeline {
+                    laneRow("video.fill") { CameraTimelineLane(model: model) }
+                }
+                if !model.textBlocks.isEmpty {
+                    laneRow("textformat") { TextTimelineLane(model: model) }
+                }
+                if model.showsShapeTimeline {
+                    laneRow("square.on.circle") { ShapeTimelineLane(model: model) }
+                }
+                if model.showsZoomTimeline {
+                    laneRow("plus.magnifyingglass") { ZoomTimelineLane(model: model) }
+                }
+                if model.showsSubtitleTimeline {
+                    laneRow("captions.bubble") { SubtitleTimelineLane(model: model) }
+                }
             }
-            if model.showsCameraTimeline {
-                laneRow("video.fill") { CameraTimelineLane(model: model) }
-            }
-            if !model.textBlocks.isEmpty {
-                laneRow("textformat") { TextTimelineLane(model: model) }
-            }
-            if model.showsShapeTimeline {
-                laneRow("square.on.circle") { ShapeTimelineLane(model: model) }
-            }
-            if model.showsZoomTimeline {
-                laneRow("plus.magnifyingglass") { ZoomTimelineLane(model: model) }
-            }
-            if model.showsSubtitleTimeline {
-                laneRow("captions.bubble") { SubtitleTimelineLane(model: model) }
-            }
+            .disabled(model.isExporting)
 
             Divider().padding(.vertical, 2)
 
             // Row 1 — transport + trim (left, wraps when narrow) and output
-            // pinned right.
+            // pinned right. Output stays live during export so Stop is reachable.
             HStack(alignment: .top, spacing: 12) {
                 FlowLayout(hSpacing: 8, vSpacing: 8) {
                     toolGroup { transportControls }
                     toolGroup { trimControls }
                 }
+                .disabled(model.isExporting)
                 Spacer(minLength: 12)
                 toolGroup { outputControls }
             }
@@ -212,6 +221,7 @@ struct StudioView: View {
                 toolGroup { textControls }              // text
                 toolGroup { shapeControls }             // shapes — last group
             }
+            .disabled(model.isExporting)
         }
         .padding(12)
         .background(.bar)
@@ -1322,6 +1332,11 @@ struct StudioView: View {
                 .frame(width: 120)
             Text("\(Int(progress * 100))%")
                 .font(.caption.monospacedDigit())
+            Button { model.cancelExport() } label: {
+                Image(systemName: "stop.fill")
+            }
+            .tint(.red)
+            .help("Stop export")
         case .done(let url):
             Button("Show Export") {
                 NSWorkspace.shared.activateFileViewerSelecting([url])

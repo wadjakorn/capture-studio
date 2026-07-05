@@ -49,7 +49,15 @@ enum Exporter {
             }
         }
         defer { monitor.cancel() }
-        try await session.export(to: destination, as: .mp4)
+        do {
+            // The async export honors task cancellation: cancelling the caller's
+            // Task (see StudioModel.cancelExport) throws CancellationError here.
+            try await session.export(to: destination, as: .mp4)
+        } catch {
+            // Cancel or failure — never leave a truncated file behind.
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
         onProgress(1.0)
         return destination
     }
