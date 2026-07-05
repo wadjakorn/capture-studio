@@ -250,14 +250,21 @@ struct ZoomBlock: Codable, Equatable, Identifiable {
     /// small moves, 1 = snappy). nil = use the global default
     /// (`autoZoomDefaultSensitivity`). Mirrors `scale`'s override semantics.
     var sensitivity: Double?
+    /// When true the zoom may pan the main video past the framing window and off
+    /// the canvas edges, revealing the configured background where the video no
+    /// longer covers (cursor centred on the canvas). When false/nil the video
+    /// stays contained: the pan is clamped so it always fills the framing window
+    /// (cursor centred within the window). nil decodes as false (back-compat).
+    var overflow: Bool?
 
     init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
-         sensitivity: Double? = nil) {
+         sensitivity: Double? = nil, overflow: Bool? = nil) {
         self.id = id
         self.begin = begin
         self.end = end
         self.scale = scale
         self.sensitivity = sensitivity
+        self.overflow = overflow
     }
 }
 

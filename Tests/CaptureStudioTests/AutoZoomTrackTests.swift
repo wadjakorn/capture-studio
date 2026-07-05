@@ -59,24 +59,94 @@ import CoreGraphics
         #expect(abs(sampleScale(usingDefault, at: 2.0) - 3.0) < 0.05)
     }
 
+    // MARK: - Sensitivity-driven zoom-in/out ramp
+
+    @Test func rampForMapsSensitivity() {
+        #expect(abs(AutoZoomTrack.rampFor(0) - 0.80) < 1e-9)   // calm → long ramp
+        #expect(abs(AutoZoomTrack.rampFor(1) - 0.15) < 1e-9)   // snappy → short ramp
+        #expect(AutoZoomTrack.rampFor(1) < AutoZoomTrack.rampFor(0))
+        #expect(abs(AutoZoomTrack.rampFor(-1) - 0.80) < 1e-9)  // clamps
+        #expect(abs(AutoZoomTrack.rampFor(2) - 0.15) < 1e-9)
+    }
+
+    @Test func lowSensitivityRampsInSlowerThanHigh() {
+        // Same block; shortly after it starts the low-sensitivity zoom has ramped
+        // in less than the snappy one (sensitivity now drives the zoom ramp).
+        let calm = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 0)],
+                                       cursorSamples: movingCursor(), sourceSize: source)
+        let snappy = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 1)],
+                                         cursorSamples: movingCursor(), sourceSize: source)
+        let sCalm = AutoZoomTrack.sample(at: 0.15, track: calm).scale
+        let sSnappy = AutoZoomTrack.sample(at: 0.15, track: snappy).scale
+        #expect(sSnappy > sCalm)          // snappy reaches the zoom faster
+        #expect(sCalm < 2)                // calm still ramping in
+    }
+
+    // MARK: - Recenter weight (drives focus → frame-centre blend)
+
+    @Test func weightIsZeroOutsideAndAtBlockEdges() {
+        let blocks = [ZoomBlock(begin: 1, end: 3, scale: 2)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        #expect(AutoZoomTrack.sample(at: 0.5, track: track).weight == 0)   // before
+        #expect(AutoZoomTrack.sample(at: 4.0, track: track).weight == 0)   // after
+        // At the very start/end of the block the scale is 1, so weight ≈ 0.
+        #expect(AutoZoomTrack.sample(at: 1.02, track: track).weight < 0.2)
+        #expect(AutoZoomTrack.sample(at: 2.98, track: track).weight < 0.2)
+    }
+
+    @Test func weightReachesOneAtFullHold() {
+        let blocks = [ZoomBlock(begin: 0, end: 4, scale: 2)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        // Mid-block the scale is held at target → fully recentered.
+        #expect(abs(AutoZoomTrack.sample(at: 2.0, track: track).weight - 1) < 0.02)
+    }
+
+    @Test func weightTracksScaleRampIndependentOfTarget() {
+        // weight is normalized (scale-1)/(target-1), so a 1.5× and a 3× block
+        // both hit weight≈1 at hold even though their scales differ.
+        let a = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 1.5)],
+                                    cursorSamples: movingCursor(), sourceSize: source)
+        let b = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 3)],
+                                    cursorSamples: movingCursor(), sourceSize: source)
+        #expect(abs(AutoZoomTrack.sample(at: 2.0, track: a).weight - 1) < 0.02)
+        #expect(abs(AutoZoomTrack.sample(at: 2.0, track: b).weight - 1) < 0.02)
+    }
+
+    @Test func overflowFlagPropagatesFromBlock() {
+        let on = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, overflow: true)],
+                                     cursorSamples: movingCursor(), sourceSize: source)
+        let off = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2)],
+                                      cursorSamples: movingCursor(), sourceSize: source)
+        #expect(AutoZoomTrack.sample(at: 2.0, track: on).overflow == true)
+        #expect(AutoZoomTrack.sample(at: 2.0, track: off).overflow == false)
+        // Outside any block there is no zoom → overflow reads false.
+        #expect(AutoZoomTrack.sample(at: 9.0, track: on).overflow == false)
+    }
+
     // MARK: - tuning mapping
 
-    @Test func tuningEndpointsClampAndMonotonic() {
+    @Test func tuningMapsSensitivityToFollowKnobs() {
         let lo = AutoZoomTrack.tuning(0)
+        let mid = AutoZoomTrack.tuning(0.5)
         let hi = AutoZoomTrack.tuning(1)
-        #expect(abs(lo.deadzone - 0.10) < 1e-9)
-        #expect(abs(lo.dwell - 0.6) < 1e-9)
-        #expect(abs(lo.smoothing - 0.30) < 1e-9)
-        #expect(abs(hi.deadzone - 0.0) < 1e-9)
-        #expect(abs(hi.dwell - 0.0) < 1e-9)
-        #expect(abs(hi.smoothing - 0.05) < 1e-9)
-        // Higher sensitivity → smaller ignore-zone, shorter delay, less lag.
+        #expect(abs(lo.deadzone - 0.08) < 1e-9)
+        #expect(abs(lo.dwell - 0.80) < 1e-9)
+        #expect(abs(lo.smoothing - 0.60) < 1e-9)
+        // 50% ≈ the old snappiest-calm feel (dwell 0.2s, ease 0.315s).
+        #expect(abs(mid.dwell - 0.20) < 1e-9)
+        #expect(abs(mid.smoothing - 0.315) < 1e-9)
+        #expect(abs(hi.deadzone) < 1e-9)
+        #expect(abs(hi.dwell) < 1e-9)
+        #expect(abs(hi.smoothing - 0.03) < 1e-9)
+        // Higher sensitivity → smaller ignore-zone, shorter delay, faster ease.
         #expect(hi.deadzone < lo.deadzone)
         #expect(hi.dwell < lo.dwell)
         #expect(hi.smoothing < lo.smoothing)
         // Clamps out-of-range input.
-        #expect(AutoZoomTrack.tuning(-1).deadzone == 0.10)
-        #expect(AutoZoomTrack.tuning(2).deadzone == 0.0)
+        #expect(abs(AutoZoomTrack.tuning(-1).dwell - 0.80) < 1e-9)
+        #expect(abs(AutoZoomTrack.tuning(2).dwell) < 1e-9)
     }
 
     // MARK: - Settle-based follow
@@ -104,8 +174,8 @@ import CoreGraphics
     }
 
     @Test func transientFlickDoesNotPanAtLowSensitivity() {
-        // A large (300px > deadzone) but brief (0.1s < dwell) flick must be
-        // ignored — this is the reported "little/fast move still pans" bug.
+        // A large (300px) but brief (0.1s ≪ dwell) flick never fills the settle
+        // timer, so the focus holds — the reported "little/fast move still pans" bug.
         let track = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 0)],
                                         cursorSamples: flickCursor(), sourceSize: source)
         #expect(abs(AutoZoomTrack.sample(at: 2.2, track: track).focus.x - 200) < 5)
@@ -124,17 +194,17 @@ import CoreGraphics
         return s
     }
 
-    @Test func restingAtNewSpotPansAfterDwell() {
-        // Low sensitivity: dwell ~0.6s. Before the dwell elapses the canvas holds;
-        // after it, the canvas gently pans toward the rested spot.
+    @Test func restingAtNewSpotPansAfterDelay() {
+        // Low sensitivity: long dwell. Before it elapses the canvas holds; after,
+        // the focus eases toward the rested spot (stopping within the ignore-zone).
         let track = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 0)],
                                         cursorSamples: moveAndRestCursor(), sourceSize: source)
-        #expect(AutoZoomTrack.sample(at: 1.2, track: track).focus.x < 260)   // not yet
-        #expect(AutoZoomTrack.sample(at: 3.8, track: track).focus.x > 360)   // settled → panned
+        #expect(AutoZoomTrack.sample(at: 1.05, track: track).focus.x < 260)   // not yet (dwell)
+        #expect(AutoZoomTrack.sample(at: 3.8, track: track).focus.x > 400)    // settled → eased over
     }
 
     @Test func highSensitivityFollowsWithoutWaiting() {
-        // s=1: no dwell, no deadzone → focus tracks the moved cursor quickly.
+        // s=1: no dwell, no deadzone, short ease → focus tracks the moved cursor.
         let track = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 1)],
                                         cursorSamples: moveAndRestCursor(), sourceSize: source)
         #expect(AutoZoomTrack.sample(at: 1.5, track: track).focus.x > 360)
@@ -154,7 +224,8 @@ import CoreGraphics
     }
 
     @Test func passingThroughWithoutRestingDoesNotPan() {
-        // The cursor reaches x=700 at t=2 but never holds still → no pan.
+        // The cursor reaches x=700 at t=2 but never holds still → the settle timer
+        // never fills → no pan.
         let track = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, sensitivity: 0)],
                                         cursorSamples: sweepCursor(), sourceSize: source)
         #expect(abs(AutoZoomTrack.sample(at: 2.0, track: track).focus.x - 200) < 20)

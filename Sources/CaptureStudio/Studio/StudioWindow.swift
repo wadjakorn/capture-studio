@@ -718,6 +718,18 @@ struct StudioView: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: Binding(get: { model.selectedZoomOverflow },
+                                     set: { model.setZoomOverflow($0) })) {
+                    Label("Overflow past frame", systemImage: "rectangle.expand.vertical")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .toggleStyle(.switch)
+                Text("Let the video pan past the framing window and off the canvas, centring the cursor on the canvas and showing the background at the edges. Off keeps the video filling the frame.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(16)
         .frame(width: 280)
