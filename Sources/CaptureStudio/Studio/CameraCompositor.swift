@@ -319,14 +319,18 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             let zoom = AutoZoomTrack.sample(at: now, track: instruction.overlay.autoZoom)
             let focusCanvas = Self.sourceToCanvas(zoom.focus, layout: layout)
             let canvasRect = CGRect(origin: .zero, size: layout.canvas)
-            // The zoom recenters the focus (cursor) onto a region centre so it sits
-            // in the middle of what the viewer sees. `overflow` picks the region:
-            //  - contained (default): the framing window (else the whole canvas),
-            //    with the pan clamped so the video always covers it — no empty edge.
-            //  - overflow: the whole canvas, unclamped — the video may pan past the
-            //    window/canvas edge and the background shows where it stops.
-            // The recenter is blended by `zoom.weight` so it ramps with the scale.
-            let region = zoom.overflow ? canvasRect : (layout.screenFrame ?? canvasRect)
+            // The zoom recenters the focus (cursor) onto the region centre so it
+            // sits in the middle of what the viewer watches — the framing window
+            // (else the whole canvas). The region is the SAME in both modes; only
+            // the clamp differs:
+            //  - contained (default): the pan is clamped so the video always covers
+            //    the region — no empty edge inside it.
+            //  - overflow: the pan is unclamped — the video may pan past the region
+            //    edge and the background shows INSIDE the region where it stops.
+            // Either way the main video is hard-clipped to the framing window and
+            // never draws outside it. The recenter is blended by `zoom.weight` so it
+            // ramps with the scale.
+            let region = layout.screenFrame ?? canvasRect
             let content = layout.screenFit ?? canvasRect      // where the source sits pre-zoom
             let targetCanvas = Self.recenterTarget(focus: focusCanvas, weight: zoom.weight,
                                                    scale: zoom.scale, content: content,
@@ -335,14 +339,13 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
                              targetCanvas: targetCanvas, canvas: layout.canvas)
             }
-            // Clip every main-video layer (screen, click rings, cursor) after the
-            // zoom. Contained → the framing window; overflow → the whole canvas.
-            // Background shows through wherever the clipped video doesn't cover.
+            // Hard-clip every main-video layer (screen, click rings, cursor) to the
+            // framing window in ALL modes — the window is a fixed peephole, never
+            // skipped by overflow. Background shows wherever the clipped video
+            // doesn't cover (letterbox bars, or overflow gaps at the window edge).
+            // nil = no framing window → no clip (only the canvas crop at the end).
             // CI bottom-left space.
-            let frameCI: CGRect? = zoom.overflow
-                ? canvasRect
-                : layout.screenFrame.map { Self.flip($0, in: layout.canvas.height) }
-            let revealsBackground = zoom.overflow || layout.screenFrame != nil
+            let frameCI: CGRect? = layout.screenFrame.map { Self.flip($0, in: layout.canvas.height) }
             func framed(_ img: CIImage) -> CIImage {
                 guard let frameCI else { return img }
                 return img.cropped(to: frameCI)
@@ -376,18 +379,16 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 output = CIImage(color: .black)
                     .cropped(to: CGRect(origin: .zero, size: layout.canvas))
             } else if frameLayout.showsMainVideo {
-                let screen = zoomed(screenCanvasImage(screenBuf, layout: layout,
-                                                      backgroundImage: instruction.overlay.backgroundImage))
-                if revealsBackground {
-                    // Framing window and/or overflow: the clipped screen sits over
-                    // the background fill (what shows where the video doesn't cover).
-                    let bg = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
-                                            layout: layout,
-                                            image: instruction.overlay.backgroundImage)
-                    output = framed(screen).composited(over: bg)
-                } else {
-                    output = screen
-                }
+                // Place the full source, apply the zoom, clip to the framing window,
+                // then composite over the background. The screen carries only the
+                // real source pixels (transparent elsewhere), so the background
+                // shows through the letterbox bars, outside the frame, and in any
+                // overflow gap the pan opens at the frame edge — all in one step.
+                let screen = zoomed(screenCanvasImage(screenBuf, layout: layout))
+                let bg = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
+                                        layout: layout,
+                                        image: instruction.overlay.backgroundImage)
+                output = framed(screen).composited(over: bg)
             } else {
                 output = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
                                         layout: layout,
@@ -456,30 +457,35 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
 
     // MARK: - Frame building
 
-    private func screenCanvasImage(_ buffer: CVPixelBuffer, layout: CompositorLayout,
-                                   backgroundImage: CIImage?) -> CIImage {
+    /// Place the source onto the canvas at the manual reframe (fit letterbox or
+    /// cover crop) WITHOUT discarding the out-of-frame source. The transform only
+    /// positions/scales the full source; nothing is cropped here. The caller adds
+    /// the auto-zoom magnify, then clips to the framing window and composites over
+    /// the background. Keeping the whole source live is what lets the zoom pan
+    /// slide previously-cut source area back into the frame (defect #2) — the
+    /// reframe positions the source, the zoom crops/zooms within it. Pixels the
+    /// zoom leaves outside the frame are transparent, so the background shows
+    /// through there.
+    private func screenCanvasImage(_ buffer: CVPixelBuffer, layout: CompositorLayout) -> CIImage {
         let image = CIImage(cvPixelBuffer: buffer)
         if let place = layout.screenFit {
-            // Contain (letterbox) the whole source at the fit placement, over the
-            // configured background fill (black / blurred video / photo).
+            // Contain (letterbox) the whole source at the fit placement.
             guard place.width > 0, layout.sourceSize.width > 0 else { return image }
             let s = place.width / layout.sourceSize.width
             let ty = layout.canvas.height - place.maxY    // top-left → CI bottom-left
-            let fitted = image
-                .transformed(by: CGAffineTransform(scaleX: s, y: s)
-                    .concatenating(CGAffineTransform(translationX: place.minX, y: ty)))
-                .cropped(to: CGRect(origin: .zero, size: layout.canvas))
-            let bg = backgroundFill(video: image, layout: layout, image: backgroundImage)
-            return fitted.composited(over: bg)
+            return image.transformed(by: CGAffineTransform(scaleX: s, y: s)
+                .concatenating(CGAffineTransform(translationX: place.minX, y: ty)))
         }
+        // Cover: scale so the reframe crop fills the canvas and shift its origin to
+        // 0 — but apply the transform to the FULL source (no `.cropped(to: crop)`),
+        // so the pixels outside the crop stay available for the zoom pan to reveal.
         let crop = layout.screenCrop ?? CGRect(origin: .zero, size: layout.sourceSize)
         guard crop.width > 0 else { return image }
         let cropCI = Self.flip(crop, in: layout.sourceSize.height)
         let scale = layout.canvas.width / crop.width
         let t = CGAffineTransform(translationX: -cropCI.minX, y: -cropCI.minY)
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-        return image.cropped(to: cropCI).transformed(by: t)
-            .cropped(to: CGRect(origin: .zero, size: layout.canvas))
+        return image.transformed(by: t)
     }
 
     /// Opaque full-canvas background fill behind the fitted video (the letterbox
