@@ -3,15 +3,6 @@ import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
 
-/// Reports the natural (padded) height of a style popover's content so the
-/// popover frame can fit it up to a cap instead of using a fixed height.
-private struct StylePopoverHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var showCameraStyle = false
@@ -275,14 +266,15 @@ struct StudioView: View {
         if model.hasSystemAudioTrack {
             volumeSlider(systemImage: "speaker.wave.2", help: "System audio volume",
                          value: Binding(get: { model.systemVolume },
-                                        set: { model.setSystemVolume($0) }))
+                                        set: { model.setSystemVolume($0) }),
+                         model: model)
         }
         if model.hasMicTrack {
             volumeSlider(systemImage: "mic",
                          help: "Microphone volume (up to 300% to boost quiet voice)",
                          value: Binding(get: { model.micVolume },
                                         set: { model.setMicVolume($0) }),
-                         range: 0...3, showPercent: true)
+                         range: 0...3, showPercent: true, model: model)
         }
     }
 
@@ -621,12 +613,12 @@ struct StudioView: View {
                     styleSliderText("Strength", value: Binding(
                         get: { block?.blurStrength ?? 0.04 },
                         set: { model.setShapeBlurStrength($0) }
-                    ), range: 0.005...0.2)
+                    ), range: 0.005...0.2, model: model)
                 } else {
                     styleSliderText("Fill opacity", value: Binding(
                         get: { block?.fillOpacity ?? 0 },
                         set: { model.setShapeFillOpacity($0) }
-                    ), range: 0...1)
+                    ), range: 0...1, model: model)
                     if (block?.fillOpacity ?? 0) > 0 {
                         textColorRow("Fill color", hex: block?.fillHex ?? "#000000") {
                             model.setShapeFillHex($0)
@@ -636,7 +628,7 @@ struct StudioView: View {
                     styleSliderText("Outline", value: Binding(
                         get: { block?.strokeWidth ?? 0 },
                         set: { model.setShapeStrokeWidth($0) }
-                    ), range: 0...0.1)
+                    ), range: 0...0.1, model: model)
                     if (block?.strokeWidth ?? 0) > 0 {
                         textColorRow("Outline color", hex: block?.strokeHex ?? "#FF3B30") {
                             model.setShapeStrokeHex($0)
@@ -647,7 +639,7 @@ struct StudioView: View {
                         styleSliderText("Corner radius", value: Binding(
                             get: { block?.cornerRadius ?? 0 },
                             set: { model.setShapeCornerRadius($0) }
-                        ), range: 0...0.5)
+                        ), range: 0...0.5, model: model)
                     }
                 }
             }
@@ -817,36 +809,7 @@ struct StudioView: View {
         .help("Show click feedback rings")
     }
 
-    private func volumeSlider(systemImage: String, help: String,
-                              value: Binding<Double>,
-                              range: ClosedRange<Double> = 0...1,
-                              showPercent: Bool = false) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
-            Slider(value: value, in: range) { editing in
-                if !editing { model.commitVolumeEdit() }
-            }
-            .frame(width: 80)
-            .controlSize(.small)
-            if showPercent {
-                Text("\(Int((value.wrappedValue * 100).rounded()))%")
-                    .font(.caption2)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 34, alignment: .trailing)
-            }
-        }
-        .help(help)
-    }
-
     // MARK: - Camera style
-
-    /// Common border colors offered as one-tap swatches.
-    private static let borderPresets = [
-        "#FFFFFF", "#000000", "#FF3B30", "#FF9500",
-        "#34C759", "#007AFF", "#AF52DE", "#8E8E93",
-    ]
 
     private var cameraStylePopover: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -902,16 +865,16 @@ struct StudioView: View {
                 styleSlider("Corner radius", value: Binding(
                     get: { model.cameraCornerRadius },
                     set: { model.setCameraCornerRadius($0) }
-                ), range: 0...1)
+                ), range: 0...1, model: model)
             }
 
             styleSlider("Border", value: Binding(
                 get: { model.cameraBorderWidth },
                 set: { model.setCameraBorderWidth($0) }
-            ), range: 0...0.1)
+            ), range: 0...0.1, model: model)
 
             if model.cameraBorderWidth > 0 {
-                borderColorControls
+                borderColorControls(model: model)
             }
 
             Toggle("Shadow", isOn: Binding(
@@ -923,59 +886,14 @@ struct StudioView: View {
                 styleSlider("Shadow", value: Binding(
                     get: { model.cameraShadowRadius },
                     set: { model.setCameraShadowRadius($0) }
-                ), range: 0...1)
+                ), range: 0...1, model: model)
             }
         }
         .padding(14)
         .frame(width: 240)
     }
 
-    /// Preset swatches plus a compact custom picker. Tapping a swatch sets the
-    /// border color inline; only the custom picker opens the system panel.
-    private var borderColorControls: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Border color").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                ForEach(Self.borderPresets, id: \.self) { hex in
-                    let selected = hex.caseInsensitiveCompare(model.cameraBorderHex) == .orderedSame
-                    Circle()
-                        .fill(Color(hexString: hex))
-                        .frame(width: 20, height: 20)
-                        .overlay(Circle().strokeBorder(.secondary.opacity(0.4), lineWidth: 0.5))
-                        .overlay(
-                            Circle().strokeBorder(Color.accentColor,
-                                                  lineWidth: selected ? 2.5 : 0)
-                                .padding(-2)
-                        )
-                        .onTapGesture { model.setCameraBorderHex(hex) }
-                }
-            }
-            ColorPicker("Custom", selection: Binding(
-                get: { Color(hexString: model.cameraBorderHex) },
-                set: { model.setCameraBorderHex($0.hexString()) }
-            ), supportsOpacity: false)
-            .labelsHidden()
-        }
-    }
-
-    private func styleSlider(_ title: String, value: Binding<Double>,
-                             range: ClosedRange<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Slider(value: value, in: range) { editing in
-                if editing { model.beginStyleEdit() } else { model.endStyleEdit() }
-            }
-        }
-    }
-
     // MARK: - Text style
-
-    /// Curated font families (Core Text resolves by family name; unknown names
-    /// fall back to the system font).
-    private static let fontFamilies = [
-        "Helvetica", "Helvetica Neue", "Arial", "Avenir Next",
-        "Georgia", "Futura", "Menlo", "Times New Roman",
-    ]
 
     @ViewBuilder
     private var textStylePopover: some View {
@@ -986,7 +904,7 @@ struct StudioView: View {
                     get: { block?.fontName ?? "Helvetica" },
                     set: { model.setTextFontName($0) }
                 )) {
-                    ForEach(Self.fontFamilies, id: \.self) { Text($0).tag($0) }
+                    ForEach(inspectorFontFamilies, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
 
@@ -1018,7 +936,7 @@ struct StudioView: View {
                     styleSliderText("Box width", value: Binding(
                         get: { block?.boxWidth ?? 0.9 },
                         set: { model.setTextBoxWidth($0) }
-                    ), range: 0.05...1.0)
+                    ), range: 0.05...1.0, model: model)
                 }
 
                 textColorRow("Color", hex: block?.colorHex ?? "#FFFFFF") {
@@ -1036,13 +954,13 @@ struct StudioView: View {
                     styleSliderText("Box opacity", value: Binding(
                         get: { block?.boxOpacity ?? 0.5 },
                         set: { model.setTextBoxOpacity($0) }
-                    ), range: 0...1)
+                    ), range: 0...1, model: model)
                 }
 
                 styleSliderText("Outline", value: Binding(
                     get: { block?.strokeWidth ?? 0 },
                     set: { model.setTextStrokeWidth($0) }
-                ), range: 0...0.2)
+                ), range: 0...0.2, model: model)
                 if (block?.strokeWidth ?? 0) > 0 {
                     textColorRow("Outline color", hex: block?.strokeHex ?? "#000000") {
                         model.setTextStrokeHex($0)
@@ -1067,16 +985,6 @@ struct StudioView: View {
         .frame(width: 320, height: min(textPopoverHeight == 0 ? 500 : textPopoverHeight, 500))
         .scrollBounceBehavior(.basedOnSize)
         .onPreferenceChange(StylePopoverHeightKey.self) { textPopoverHeight = $0 }
-    }
-
-    private func styleSliderText(_ title: String, value: Binding<Double>,
-                                 range: ClosedRange<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Slider(value: value, in: range) { editing in
-                if !editing { model.commitTextEdit() }
-            }
-        }
     }
 
     // MARK: - Subtitle style (one shared config applied to every cue)
@@ -1120,7 +1028,7 @@ struct StudioView: View {
                     get: { style?.fontName ?? "Helvetica" },
                     set: { model.setSubtitleFontName($0) }
                 )) {
-                    ForEach(Self.fontFamilies, id: \.self) { Text($0).tag($0) }
+                    ForEach(inspectorFontFamilies, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
 
@@ -1145,12 +1053,12 @@ struct StudioView: View {
                 styleSliderSubtitle("Size", value: Binding(
                     get: { style?.fontSize ?? 0.05 },
                     set: { model.setSubtitleFontSize($0) }
-                ), range: 0.02...0.2)
+                ), range: 0.02...0.2, model: model)
 
                 styleSliderSubtitle("Box width (wrap)", value: Binding(
                     get: { style?.boxWidth ?? 0.9 },
                     set: { model.setSubtitleBoxWidth($0) }
-                ), range: 0.05...1.0)
+                ), range: 0.05...1.0, model: model)
 
                 textColorRow("Color", hex: style?.colorHex ?? "#FFFFFF") {
                     model.setSubtitleColorHex($0)
@@ -1167,13 +1075,13 @@ struct StudioView: View {
                     styleSliderSubtitle("Box opacity", value: Binding(
                         get: { style?.boxOpacity ?? 0.5 },
                         set: { model.setSubtitleBoxOpacity($0) }
-                    ), range: 0...1)
+                    ), range: 0...1, model: model)
                 }
 
                 styleSliderSubtitle("Outline", value: Binding(
                     get: { style?.strokeWidth ?? 0 },
                     set: { model.setSubtitleStrokeWidth($0) }
-                ), range: 0...0.2)
+                ), range: 0...0.2, model: model)
                 if (style?.strokeWidth ?? 0) > 0 {
                     textColorRow("Outline color", hex: style?.strokeHex ?? "#000000") {
                         model.setSubtitleStrokeHex($0)
@@ -1205,16 +1113,6 @@ struct StudioView: View {
         .onPreferenceChange(StylePopoverHeightKey.self) { subtitlePopoverHeight = $0 }
     }
 
-    private func styleSliderSubtitle(_ title: String, value: Binding<Double>,
-                                     range: ClosedRange<Double>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Slider(value: value, in: range) { editing in
-                if !editing { model.commitSubtitleEdit() }
-            }
-        }
-    }
-
     /// Font-size control showing the rendered px height, with a ±1px stepper and
     /// a slider. `fontSize` is a fraction of canvas height, so px = fontSize ×
     /// renderSize.height (falls back to 1080 before the canvas size is known).
@@ -1240,31 +1138,6 @@ struct StudioView: View {
                 set: { model.setTextFontSize($0) }
             ), in: 0.005...0.2) { editing in
                 if !editing { model.commitTextEdit() }
-            }
-        }
-    }
-
-    /// Preset swatches + custom picker for a text color field.
-    private func textColorRow(_ title: String, hex: String,
-                              set: @escaping (String) -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            FlowLayout(hSpacing: 6, vSpacing: 6) {
-                ForEach(Self.borderPresets, id: \.self) { h in
-                    let selected = h.caseInsensitiveCompare(hex) == .orderedSame
-                    Circle()
-                        .fill(Color(hexString: h))
-                        .frame(width: 18, height: 18)
-                        .overlay(Circle().strokeBorder(.secondary.opacity(0.4), lineWidth: 0.5))
-                        .overlay(Circle().strokeBorder(Color.accentColor,
-                                                       lineWidth: selected ? 2.5 : 0).padding(-2))
-                        .onTapGesture { set(h) }
-                }
-                ColorPicker("", selection: Binding(
-                    get: { Color(hexString: hex) },
-                    set: { set($0.hexString()) }
-                ), supportsOpacity: false)
-                .labelsHidden()
             }
         }
     }
@@ -1380,26 +1253,5 @@ struct StudioView: View {
         let minutes = Int(total) / 60
         let secs = total - Double(minutes * 60)
         return String(format: "%02d:%04.1f", minutes, secs)
-    }
-}
-
-extension Color {
-    /// Parses "#RRGGBB" (or "RRGGBB"); falls back to white.
-    init(hexString: String) {
-        var s = hexString.trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("#") { s.removeFirst() }
-        let v = UInt64(s, radix: 16) ?? 0xFFFFFF
-        self.init(.sRGB,
-                  red: Double((v >> 16) & 0xFF) / 255,
-                  green: Double((v >> 8) & 0xFF) / 255,
-                  blue: Double(v & 0xFF) / 255)
-    }
-
-    func hexString() -> String {
-        let ns = NSColor(self).usingColorSpace(.sRGB) ?? .white
-        return String(format: "#%02X%02X%02X",
-                      Int((ns.redComponent * 255).rounded()),
-                      Int((ns.greenComponent * 255).rounded()),
-                      Int((ns.blueComponent * 255).rounded()))
     }
 }
