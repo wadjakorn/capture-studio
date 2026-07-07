@@ -11,11 +11,6 @@ struct StudioView: View {
     @State private var showSubtitleStyle = false
     @State private var showZoomStyle = false
     @State private var confirmRemoveSubtitles = false
-    // Measured content heights for the style popovers; drive a content-fitting,
-    // capped frame so they never clip their last row or leave empty slack.
-    @State private var textPopoverHeight: CGFloat = 0
-    @State private var shapePopoverHeight: CGFloat = 0
-    @State private var subtitlePopoverHeight: CGFloat = 0
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -194,7 +189,7 @@ struct StudioView: View {
             // sound · main video · mouse · camera · subtitle · cursor-follow · text.
             FlowLayout(hSpacing: 8, vSpacing: 8) {
                 if model.hasSystemAudioTrack || model.hasMicTrack {
-                    toolGroup { audioControls }
+                    toolGroup { AudioInspector(model: model) }
                 }
                 toolGroup { reframeControls }
                 toolGroup { cursorControls }            // mouse appearance
@@ -260,22 +255,6 @@ struct StudioView: View {
         }
         .help("Reveal master files in Finder")
         exportControls
-    }
-
-    @ViewBuilder private var audioControls: some View {
-        if model.hasSystemAudioTrack {
-            volumeSlider(systemImage: "speaker.wave.2", help: "System audio volume",
-                         value: Binding(get: { model.systemVolume },
-                                        set: { model.setSystemVolume($0) }),
-                         model: model)
-        }
-        if model.hasMicTrack {
-            volumeSlider(systemImage: "mic",
-                         help: "Microphone volume (up to 300% to boost quiet voice)",
-                         value: Binding(get: { model.micVolume },
-                                        set: { model.setMicVolume($0) }),
-                         range: 0...3, showPercent: true, model: model)
-        }
     }
 
     @ViewBuilder private var reframeControls: some View {
@@ -466,7 +445,7 @@ struct StudioView: View {
         }
         .help("Camera style — zoom, frame & shape")
         .popover(isPresented: $showCameraStyle, arrowEdge: .bottom) {
-            cameraStylePopover
+            CameraInspector(model: model)
         }
 
         // Camera move keyframes — position/scale only; only meaningful while the
@@ -498,7 +477,7 @@ struct StudioView: View {
         .disabled(model.selectedTextBlock == nil)
         .help("Edit text style")
         .popover(isPresented: $showTextStyle, arrowEdge: .bottom) {
-            textStylePopover
+            CaptionsInspector.TextSection(model: model)
         }
 
         // Z-order + delete for the selected block — always shown, disabled
@@ -565,7 +544,7 @@ struct StudioView: View {
         .disabled(model.selectedShapeBlock == nil)
         .help("Edit shape style")
         .popover(isPresented: $showShapeStyle, arrowEdge: .bottom) {
-            shapeStylePopover
+            ShapeInspector(model: model)
         }
 
         // Z-order + delete for the selected block — always shown, disabled until
@@ -587,74 +566,6 @@ struct StudioView: View {
             .help("Delete this shape block")
     }
 
-    @ViewBuilder
-    private var shapeStylePopover: some View {
-        let block = model.selectedShapeBlock
-        let kind = block?.kind ?? .rectangle
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Kind", selection: Binding(
-                    get: { kind },
-                    set: { model.setShapeKind($0) }
-                )) {
-                    ForEach(ShapeKind.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                if kind == .blur {
-                    Picker("Blur style", selection: Binding(
-                        get: { block?.blurStyle ?? .gaussian },
-                        set: { model.setShapeBlurStyle($0) }
-                    )) {
-                        ForEach(ShapeBlurStyle.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden()
-
-                    styleSliderText("Strength", value: Binding(
-                        get: { block?.blurStrength ?? 0.04 },
-                        set: { model.setShapeBlurStrength($0) }
-                    ), range: 0.005...0.2, model: model)
-                } else {
-                    styleSliderText("Fill opacity", value: Binding(
-                        get: { block?.fillOpacity ?? 0 },
-                        set: { model.setShapeFillOpacity($0) }
-                    ), range: 0...1, model: model)
-                    if (block?.fillOpacity ?? 0) > 0 {
-                        textColorRow("Fill color", hex: block?.fillHex ?? "#000000") {
-                            model.setShapeFillHex($0)
-                        }
-                    }
-
-                    styleSliderText("Outline", value: Binding(
-                        get: { block?.strokeWidth ?? 0 },
-                        set: { model.setShapeStrokeWidth($0) }
-                    ), range: 0...0.1, model: model)
-                    if (block?.strokeWidth ?? 0) > 0 {
-                        textColorRow("Outline color", hex: block?.strokeHex ?? "#FF3B30") {
-                            model.setShapeStrokeHex($0)
-                        }
-                    }
-
-                    if kind == .rectangle {
-                        styleSliderText("Corner radius", value: Binding(
-                            get: { block?.cornerRadius ?? 0 },
-                            set: { model.setShapeCornerRadius($0) }
-                        ), range: 0...0.5, model: model)
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 20)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-            })
-        }
-        .frame(width: 320, height: min(shapePopoverHeight == 0 ? 320 : shapePopoverHeight, 500))
-        .scrollBounceBehavior(.basedOnSize)
-        .onPreferenceChange(StylePopoverHeightKey.self) { shapePopoverHeight = $0 }
-    }
-
     @ViewBuilder private var zoomControls: some View {
         Button { model.addZoomBlock() } label: {
             Label("Add zoom", systemImage: "plus.magnifyingglass")
@@ -669,7 +580,7 @@ struct StudioView: View {
         .disabled(model.selectedZoomBlockID == nil)
         .help("Zoom magnification & follow sensitivity for the selected block")
         .popover(isPresented: $showZoomStyle, arrowEdge: .bottom) {
-            zoomStylePopover
+            ZoomInspector(model: model)
         }
 
         Button(role: .destructive) {
@@ -679,62 +590,6 @@ struct StudioView: View {
         }
         .disabled(model.selectedZoomBlockID == nil)
         .help("Delete the selected zoom block")
-    }
-
-    /// Per-block zoom controls (scale + follow sensitivity) — the two scalers
-    /// that used to sit inline, now wrapped in a popover since they operate on
-    /// the selected move/zoom block.
-    private var zoomStylePopover: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label("Zoom", systemImage: "arrow.up.left.and.arrow.down.right")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(String(format: "%.1f×", model.selectedZoomScale))
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                Slider(
-                    value: Binding(get: { model.selectedZoomScale },
-                                   set: { model.setZoomScale($0) }),
-                    in: 1...6,
-                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
-                )
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label("Follow sensitivity", systemImage: "hand.draw")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                Slider(
-                    value: Binding(get: { model.selectedZoomSensitivity },
-                                   set: { model.setZoomSensitivity($0) }),
-                    in: 0...1,
-                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
-                )
-                Text("How aggressively the zoom pans toward the cursor — low = calm, high = snappy.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle(isOn: Binding(get: { model.selectedZoomOverflow },
-                                     set: { model.setZoomOverflow($0) })) {
-                    Label("Overflow inside frame", systemImage: "rectangle.expand.vertical")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .toggleStyle(.switch)
-                Text("Let the pan run past the video edge so the background shows inside the frame at the edges (cursor stays centred in the frame). Off keeps the video filling the frame. The video is always clipped to the frame either way.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(16)
-        .frame(width: 280)
     }
 
     @ViewBuilder private var subtitleControls: some View {
@@ -754,7 +609,7 @@ struct StudioView: View {
             .disabled(model.subtitleState != .idle)
             .help("Subtitle style & position")
             .popover(isPresented: $showSubtitleStyle, arrowEdge: .bottom) {
-                subtitleStylePopover
+                CaptionsInspector.SubtitleSection(model: model)
             }
         }
 
@@ -807,339 +662,6 @@ struct StudioView: View {
         }
         .toggleStyle(.button)
         .help("Show click feedback rings")
-    }
-
-    // MARK: - Camera style
-
-    private var cameraStylePopover: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Zoom").font(.caption).foregroundStyle(.secondary)
-                Slider(value: Binding(get: { model.cameraZoom },
-                                      set: { model.setCameraZoom($0) }),
-                       in: 1.0...4.0) { editing in
-                    if editing { model.beginStyleEdit() } else { model.endStyleEdit() }
-                }
-            }
-
-            Picker("Shape", selection: Binding(
-                get: { model.cameraShape },
-                set: { model.setCameraShape($0) }
-            )) {
-                ForEach(CameraShape.allCases, id: \.self) { shape in
-                    Text(shape.displayName).tag(shape)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            HStack(spacing: 8) {
-                Button {
-                    model.rotateCamera()
-                } label: {
-                    Label("Rotate", systemImage: "rotate.right")
-                }
-                .help("Rotate camera 90°")
-                if model.cameraRotation != 0 {
-                    Text("\(model.cameraRotation)°")
-                        .font(.caption).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            // Aspect only applies to rectangles; a circle is forced to 1:1.
-            if model.cameraShape == .rectangle {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Aspect").font(.caption).foregroundStyle(.secondary)
-                    Picker("Aspect", selection: Binding(
-                        get: { model.cameraAspect },
-                        set: { model.setCameraAspect($0) }
-                    )) {
-                        ForEach(CameraAspect.allCases, id: \.self) { a in
-                            Text(a.displayName).tag(a)
-                        }
-                    }
-                    .labelsHidden()
-                }
-
-                styleSlider("Corner radius", value: Binding(
-                    get: { model.cameraCornerRadius },
-                    set: { model.setCameraCornerRadius($0) }
-                ), range: 0...1, model: model)
-            }
-
-            styleSlider("Border", value: Binding(
-                get: { model.cameraBorderWidth },
-                set: { model.setCameraBorderWidth($0) }
-            ), range: 0...0.1, model: model)
-
-            if model.cameraBorderWidth > 0 {
-                borderColorControls(model: model)
-            }
-
-            Toggle("Shadow", isOn: Binding(
-                get: { model.cameraShadow },
-                set: { model.setCameraShadow($0) }
-            ))
-
-            if model.cameraShadow {
-                styleSlider("Shadow", value: Binding(
-                    get: { model.cameraShadowRadius },
-                    set: { model.setCameraShadowRadius($0) }
-                ), range: 0...1, model: model)
-            }
-        }
-        .padding(14)
-        .frame(width: 240)
-    }
-
-    // MARK: - Text style
-
-    @ViewBuilder
-    private var textStylePopover: some View {
-        let block = model.selectedTextBlock
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Font", selection: Binding(
-                    get: { block?.fontName ?? "Helvetica" },
-                    set: { model.setTextFontName($0) }
-                )) {
-                    ForEach(inspectorFontFamilies, id: \.self) { Text($0).tag($0) }
-                }
-                .labelsHidden()
-
-                Picker("Weight", selection: Binding(
-                    get: { block?.fontWeight ?? .semibold },
-                    set: { model.setTextWeight($0) }
-                )) {
-                    ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                Picker("Align", selection: Binding(
-                    get: { block?.alignment ?? .center },
-                    set: { model.setTextAlignment($0) }
-                )) {
-                    Image(systemName: "text.alignleft").tag(TextAlignmentH.leading)
-                    Image(systemName: "text.aligncenter").tag(TextAlignmentH.center)
-                    Image(systemName: "text.alignright").tag(TextAlignmentH.trailing)
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                textSizeRow(block)
-
-                Toggle("Auto-wrap lines", isOn: Binding(
-                    get: { block?.autoWrap ?? true },
-                    set: { model.setTextAutoWrap($0) }
-                ))
-                if block?.autoWrap ?? true {
-                    styleSliderText("Box width", value: Binding(
-                        get: { block?.boxWidth ?? 0.9 },
-                        set: { model.setTextBoxWidth($0) }
-                    ), range: 0.05...1.0, model: model)
-                }
-
-                textColorRow("Color", hex: block?.colorHex ?? "#FFFFFF") {
-                    model.setTextColorHex($0)
-                }
-
-                Toggle("Background box", isOn: Binding(
-                    get: { block?.boxEnabled ?? false },
-                    set: { model.setTextBoxEnabled($0) }
-                ))
-                if block?.boxEnabled == true {
-                    textColorRow("Box color", hex: block?.boxHex ?? "#000000") {
-                        model.setTextBoxHex($0)
-                    }
-                    styleSliderText("Box opacity", value: Binding(
-                        get: { block?.boxOpacity ?? 0.5 },
-                        set: { model.setTextBoxOpacity($0) }
-                    ), range: 0...1, model: model)
-                }
-
-                styleSliderText("Outline", value: Binding(
-                    get: { block?.strokeWidth ?? 0 },
-                    set: { model.setTextStrokeWidth($0) }
-                ), range: 0...0.2, model: model)
-                if (block?.strokeWidth ?? 0) > 0 {
-                    textColorRow("Outline color", hex: block?.strokeHex ?? "#000000") {
-                        model.setTextStrokeHex($0)
-                    }
-                }
-
-                Toggle("Shadow", isOn: Binding(
-                    get: { block?.shadow ?? true },
-                    set: { model.setTextShadow($0) }
-                ))
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 20)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-            })
-        }
-        // Fit the content up to a cap; scroll only past it. Sizing to content
-        // keeps collapsed states slack-free and stops the last row from being
-        // clipped by the popover's rounded bottom edge.
-        .frame(width: 320, height: min(textPopoverHeight == 0 ? 500 : textPopoverHeight, 500))
-        .scrollBounceBehavior(.basedOnSize)
-        .onPreferenceChange(StylePopoverHeightKey.self) { textPopoverHeight = $0 }
-    }
-
-    // MARK: - Subtitle style (one shared config applied to every cue)
-
-    @ViewBuilder
-    private var subtitleStylePopover: some View {
-        let style = model.subtitles?.style
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Applies to all subtitles").font(.caption).foregroundStyle(.secondary)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Time offset (s)").font(.caption).foregroundStyle(.secondary)
-                    HStack(spacing: 6) {
-                        TextField("", value: Binding(
-                            get: { model.subtitles?.offset ?? 0 },
-                            set: { model.setSubtitleOffset($0) }
-                        ), format: .number.precision(.fractionLength(2)))
-                            .frame(width: 64)
-                            .multilineTextAlignment(.trailing)
-                            .textFieldStyle(.roundedBorder)
-                        Stepper("", value: Binding(
-                            get: { model.subtitles?.offset ?? 0 },
-                            set: { model.setSubtitleOffset($0) }
-                        ), in: -86_400...86_400, step: 0.1)
-                            .labelsHidden()
-                        Spacer()
-                        Button("Set from playhead") { model.setSubtitleOffsetFromPlayhead() }
-                            .controlSize(.small)
-                    }
-                    Text("SRT made from the raw (untrimmed) video? Nudge or set from the playhead to re-sync.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                .disabled(model.subtitleState != .idle)
-
-                Divider()
-
-                Picker("Font", selection: Binding(
-                    get: { style?.fontName ?? "Helvetica" },
-                    set: { model.setSubtitleFontName($0) }
-                )) {
-                    ForEach(inspectorFontFamilies, id: \.self) { Text($0).tag($0) }
-                }
-                .labelsHidden()
-
-                Picker("Weight", selection: Binding(
-                    get: { style?.fontWeight ?? .semibold },
-                    set: { model.setSubtitleWeight($0) }
-                )) {
-                    ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                Picker("Align", selection: Binding(
-                    get: { style?.alignment ?? .center },
-                    set: { model.setSubtitleAlignment($0) }
-                )) {
-                    Image(systemName: "text.alignleft").tag(TextAlignmentH.leading)
-                    Image(systemName: "text.aligncenter").tag(TextAlignmentH.center)
-                    Image(systemName: "text.alignright").tag(TextAlignmentH.trailing)
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                styleSliderSubtitle("Size", value: Binding(
-                    get: { style?.fontSize ?? 0.05 },
-                    set: { model.setSubtitleFontSize($0) }
-                ), range: 0.02...0.2, model: model)
-
-                styleSliderSubtitle("Box width (wrap)", value: Binding(
-                    get: { style?.boxWidth ?? 0.9 },
-                    set: { model.setSubtitleBoxWidth($0) }
-                ), range: 0.05...1.0, model: model)
-
-                textColorRow("Color", hex: style?.colorHex ?? "#FFFFFF") {
-                    model.setSubtitleColorHex($0)
-                }
-
-                Toggle("Background box", isOn: Binding(
-                    get: { style?.boxEnabled ?? false },
-                    set: { model.setSubtitleBoxEnabled($0) }
-                ))
-                if style?.boxEnabled == true {
-                    textColorRow("Box color", hex: style?.boxHex ?? "#000000") {
-                        model.setSubtitleBoxHex($0)
-                    }
-                    styleSliderSubtitle("Box opacity", value: Binding(
-                        get: { style?.boxOpacity ?? 0.5 },
-                        set: { model.setSubtitleBoxOpacity($0) }
-                    ), range: 0...1, model: model)
-                }
-
-                styleSliderSubtitle("Outline", value: Binding(
-                    get: { style?.strokeWidth ?? 0 },
-                    set: { model.setSubtitleStrokeWidth($0) }
-                ), range: 0...0.2, model: model)
-                if (style?.strokeWidth ?? 0) > 0 {
-                    textColorRow("Outline color", hex: style?.strokeHex ?? "#000000") {
-                        model.setSubtitleStrokeHex($0)
-                    }
-                }
-
-                Toggle("Shadow", isOn: Binding(
-                    get: { style?.shadow ?? true },
-                    set: { model.setSubtitleShadow($0) }
-                ))
-
-                Divider()
-
-                Text("Scrub to a subtitle, then drag it on the canvas to reposition.")
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 20)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-            })
-        }
-        // Fit the content up to a cap; scroll only past it. Sizing to content
-        // keeps collapsed states slack-free and stops the last row from being
-        // clipped by the popover's rounded bottom edge.
-        .frame(width: 320, height: min(subtitlePopoverHeight == 0 ? 500 : subtitlePopoverHeight, 500))
-        .scrollBounceBehavior(.basedOnSize)
-        .onPreferenceChange(StylePopoverHeightKey.self) { subtitlePopoverHeight = $0 }
-    }
-
-    /// Font-size control showing the rendered px height, with a ±1px stepper and
-    /// a slider. `fontSize` is a fraction of canvas height, so px = fontSize ×
-    /// renderSize.height (falls back to 1080 before the canvas size is known).
-    @ViewBuilder
-    private func textSizeRow(_ block: TextBlock?) -> some View {
-        let h = model.renderSize.height > 0 ? model.renderSize.height : 1080
-        let frac = block?.fontSize ?? 0.06
-        let px = Int((frac * h).rounded())
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text("Size").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Text("\(px) px").font(.caption).monospacedDigit()
-                    .foregroundStyle(.secondary)
-                Stepper("", value: Binding(
-                    get: { Double(px) },
-                    set: { model.setTextFontSize($0 / h); model.commitTextEdit() }
-                ), in: 1...(h * 0.5), step: 1)
-                .labelsHidden()
-            }
-            Slider(value: Binding(
-                get: { block?.fontSize ?? 0.06 },
-                set: { model.setTextFontSize($0) }
-            ), in: 0.005...0.2) { editing in
-                if !editing { model.commitTextEdit() }
-            }
-        }
     }
 
     // MARK: - Timeline
