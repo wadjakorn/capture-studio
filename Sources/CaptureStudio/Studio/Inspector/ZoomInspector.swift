@@ -7,6 +7,25 @@ struct ZoomInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // Add / delete — add is also available via the timeline zoom
+            // lane; this button is a convenient duplicate.
+            HStack(spacing: 8) {
+                Button { model.addZoomBlock() } label: {
+                    Label("Add zoom", systemImage: "plus.magnifyingglass")
+                }
+                .help("Add an auto zoom/pan block at the playhead")
+
+                Button(role: .destructive) {
+                    if let id = model.selectedZoomBlockID { model.removeZoomBlock(id) }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(model.selectedZoomBlockID == nil)
+                .help("Delete the selected zoom block")
+            }
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Label("Zoom", systemImage: "arrow.up.left.and.arrow.down.right")

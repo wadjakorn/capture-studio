@@ -10,6 +10,29 @@ struct ShapeInspector: View {
         let kind = block?.kind ?? .rectangle
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                // Z-order + delete for the selected block — always shown,
+                // disabled until a block is selected. (Add is via the Mask
+                // canvas tool, not here.)
+                HStack(spacing: 8) {
+                    Button {
+                        if let id = model.selectedShapeBlockID { model.sendShapeBackward(id) }
+                    } label: { Image(systemName: "arrow.down.square") }
+                        .disabled(block == nil)
+                        .help("Send backward")
+                    Button {
+                        if let id = model.selectedShapeBlockID { model.bringShapeForward(id) }
+                    } label: { Image(systemName: "arrow.up.square") }
+                        .disabled(block == nil)
+                        .help("Bring forward")
+                    Button(role: .destructive) {
+                        if let id = model.selectedShapeBlockID { model.removeShapeBlock(id) }
+                    } label: { Image(systemName: "trash") }
+                        .disabled(block == nil)
+                        .help("Delete this shape block")
+                }
+
+                Divider()
+
                 Picker("Kind", selection: Binding(
                     get: { kind },
                     set: { model.setShapeKind($0) }

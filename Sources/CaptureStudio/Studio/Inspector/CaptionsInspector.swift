@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 /// Namespace for the two caption-related style panels: per-block text style
 /// and the shared subtitle-track style.
@@ -14,6 +16,54 @@ enum CaptionsInspector {
             let block = model.selectedTextBlock
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    // Add / z-order / delete for the selected block — always
+                    // shown, disabled until a block is selected (add is not).
+                    HStack(spacing: 8) {
+                        Button { model.addTextBlock() } label: {
+                            Image(systemName: "text.badge.plus")
+                        }
+                        .help("Add a text/caption block at the playhead")
+
+                        Button {
+                            if let id = model.selectedTextBlockID { model.sendTextBackward(id) }
+                        } label: { Image(systemName: "arrow.down.square") }
+                            .disabled(block == nil)
+                            .help("Send backward")
+                        Button {
+                            if let id = model.selectedTextBlockID { model.bringTextForward(id) }
+                        } label: { Image(systemName: "arrow.up.square") }
+                            .disabled(block == nil)
+                            .help("Bring forward")
+                        Button(role: .destructive) {
+                            if let id = model.selectedTextBlockID { model.removeTextBlock(id) }
+                        } label: { Image(systemName: "trash") }
+                            .disabled(block == nil)
+                            .help("Delete this text block")
+                    }
+
+                    // Inline caption input — always shown; editable only
+                    // while a text block is selected (timeline or canvas),
+                    // greyed out otherwise.
+                    CaptionTextEditor(
+                        text: Binding(
+                            get: { model.selectedTextBlock?.text ?? "" },
+                            set: { if let id = model.selectedTextBlockID { model.setText($0, for: id) } }
+                        ),
+                        isEnabled: model.selectedTextBlock != nil,
+                        focusToken: model.selectedTextBlockID,
+                        onSubmit: { model.commitTextEdit() },
+                        onCancel: { model.deselectAll() }
+                    )
+                    .frame(height: 56)
+                    .overlay(RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
+                    .opacity(block == nil ? 0.55 : 1)
+                    .help(block == nil
+                          ? "Select a text block to edit its caption"
+                          : "Edit caption text · Shift+Return for a new line")
+
+                    Divider()
+
                     Picker("Font", selection: Binding(
                         get: { block?.fontName ?? "Helvetica" },
                         set: { model.setTextFontName($0) }
@@ -137,11 +187,41 @@ enum CaptionsInspector {
     struct SubtitleSection: View {
         @ObservedObject var model: StudioModel
         @State private var subtitlePopoverHeight: CGFloat = 0
+        @State private var confirmRemoveSubtitles = false
 
         var body: some View {
             let style = model.subtitles?.style
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    // Import / remove — the style controls below only apply
+                    // once a subtitle track exists.
+                    if model.subtitles == nil {
+                        Button { pickSubtitleFile() } label: {
+                            Label("Import subtitles…", systemImage: "captions.bubble")
+                        }
+                        .disabled(model.subtitleState != .idle)
+                        .help("Import subtitles from an .srt file")
+                    } else {
+                        HStack(spacing: 8) {
+                            Button(role: .destructive) { confirmRemoveSubtitles = true } label: {
+                                Label("Remove subtitles", systemImage: "trash")
+                            }
+                            .disabled(model.subtitleState != .idle)
+                            .help("Remove subtitles")
+                            .confirmationDialog("Remove subtitles?", isPresented: $confirmRemoveSubtitles,
+                                                titleVisibility: .visible) {
+                                Button("Remove Subtitles", role: .destructive) { model.removeSubtitles() }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("This removes the imported subtitle track from this project.")
+                            }
+
+                            if model.subtitleState != .idle {
+                                ProgressView().controlSize(.small)
+                            }
+                        }
+                    }
+
                     Text("Applies to all subtitles").font(.caption).foregroundStyle(.secondary)
 
                     Divider()
@@ -259,6 +339,21 @@ enum CaptionsInspector {
             .frame(width: 320, height: min(subtitlePopoverHeight == 0 ? 500 : subtitlePopoverHeight, 500))
             .scrollBounceBehavior(.basedOnSize)
             .onPreferenceChange(StylePopoverHeightKey.self) { subtitlePopoverHeight = $0 }
+        }
+
+        /// Pick a `.srt` file and apply it as the subtitle track.
+        private func pickSubtitleFile() {
+            let panel = NSOpenPanel()
+            if let srt = UTType(filenameExtension: "srt") {
+                panel.allowedContentTypes = [srt, .text]
+            } else {
+                panel.allowedContentTypes = [.text]
+            }
+            panel.allowsMultipleSelection = false
+            panel.canChooseDirectories = false
+            if panel.runModal() == .OK, let url = panel.url {
+                model.importSubtitles(from: url)
+            }
         }
     }
 }

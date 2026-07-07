@@ -4,8 +4,76 @@ import SwiftUI
 struct CameraInspector: View {
     @ObservedObject var model: StudioModel
 
+    /// The layout the picker edits: the selected block's, else the home
+    /// (empty-timeline / before-first-block) layout.
+    private var layoutBinding: Binding<CameraLayout> {
+        Binding(
+            get: { model.selectedLayoutBlock?.layout ?? model.cameraHomeLayout },
+            set: { newValue in
+                if let id = model.selectedLayoutBlockID { model.setLayoutBlockLayout(id, newValue) }
+                else { model.setHomeLayout(newValue) }
+            })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Layout picker — picks the frame layout for the selected layout
+            // block (or the home/default state when no layout block is selected).
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Layout").font(.caption).foregroundStyle(.secondary)
+                Picker("Layout", selection: layoutBinding) {
+                    ForEach(CameraLayout.allCases, id: \.self) { layout in
+                        Label(layout.label, systemImage: layout.symbol).tag(layout)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .disabled(model.selectedLayoutBlockID == nil)
+                .help(model.selectedLayoutBlockID == nil
+                      ? "Select a layout block to change its frame layout"
+                      : "Frame layout for the selected layout block")
+            }
+
+            // Add / remove layout blocks — a layout block sets the frame
+            // layout over a span; gaps render blank. Add is disabled when
+            // the timeline is full.
+            HStack(spacing: 8) {
+                Button { model.addLayoutBlock() } label: {
+                    Label("Add layout", systemImage: "rectangle.stack.badge.plus")
+                }
+                .disabled(!model.canAddLayoutBlock)
+                .help("Add a layout block at the playhead")
+
+                Button {
+                    if let id = model.selectedLayoutBlockID { model.removeLayoutBlock(id) }
+                } label: {
+                    Image(systemName: "rectangle.stack.badge.minus")
+                }
+                .disabled(model.selectedLayoutBlockID == nil)
+                .help("Delete the selected layout block")
+            }
+
+            // Camera move keyframes — position/scale only; only meaningful
+            // while the camera floats (main+float / float-camera) at the
+            // playhead.
+            HStack(spacing: 8) {
+                Button { model.addBlock() } label: {
+                    Label("Add move", systemImage: "plus.rectangle")
+                }
+                .disabled(!model.layoutAtPlayhead.cameraFloats)
+                .help("Add a camera move block at the playhead")
+
+                Button {
+                    if let id = model.selectedBlockID { model.removeBlock(id) }
+                } label: {
+                    Image(systemName: "minus.rectangle")
+                }
+                .disabled(model.selectedBlockID == nil)
+                .help("Delete the selected camera move block")
+            }
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 2) {
                 Text("Zoom").font(.caption).foregroundStyle(.secondary)
                 Slider(value: Binding(get: { model.cameraZoom },
