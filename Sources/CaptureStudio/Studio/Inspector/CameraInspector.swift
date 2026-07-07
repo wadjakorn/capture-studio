@@ -151,6 +151,6 @@ struct CameraInspector: View {
             }
         }
         .padding(14)
-        .frame(width: 240)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

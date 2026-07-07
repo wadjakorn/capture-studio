@@ -3,13 +3,11 @@ import SwiftUI
 /// Shape overlay style panel — kind, blur/fill/outline, corner radius.
 struct ShapeInspector: View {
     @ObservedObject var model: StudioModel
-    @State private var shapePopoverHeight: CGFloat = 0
 
     var body: some View {
         let block = model.selectedShapeBlock
         let kind = block?.kind ?? .rectangle
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
                 // Z-order + delete for the selected block — always shown,
                 // disabled until a block is selected. (Add is via the Mask
                 // canvas tool, not here.)
@@ -82,16 +80,10 @@ struct ShapeInspector: View {
                         ), range: 0...0.5, model: model)
                     }
                 }
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 20)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-            })
         }
-        .frame(width: 320, height: min(shapePopoverHeight == 0 ? 320 : shapePopoverHeight, 500))
-        .scrollBounceBehavior(.basedOnSize)
-        .onPreferenceChange(StylePopoverHeightKey.self) { shapePopoverHeight = $0 }
+        .padding(.horizontal, 18)
+        .padding(.top, 16)
+        .padding(.bottom, 20)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

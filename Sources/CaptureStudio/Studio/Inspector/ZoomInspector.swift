@@ -74,6 +74,6 @@ struct ZoomInspector: View {
             }
         }
         .padding(16)
-        .frame(width: 280)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

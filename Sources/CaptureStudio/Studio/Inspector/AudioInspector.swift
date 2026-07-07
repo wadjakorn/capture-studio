@@ -36,7 +36,10 @@ struct AudioInspector: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("BACKGROUND AUDIO").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("BACKGROUND AUDIO").font(.caption).foregroundStyle(.secondary)
+                    soonBadge()
+                }
                 Picker("", selection: .constant(0)) {
                     Text("Lo-Fi").tag(0)
                     Text("Commercial").tag(1)

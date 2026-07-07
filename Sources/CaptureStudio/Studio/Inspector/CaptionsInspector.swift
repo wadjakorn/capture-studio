@@ -43,12 +43,10 @@ enum CaptionsInspector {
     /// outline, shadow.
     struct TextSection: View {
         @ObservedObject var model: StudioModel
-        @State private var textPopoverHeight: CGFloat = 0
 
         var body: some View {
             let block = model.selectedTextBlock
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                     // Add / z-order / delete for the selected block — always
                     // shown, disabled until a block is selected (add is not).
                     HStack(spacing: 8) {
@@ -87,7 +85,7 @@ enum CaptionsInspector {
                         onSubmit: { model.commitTextEdit() },
                         onCancel: { model.deselectAll() }
                     )
-                    .frame(height: 56)
+                    .frame(maxWidth: .infinity, minHeight: 56)
                     .overlay(RoundedRectangle(cornerRadius: 5)
                         .strokeBorder(.secondary.opacity(0.3), lineWidth: 1))
                     .opacity(block == nil ? 0.55 : 1)
@@ -168,20 +166,11 @@ enum CaptionsInspector {
                         get: { block?.shadow ?? true },
                         set: { model.setTextShadow($0) }
                     ))
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 16)
-                .padding(.bottom, 20)
-                .background(GeometryReader { g in
-                    Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-                })
             }
-            // Fit the content up to a cap; scroll only past it. Sizing to content
-            // keeps collapsed states slack-free and stops the last row from being
-            // clipped by the popover's rounded bottom edge.
-            .frame(width: 320, height: min(textPopoverHeight == 0 ? 500 : textPopoverHeight, 500))
-            .scrollBounceBehavior(.basedOnSize)
-            .onPreferenceChange(StylePopoverHeightKey.self) { textPopoverHeight = $0 }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         /// Font-size control showing the rendered px height, with a ±1px stepper
@@ -219,13 +208,11 @@ enum CaptionsInspector {
     /// weight, align, size, color, box, outline, shadow.
     struct SubtitleSection: View {
         @ObservedObject var model: StudioModel
-        @State private var subtitlePopoverHeight: CGFloat = 0
         @State private var confirmRemoveSubtitles = false
 
         var body: some View {
             let style = model.subtitles?.style
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                     // Import / remove — the style controls below only apply
                     // once a subtitle track exists.
                     if model.subtitles == nil {
@@ -371,20 +358,11 @@ enum CaptionsInspector {
 
                     Text("Scrub to a subtitle, then drag it on the canvas to reposition.")
                         .font(.caption2).foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 16)
-                .padding(.bottom, 20)
-                .background(GeometryReader { g in
-                    Color.clear.preference(key: StylePopoverHeightKey.self, value: g.size.height)
-                })
             }
-            // Fit the content up to a cap; scroll only past it. Sizing to content
-            // keeps collapsed states slack-free and stops the last row from being
-            // clipped by the popover's rounded bottom edge.
-            .frame(width: 320, height: min(subtitlePopoverHeight == 0 ? 500 : subtitlePopoverHeight, 500))
-            .scrollBounceBehavior(.basedOnSize)
-            .onPreferenceChange(StylePopoverHeightKey.self) { subtitlePopoverHeight = $0 }
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
 
         /// Pick a `.srt` file and apply it as the subtitle track.

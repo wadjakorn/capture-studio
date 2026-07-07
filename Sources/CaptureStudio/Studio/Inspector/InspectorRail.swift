@@ -28,7 +28,7 @@ struct InspectorRail: View {
             Divider()
 
             ScrollView { panel.padding(14) }
-                .frame(width: 270)
+                .frame(width: 300)
         }
     }
 

@@ -1,15 +1,6 @@
 import SwiftUI
 import AppKit
 
-/// Reports the natural (padded) height of a style popover's content so the
-/// popover frame can fit it up to a cap instead of using a fixed height.
-struct StylePopoverHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 /// Curated font families (Core Text resolves by family name; unknown names
 /// fall back to the system font).
 let inspectorFontFamilies = [
