@@ -222,6 +222,19 @@ enum CaptionsInspector {
                         }
                     }
 
+                    // Position on canvas — enabling drives SubtitleCanvasOverlay
+                    // so the cue can be dragged to reposition it. Not auto-enabled
+                    // (subtitleSelected feeds the inspector router), so it's an
+                    // explicit toggle here; Esc / deselect clears it.
+                    if model.subtitles != nil {
+                        Toggle("Position on canvas", isOn: Binding(
+                            get: { model.subtitleSelected },
+                            set: { model.selectSubtitles($0) }
+                        ))
+                        .disabled(model.subtitleState != .idle)
+                        .help("Drag the subtitle on the canvas to reposition it")
+                    }
+
                     Text("Applies to all subtitles").font(.caption).foregroundStyle(.secondary)
 
                     Divider()
