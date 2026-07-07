@@ -10,31 +10,22 @@ struct CursorInspector: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Cursor").font(.caption).foregroundStyle(.secondary)
 
-                Toggle(isOn: Binding(get: { model.showCursor },
-                                     set: { model.setShowCursor($0) })) {
-                    Label("Show recorded cursor", systemImage: "cursorarrow")
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Show cursor", systemImage: "cursorarrow",
+                                   isOn: Binding(get: { model.showCursor },
+                                                 set: { model.setShowCursor($0) }))
                 .help("Show the recorded cursor")
 
-                Toggle(isOn: Binding(get: { model.clickFeedback },
-                                     set: { model.setClickFeedback($0) })) {
-                    Label("Click feedback rings", systemImage: "cursorarrow.click")
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Click feedback rings", systemImage: "cursorarrow.click",
+                                   isOn: Binding(get: { model.clickFeedback },
+                                                 set: { model.setClickFeedback($0) }))
                 .help("Show click feedback rings")
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Appearance").font(.caption).foregroundStyle(.secondary)
-                styleSlider("Size", value: .constant(1.0), range: 0.5...2.0, model: model)
-                    .comingSoon()
-                styleSlider("Smoothing", value: .constant(0.0), range: 0...1, model: model)
-                    .comingSoon()
-                Picker("Click style", selection: .constant(0)) {
-                    Text("Ring").tag(0)
-                }
-                .comingSoon()
+                placeholderSliderRow("Size")
+                placeholderSliderRow("Smoothing")
+                placeholderPickerRow("Click style", options: ["Ring"])
             }
         }
         .padding(16)

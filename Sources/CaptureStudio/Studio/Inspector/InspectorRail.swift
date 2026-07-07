@@ -47,11 +47,7 @@ struct InspectorRail: View {
             case .cursor:    CursorInspector(model: model)
             case .camera:    CameraInspector(model: model)
             case .captions:
-                VStack(alignment: .leading, spacing: 16) {
-                    CaptionsInspector.TextSection(model: model)
-                    Divider()
-                    CaptionsInspector.SubtitleSection(model: model)
-                }
+                CaptionsInspector.CaptionsPanel(model: model)
             case .audio:     AudioInspector(model: model)
             case .shortcuts: ShortcutsInspector()
             case .share:     ShareInspector(model: model)

@@ -56,14 +56,14 @@ let inspectorBorderPresets = [
 @MainActor func volumeSlider(systemImage: String, help: String,
                   value: Binding<Double>,
                   range: ClosedRange<Double> = 0...1,
-                  showPercent: Bool = false, model: StudioModel) -> some View {
+                  showPercent: Bool = false, fill: Bool = false, model: StudioModel) -> some View {
     HStack(spacing: 4) {
         Image(systemName: systemImage)
             .foregroundStyle(.secondary)
         Slider(value: value, in: range) { editing in
             if !editing { model.commitVolumeEdit() }
         }
-        .frame(width: 80)
+        .frame(width: fill ? nil : 80)
         .controlSize(.small)
         if showPercent {
             Text("\(Int((value.wrappedValue * 100).rounded()))%")
