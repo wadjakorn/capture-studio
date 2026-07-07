@@ -23,7 +23,7 @@ let inspectorBorderPresets = [
     "#34C759", "#007AFF", "#AF52DE", "#8E8E93",
 ]
 
-func styleSlider(_ title: String, value: Binding<Double>,
+@MainActor func styleSlider(_ title: String, value: Binding<Double>,
                  range: ClosedRange<Double>, model: StudioModel) -> some View {
     VStack(alignment: .leading, spacing: 2) {
         Text(title).font(.caption).foregroundStyle(.secondary)
@@ -33,7 +33,7 @@ func styleSlider(_ title: String, value: Binding<Double>,
     }
 }
 
-func styleSliderText(_ title: String, value: Binding<Double>,
+@MainActor func styleSliderText(_ title: String, value: Binding<Double>,
                      range: ClosedRange<Double>, model: StudioModel) -> some View {
     VStack(alignment: .leading, spacing: 2) {
         Text(title).font(.caption).foregroundStyle(.secondary)
@@ -43,7 +43,7 @@ func styleSliderText(_ title: String, value: Binding<Double>,
     }
 }
 
-func styleSliderSubtitle(_ title: String, value: Binding<Double>,
+@MainActor func styleSliderSubtitle(_ title: String, value: Binding<Double>,
                          range: ClosedRange<Double>, model: StudioModel) -> some View {
     VStack(alignment: .leading, spacing: 2) {
         Text(title).font(.caption).foregroundStyle(.secondary)
@@ -53,7 +53,7 @@ func styleSliderSubtitle(_ title: String, value: Binding<Double>,
     }
 }
 
-func volumeSlider(systemImage: String, help: String,
+@MainActor func volumeSlider(systemImage: String, help: String,
                   value: Binding<Double>,
                   range: ClosedRange<Double> = 0...1,
                   showPercent: Bool = false, model: StudioModel) -> some View {
@@ -77,7 +77,7 @@ func volumeSlider(systemImage: String, help: String,
 }
 
 /// Preset swatches + custom picker for a text color field.
-func textColorRow(_ title: String, hex: String,
+@MainActor func textColorRow(_ title: String, hex: String,
                   set: @escaping (String) -> Void) -> some View {
     VStack(alignment: .leading, spacing: 6) {
         Text(title).font(.caption).foregroundStyle(.secondary)
@@ -103,7 +103,7 @@ func textColorRow(_ title: String, hex: String,
 
 /// Preset swatches plus a compact custom picker. Tapping a swatch sets the
 /// border color inline; only the custom picker opens the system panel.
-func borderColorControls(model: StudioModel) -> some View {
+@MainActor func borderColorControls(model: StudioModel) -> some View {
     VStack(alignment: .leading, spacing: 6) {
         Text("Border color").font(.caption).foregroundStyle(.secondary)
         HStack(spacing: 6) {
