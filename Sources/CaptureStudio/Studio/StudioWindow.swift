@@ -1,7 +1,5 @@
 import SwiftUI
-import AppKit
 import AVFoundation
-import UniformTypeIdentifiers
 
 struct StudioView: View {
     @StateObject private var model: StudioModel
