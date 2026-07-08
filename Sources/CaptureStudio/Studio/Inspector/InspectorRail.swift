@@ -12,7 +12,10 @@ struct InspectorRail: View {
         HStack(spacing: 0) {
             VStack(spacing: 4) {
                 ForEach(RailTab.allCases, id: \.self) { tab in
-                    Button { active = tab } label: {
+                    // Deselect any live block first — otherwise a selected
+                    // shape/zoom/caption/camera block keeps `resolve()` pinned
+                    // to its contextual panel and the tab switch is a no-op.
+                    Button { model.deselectAll(); active = tab } label: {
                         Image(systemName: tab.symbol)
                             .frame(width: 32, height: 32)
                     }
