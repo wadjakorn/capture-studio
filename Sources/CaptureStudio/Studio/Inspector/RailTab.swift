@@ -34,6 +34,9 @@ struct StudioSelectionSummary: Equatable {
     var cameraMoveSelected = false
     var layoutSelected = false
     var subtitleSelected = false
+    /// The camera PiP itself is selected on-canvas (distinct from a
+    /// camera-move timeline block).
+    var cameraSelected = false
 }
 
 /// What the inspector is currently showing.
@@ -51,7 +54,7 @@ enum InspectorContext: Equatable {
         if s.zoomSelected { return .zoom }
         if s.textSelected { return .tab(.text) }
         if s.subtitleSelected { return .tab(.subtitles) }
-        if s.cameraMoveSelected || s.layoutSelected { return .tab(.camera) }
+        if s.cameraSelected || s.cameraMoveSelected || s.layoutSelected { return .tab(.camera) }
         return .tab(activeTab)
     }
 }

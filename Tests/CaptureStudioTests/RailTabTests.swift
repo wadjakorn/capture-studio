@@ -3,11 +3,12 @@ import Testing
 
 @Suite struct RailTabTests {
     private func sel(text: Bool = false, shape: Bool = false, zoom: Bool = false,
-                     cameraMove: Bool = false, layout: Bool = false, subtitle: Bool = false)
+                     cameraMove: Bool = false, layout: Bool = false, subtitle: Bool = false,
+                     camera: Bool = false)
     -> StudioSelectionSummary {
         StudioSelectionSummary(textSelected: text, shapeSelected: shape, zoomSelected: zoom,
                                cameraMoveSelected: cameraMove, layoutSelected: layout,
-                               subtitleSelected: subtitle)
+                               subtitleSelected: subtitle, cameraSelected: camera)
     }
 
     @Test func nothingSelectedShowsActiveTab() {
@@ -30,6 +31,9 @@ import Testing
     }
     @Test func layoutRoutesToCamera() {
         #expect(InspectorContext.resolve(selection: sel(layout: true), activeTab: .audio) == .tab(.camera))
+    }
+    @Test func cameraSelectionRoutesToCamera() {
+        #expect(InspectorContext.resolve(selection: sel(camera: true), activeTab: .audio) == .tab(.camera))
     }
     @Test func sixTabsExist() {
         #expect(RailTab.allCases.count == 6)

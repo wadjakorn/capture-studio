@@ -39,7 +39,8 @@ struct StudioView: View {
             zoomSelected: model.selectedZoomBlockID != nil,
             cameraMoveSelected: model.selectedBlockID != nil,
             layoutSelected: model.selectedLayoutBlockID != nil,
-            subtitleSelected: model.subtitleSelected)
+            subtitleSelected: model.subtitleSelected,
+            cameraSelected: model.cameraSelected)
     }
 
     private var inspectorContext: InspectorContext {
