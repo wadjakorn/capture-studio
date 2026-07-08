@@ -81,7 +81,10 @@ extension View {
 }
 
 /// A disabled slider placeholder — label + "Soon" badge above a dimmed,
-/// non-interactive slider, so it never gets squeezed by an inline badge.
+/// non-interactive slider *mock*. A real `Slider` bound to a `.constant`
+/// segfaults on macOS (it recurses writing back through the read-only
+/// binding), so placeholders draw a static track + knob instead of a live
+/// control.
 @MainActor func placeholderSliderRow(_ title: String, note: String = "Soon") -> some View {
     VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 6) {
@@ -89,15 +92,24 @@ extension View {
             soonBadge(note)
             Spacer()
         }
-        Slider(value: .constant(0.4), in: 0...1)
-            .disabled(true)
+        Capsule()
+            .fill(.quaternary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 4)
+            .overlay(alignment: .center) {
+                Circle()
+                    .fill(.secondary)
+                    .frame(width: 14, height: 14)
+            }
+            .frame(height: 14)
             .opacity(0.5)
     }
     .help("Coming soon — not yet available")
 }
 
-/// A disabled picker placeholder — label left, disabled menu-style control,
-/// "Soon" badge — laid out so nothing gets squeezed.
+/// A disabled picker placeholder — label + "Soon" badge above a static
+/// pop-up *mock* (a live `Picker` in a placeholder is unnecessary and, like
+/// the slider, we avoid binding a real control here).
 @MainActor func placeholderPickerRow(_ title: String, options: [String],
                                       note: String = "Soon") -> some View {
     VStack(alignment: .leading, spacing: 4) {
@@ -106,14 +118,17 @@ extension View {
             soonBadge(note)
             Spacer()
         }
-        Picker("", selection: .constant(0)) {
-            ForEach(options.indices, id: \.self) { i in
-                Text(options[i]).tag(i)
-            }
+        HStack(spacing: 6) {
+            Text(options.first ?? "").font(.caption)
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.up.chevron.down").font(.caption2)
         }
-        .labelsHidden()
-        .disabled(true)
-        .opacity(0.5)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 140, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary))
+        .foregroundStyle(.secondary)
+        .opacity(0.6)
     }
     .help("Coming soon — not yet available")
 }
