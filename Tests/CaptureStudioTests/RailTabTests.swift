@@ -19,11 +19,11 @@ import Testing
     @Test func zoomSelectionIsContextual() {
         #expect(InspectorContext.resolve(selection: sel(zoom: true), activeTab: .frame) == .zoom)
     }
-    @Test func textRoutesToCaptions() {
-        #expect(InspectorContext.resolve(selection: sel(text: true), activeTab: .frame) == .tab(.captions))
+    @Test func textRoutesToTextTab() {
+        #expect(InspectorContext.resolve(selection: sel(text: true), activeTab: .frame) == .tab(.text))
     }
-    @Test func subtitleRoutesToCaptions() {
-        #expect(InspectorContext.resolve(selection: sel(subtitle: true), activeTab: .frame) == .tab(.captions))
+    @Test func subtitleRoutesToSubtitlesTab() {
+        #expect(InspectorContext.resolve(selection: sel(subtitle: true), activeTab: .frame) == .tab(.subtitles))
     }
     @Test func cameraMoveRoutesToCamera() {
         #expect(InspectorContext.resolve(selection: sel(cameraMove: true), activeTab: .audio) == .tab(.camera))
@@ -31,7 +31,7 @@ import Testing
     @Test func layoutRoutesToCamera() {
         #expect(InspectorContext.resolve(selection: sel(layout: true), activeTab: .audio) == .tab(.camera))
     }
-    @Test func sevenTabsExist() {
-        #expect(RailTab.allCases.count == 7)
+    @Test func sixTabsExist() {
+        #expect(RailTab.allCases.count == 6)
     }
 }
