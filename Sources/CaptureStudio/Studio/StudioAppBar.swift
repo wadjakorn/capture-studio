@@ -3,9 +3,8 @@ import AppKit
 import UniformTypeIdentifiers
 
 /// Top app-bar chrome: filename, undo/redo + presets + preview/speed
-/// placeholders, and the real export control (kept live so Stop is reachable
-/// mid-export). Not yet wired into `StudioView` — Task 5 swaps the layout to
-/// use this.
+/// placeholders, a Reveal-in-Finder button for the master files, and the real
+/// export control (kept live so Stop is reachable mid-export).
 struct StudioAppBar: View {
     @ObservedObject var model: StudioModel
 
@@ -31,6 +30,11 @@ struct StudioAppBar: View {
                     .comingSoon()
                 Text("1×").font(.caption.monospacedDigit()).comingSoon()
             }
+
+            Button { model.revealMastersInFinder() } label: {
+                Image(systemName: "folder")
+            }
+            .help("Reveal master files in Finder")
 
             exportControls
         }

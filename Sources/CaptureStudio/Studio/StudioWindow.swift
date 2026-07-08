@@ -52,7 +52,7 @@ struct StudioView: View {
         VStack(spacing: 0) {
             StudioAppBar(model: model)
             Divider()
-            StudioCanvasToolbar(model: model, activeTab: $activeTab,
+            StudioCanvasToolbar(model: model,
                                 maskAction: { model.addShapeBlock(kind: .rectangle) })
             Divider()
             HStack(spacing: 0) {

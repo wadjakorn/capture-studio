@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Vertical 7-icon rail (one per `RailTab`) plus the routed inspector panel
-/// for the current `InspectorContext`. Not yet wired into `StudioView` —
-/// Task 5 swaps the layout to use this.
+/// Vertical rail (one icon per `RailTab`) plus the routed inspector panel
+/// for the current `InspectorContext`.
 struct InspectorRail: View {
     @Binding var active: RailTab
     let context: InspectorContext
@@ -49,11 +48,9 @@ struct InspectorRail: View {
             case .frame:     FrameInspector(model: model)
             case .cursor:    CursorInspector(model: model)
             case .camera:    CameraInspector(model: model)
-            case .captions:
-                CaptionsInspector.CaptionsPanel(model: model)
+            case .text:      CaptionsInspector.TextSection(model: model)
+            case .subtitles: CaptionsInspector.SubtitleSection(model: model)
             case .audio:     AudioInspector(model: model)
-            case .shortcuts: ShortcutsInspector()
-            case .share:     ShareInspector(model: model)
             }
         }
     }

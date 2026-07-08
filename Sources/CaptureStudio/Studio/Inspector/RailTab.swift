@@ -1,17 +1,16 @@
 import SwiftUI
 
 enum RailTab: String, CaseIterable, Hashable {
-    case frame, cursor, camera, captions, audio, shortcuts, share
+    case frame, cursor, camera, text, subtitles, audio
 
     var symbol: String {
         switch self {
         case .frame:     return "crop"
         case .cursor:    return "cursorarrow"
         case .camera:    return "person.crop.square"
-        case .captions:  return "captions.bubble"
+        case .text:      return "textformat"
+        case .subtitles: return "captions.bubble"
         case .audio:     return "speaker.wave.2"
-        case .shortcuts: return "command"
-        case .share:     return "square.and.arrow.up"
         }
     }
     var title: String {
@@ -19,10 +18,9 @@ enum RailTab: String, CaseIterable, Hashable {
         case .frame:     return "Frame"
         case .cursor:    return "Cursor"
         case .camera:    return "Camera"
-        case .captions:  return "Captions"
+        case .text:      return "Text"
+        case .subtitles: return "Subtitles"
         case .audio:     return "Audio"
-        case .shortcuts: return "Shortcuts"
-        case .share:     return "Share"
         }
     }
 }
@@ -45,12 +43,14 @@ enum InspectorContext: Equatable {
     case zoom
 
     /// Selection wins over the active rail tab. Shape/zoom are contextual;
-    /// text/subtitle live under Captions; camera-move/layout under Camera.
+    /// text selection routes to the Text tab, subtitle to the Subtitles tab;
+    /// camera-move/layout under Camera.
     static func resolve(selection s: StudioSelectionSummary,
                         activeTab: RailTab) -> InspectorContext {
         if s.shapeSelected { return .shape }
         if s.zoomSelected { return .zoom }
-        if s.textSelected || s.subtitleSelected { return .tab(.captions) }
+        if s.textSelected { return .tab(.text) }
+        if s.subtitleSelected { return .tab(.subtitles) }
         if s.cameraMoveSelected || s.layoutSelected { return .tab(.camera) }
         return .tab(activeTab)
     }

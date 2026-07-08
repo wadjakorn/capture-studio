@@ -2,42 +2,11 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// Namespace for the two caption-related style panels: per-block text style
-/// and the shared subtitle-track style.
+/// Namespace for the two caption-related style panels, each its own rail tab:
+/// per-block text style (Text tab) and the shared subtitle-track style
+/// (Subtitles tab). Selection routes to the matching tab via
+/// `InspectorContext.resolve`.
 enum CaptionsInspector {
-
-    /// Container for the Captions rail tab — a Text | Subtitles switcher so
-    /// the two style panels don't stack (each has its own font picker, etc).
-    /// Follows selection: picking a text block on canvas/timeline switches to
-    /// Text; enabling subtitle positioning switches to Subtitles.
-    struct CaptionsPanel: View {
-        @ObservedObject var model: StudioModel
-        @State private var section: Section = .text
-
-        enum Section: Hashable { case text, subtitles }
-
-        var body: some View {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("", selection: $section) {
-                    Text("Text").tag(Section.text)
-                    Text("Subtitles").tag(Section.subtitles)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                switch section {
-                case .text: TextSection(model: model)
-                case .subtitles: SubtitleSection(model: model)
-                }
-            }
-            .onChange(of: model.subtitleSelected) { _, selected in
-                if selected { section = .subtitles }
-            }
-            .onChange(of: model.selectedTextBlockID != nil) { _, selected in
-                if selected { section = .text }
-            }
-        }
-    }
 
     /// Per-block caption text style — font, weight, align, size, color, box,
     /// outline, shadow.
