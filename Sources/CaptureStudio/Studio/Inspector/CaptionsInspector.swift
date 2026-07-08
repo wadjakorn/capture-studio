@@ -125,7 +125,7 @@ enum CaptionsInspector {
 
                     textSizeRow(block)
 
-                    Toggle("Auto-wrap lines", isOn: Binding(
+                    inspectorToggleRow("Auto-wrap lines", isOn: Binding(
                         get: { block?.autoWrap ?? true },
                         set: { model.setTextAutoWrap($0) }
                     ))
@@ -140,7 +140,7 @@ enum CaptionsInspector {
                         model.setTextColorHex($0)
                     }
 
-                    Toggle("Background box", isOn: Binding(
+                    inspectorToggleRow("Background box", isOn: Binding(
                         get: { block?.boxEnabled ?? false },
                         set: { model.setTextBoxEnabled($0) }
                     ))
@@ -164,7 +164,7 @@ enum CaptionsInspector {
                         }
                     }
 
-                    Toggle("Shadow", isOn: Binding(
+                    inspectorToggleRow("Shadow", isOn: Binding(
                         get: { block?.shadow ?? true },
                         set: { model.setTextShadow($0) }
                     ))
@@ -249,7 +249,7 @@ enum CaptionsInspector {
                     // (subtitleSelected feeds the inspector router), so it's an
                     // explicit toggle here; Esc / deselect clears it.
                     if model.subtitles != nil {
-                        Toggle("Position on canvas", isOn: Binding(
+                        inspectorToggleRow("Position on canvas", isOn: Binding(
                             get: { model.subtitleSelected },
                             set: { model.selectSubtitles($0) }
                         ))
@@ -329,7 +329,7 @@ enum CaptionsInspector {
                         model.setSubtitleColorHex($0)
                     }
 
-                    Toggle("Background box", isOn: Binding(
+                    inspectorToggleRow("Background box", isOn: Binding(
                         get: { style?.boxEnabled ?? false },
                         set: { model.setSubtitleBoxEnabled($0) }
                     ))
@@ -353,7 +353,7 @@ enum CaptionsInspector {
                         }
                     }
 
-                    Toggle("Shadow", isOn: Binding(
+                    inspectorToggleRow("Shadow", isOn: Binding(
                         get: { style?.shadow ?? true },
                         set: { model.setSubtitleShadow($0) }
                     ))

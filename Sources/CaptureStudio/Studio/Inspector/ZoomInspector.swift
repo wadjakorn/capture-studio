@@ -62,12 +62,9 @@ struct ZoomInspector: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Toggle(isOn: Binding(get: { model.selectedZoomOverflow },
-                                     set: { model.setZoomOverflow($0) })) {
-                    Label("Overflow inside frame", systemImage: "rectangle.expand.vertical")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Overflow inside frame", systemImage: "rectangle.expand.vertical",
+                                    isOn: Binding(get: { model.selectedZoomOverflow },
+                                                  set: { model.setZoomOverflow($0) }))
                 Text("Let the pan run past the video edge so the background shows inside the frame at the edges (cursor stays centred in the frame). Off keeps the video filling the frame. The video is always clipped to the frame either way.")
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

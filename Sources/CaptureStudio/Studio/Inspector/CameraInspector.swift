@@ -138,7 +138,7 @@ struct CameraInspector: View {
                 borderColorControls(model: model)
             }
 
-            Toggle("Shadow", isOn: Binding(
+            inspectorToggleRow("Shadow", isOn: Binding(
                 get: { model.cameraShadow },
                 set: { model.setCameraShadow($0) }
             ))

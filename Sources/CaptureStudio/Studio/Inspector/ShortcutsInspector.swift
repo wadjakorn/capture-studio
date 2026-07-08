@@ -23,7 +23,7 @@ struct ShortcutsInspector: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Options").font(.caption).foregroundStyle(.secondary)
-                Toggle("Show keystrokes on screen", isOn: .constant(false)).comingSoon()
+                placeholderToggleRow("Show keystrokes on screen")
                 Picker("Position", selection: .constant(0)) {
                     Text("Bottom center").tag(0)
                 }

@@ -32,11 +32,9 @@ struct FrameInspector: View {
             }
 
             section("Reposition") {
-                Toggle(isOn: Binding(get: { model.panVideoMode },
-                                     set: { model.panVideoMode = $0 })) {
-                    Label("Pan video", systemImage: "hand.draw")
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Pan video", systemImage: "hand.draw",
+                                    isOn: Binding(get: { model.panVideoMode },
+                                                  set: { model.panVideoMode = $0 }))
                 .disabled(!model.cropPannable)
                 .help("Move/pan the reframed video — drag the canvas to reposition it")
 
@@ -53,29 +51,23 @@ struct FrameInspector: View {
                     .help("Crop zoom — drag the video to pan")
                 }
 
-                Toggle(isOn: Binding(get: { model.templateGuideVisible },
-                                     set: { model.templateGuideVisible = $0 })) {
-                    Label("Safe-area guide", systemImage: "rectangle.dashed")
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Safe-area guide", systemImage: "rectangle.dashed",
+                                    isOn: Binding(get: { model.templateGuideVisible },
+                                                  set: { model.templateGuideVisible = $0 }))
                 .disabled(model.cropAspect != .nineBySixteenTemplate)
                 .help("Toggle reels safe-area guide")
             }
 
             section("Framing window") {
-                Toggle(isOn: Binding(get: { model.frameEnabled },
-                                     set: { model.setFrameEnabled($0) })) {
-                    Label("Enable framing window", systemImage: "inset.filled.rectangle")
-                }
-                .toggleStyle(.switch)
+                inspectorToggleRow("Enable framing window", systemImage: "inset.filled.rectangle",
+                                    isOn: Binding(get: { model.frameEnabled },
+                                                  set: { model.setFrameEnabled($0) }))
                 .help("Framing window — mask the main video to a static rectangle it pans behind")
 
                 if model.frameEnabled {
-                    Toggle(isOn: Binding(get: { model.frameEditMode },
-                                         set: { model.frameEditMode = $0 })) {
-                        Label("Show handles", systemImage: "slider.horizontal.below.rectangle")
-                    }
-                    .toggleStyle(.switch)
+                    inspectorToggleRow("Show handles", systemImage: "slider.horizontal.below.rectangle",
+                                        isOn: Binding(get: { model.frameEditMode },
+                                                      set: { model.frameEditMode = $0 }))
                     .help("Show framing window transform handles")
 
                     Button { model.resetFrame() } label: {
@@ -90,7 +82,7 @@ struct FrameInspector: View {
             }
 
             section("Backdrop") {
-                Toggle("Wallpaper / gradient", isOn: .constant(false)).comingSoon()
+                placeholderToggleRow("Wallpaper / gradient")
             }
         }
         .padding(16)

@@ -30,15 +30,21 @@ extension View {
     }
 }
 
-/// A clean toggle row: label (optionally with a leading icon) on the left,
-/// wrapping up to 2 lines if needed, with the switch pinned right and
-/// vertically centered so long labels never shove the control around.
+/// THE standard inspector toggle row. All inspector toggles must use this
+/// (or `placeholderToggleRow` for features that aren't available yet) so
+/// every tab shares one layout: icon, then a label that WRAPS (never
+/// truncates), then a fixed-width switch pinned to the right edge. This is
+/// what keeps long labels — "Position on canvas", "Auto-wrap lines" — from
+/// squeezing or misaligning the switch. Do not hand-roll a raw `Toggle` in
+/// an inspector panel; add a case here instead if the layout ever needs to
+/// change.
 @MainActor func inspectorToggleRow(_ title: String, systemImage: String? = nil,
                                     isOn: Binding<Bool>) -> some View {
     HStack(alignment: .center, spacing: 8) {
         if let systemImage {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
+                .frame(width: 20)
         }
         Text(title)
             .fixedSize(horizontal: false, vertical: true)
@@ -47,6 +53,7 @@ extension View {
             .labelsHidden()
             .toggleStyle(.switch)
     }
+    .frame(maxWidth: .infinity)
 }
 
 /// A disabled toggle row rendered as a "Soon" placeholder — same layout as
@@ -57,15 +64,17 @@ extension View {
         if let systemImage {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
+                .frame(width: 20)
         }
         Text(title)
             .fixedSize(horizontal: false, vertical: true)
-        Spacer(minLength: 8)
         soonBadge(note)
+        Spacer(minLength: 8)
         Toggle("", isOn: .constant(false))
             .labelsHidden()
             .toggleStyle(.switch)
     }
+    .frame(maxWidth: .infinity)
     .disabled(true)
     .opacity(0.55)
     .help("Coming soon — not yet available")
