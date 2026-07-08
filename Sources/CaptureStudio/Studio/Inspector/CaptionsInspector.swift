@@ -103,13 +103,15 @@ enum CaptionsInspector {
                     }
                     .labelsHidden()
 
+                    // 4 weight names (Regular/Medium/Semibold/Bold) overflow a
+                    // segmented picker at the column width — use a menu.
                     Picker("Weight", selection: Binding(
                         get: { block?.fontWeight ?? .semibold },
                         set: { model.setTextWeight($0) }
                     )) {
                         ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
                     }
-                    .pickerStyle(.segmented).labelsHidden()
+                    .pickerStyle(.menu).labelsHidden()
 
                     Picker("Align", selection: Binding(
                         get: { block?.alignment ?? .center },
@@ -293,13 +295,15 @@ enum CaptionsInspector {
                     }
                     .labelsHidden()
 
+                    // 4 weight names (Regular/Medium/Semibold/Bold) overflow a
+                    // segmented picker at the column width — use a menu.
                     Picker("Weight", selection: Binding(
                         get: { style?.fontWeight ?? .semibold },
                         set: { model.setSubtitleWeight($0) }
                     )) {
                         ForEach(TextWeight.allCases, id: \.self) { Text($0.displayName).tag($0) }
                     }
-                    .pickerStyle(.segmented).labelsHidden()
+                    .pickerStyle(.menu).labelsHidden()
 
                     Picker("Align", selection: Binding(
                         get: { style?.alignment ?? .center },

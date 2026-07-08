@@ -40,22 +40,28 @@ struct AudioInspector: View {
                     Text("BACKGROUND AUDIO").font(.caption).foregroundStyle(.secondary)
                     soonBadge()
                 }
+                // 4 genre names overflow a segmented picker at the column
+                // width (~272pt) — a menu keeps it inside the column.
                 Picker("", selection: .constant(0)) {
                     Text("Lo-Fi").tag(0)
                     Text("Commercial").tag(1)
                     Text("Electronic").tag(2)
                     Text("Instrumental").tag(3)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .disabled(true)
                 .opacity(0.5)
 
-                HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
                     Button("Add background audio") {}
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .disabled(true)
-                    Spacer()
-                    soonBadge()
+                    HStack(spacing: 6) {
+                        soonBadge()
+                        Spacer(minLength: 0)
+                    }
                 }
                 .opacity(0.55)
                 .help("Coming soon — not yet available")

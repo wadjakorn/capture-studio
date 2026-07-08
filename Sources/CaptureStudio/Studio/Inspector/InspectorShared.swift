@@ -56,12 +56,14 @@ let inspectorBorderPresets = [
         }
         .frame(width: fill ? nil : 80)
         .controlSize(.small)
+        .layoutPriority(1)
         if showPercent {
             Text("\(Int((value.wrappedValue * 100).rounded()))%")
                 .font(.caption2)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .trailing)
+                .fixedSize()
+                .frame(width: 42, alignment: .trailing)
         }
     }
     .help(help)
