@@ -54,7 +54,8 @@ struct StudioView: View {
             StudioAppBar(model: model)
             Divider()
             StudioCanvasToolbar(model: model,
-                                maskAction: { model.addShapeBlock(kind: .rectangle) })
+                                maskAction: { model.addShapeBlock(kind: .rectangle) },
+                                zoomAction: { model.addZoomBlock() })
                 .disabled(model.isExporting)
             Divider()
             HStack(spacing: 0) {
