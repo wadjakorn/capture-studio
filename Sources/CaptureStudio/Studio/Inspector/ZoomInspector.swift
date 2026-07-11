@@ -77,7 +77,7 @@ struct ZoomInspector: View {
                         Label("Center on cursor at playhead", systemImage: "cursorarrow")
                     }
                     .disabled(!model.hasCursorData)
-                    Text("Set automatically when you switch from follow at a split; use this to re-center on the cursor.")
+                    Text("Seeded when you switch from follow at a split. Drag the reticle on the canvas to reposition, or re-center on the cursor here.")
                         .font(.caption2).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

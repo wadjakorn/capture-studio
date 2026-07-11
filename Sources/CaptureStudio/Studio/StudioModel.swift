@@ -1140,6 +1140,12 @@ final class StudioModel: ObservableObject {
 
     // MARK: - Zoom mode (follow ↔ manual) + manual target
 
+    /// The selected zoom block, if any.
+    var selectedZoomBlock: ZoomBlock? {
+        guard let id = selectedZoomBlockID else { return nil }
+        return zoomBlocks.first { $0.id == id }
+    }
+
     /// Framing mode of the selected block (`.follow` if none selected).
     var selectedZoomMode: ZoomMode {
         guard let id = selectedZoomBlockID,
