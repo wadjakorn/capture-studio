@@ -1138,6 +1138,88 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    // MARK: - Zoom mode (follow ↔ manual) + manual target
+
+    /// Framing mode of the selected block (`.follow` if none selected).
+    var selectedZoomMode: ZoomMode {
+        guard let id = selectedZoomBlockID,
+              let b = zoomBlocks.first(where: { $0.id == id }) else { return .follow }
+        return b.mode ?? .follow
+    }
+
+    /// Switch the selected block between follow and manual. When switching to
+    /// manual with no target yet, seed it from where the zoom is currently framed
+    /// at the playhead — so a follow→manual switch holds exactly where follow left
+    /// off (no jump).
+    func setZoomMode(_ mode: ZoomMode) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        if mode == .manual, zoomBlocks[i].focusX == nil || zoomBlocks[i].focusY == nil {
+            seedManualFocus(at: i)
+        }
+        zoomBlocks[i].mode = mode
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Split the selected/underlying zoom block at the playhead into two touching
+    /// blocks (a start/stop point). They stay one continuous run, so the zoom
+    /// holds across the seam; the new right-hand block becomes selected.
+    func splitZoomBlockAtPlayhead() {
+        let t = min(max(currentTime, 0), duration)
+        let res = ZoomTimeline.split(zoomBlocks, atTime: t)
+        guard let id = res.id else { return }
+        setZoomBlocks(res.blocks, select: id)
+    }
+
+    /// Set the selected manual block's target focus (normalized 0…1 of source),
+    /// e.g. from a drag on the canvas. No-op unless the block is manual.
+    func setZoomTarget(x: Double, y: Double) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }),
+              (zoomBlocks[i].mode ?? .follow) == .manual else { return }
+        zoomBlocks[i].focusX = min(max(x, 0), 1)
+        zoomBlocks[i].focusY = min(max(y, 0), 1)
+        applyVideoComposition()
+    }
+
+    /// Re-seed the selected manual block's target from the cursor position at the
+    /// playhead (inspector convenience).
+    func centerManualTargetOnCursor() {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }),
+              sourceSize.width > 0, sourceSize.height > 0 else { return }
+        let b = zoomBlocks[i]
+        let t = min(max(currentTime, b.begin), b.end)
+        guard let p = CursorOverlay.position(at: t, in: cursorSamples)?.p else { return }
+        zoomBlocks[i].focusX = Double(min(max(p.x / sourceSize.width, 0), 1))
+        zoomBlocks[i].focusY = Double(min(max(p.y / sourceSize.height, 0), 1))
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// Seed a block's manual target from where the zoom is currently framed at the
+    /// playhead: prefer the exact rendered auto-zoom focus (seamless handoff from
+    /// follow), else the cursor, else the source centre.
+    private func seedManualFocus(at i: Int) {
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return }
+        let b = zoomBlocks[i]
+        let t = min(max(currentTime, b.begin), b.end)
+        let track = AutoZoomTrack.build(blocks: zoomBlocks, cursorSamples: cursorSamples,
+                                        sourceSize: sourceSize, config: autoZoomConfig)
+        let sampled = AutoZoomTrack.sample(at: t, track: track)
+        let p: CGPoint
+        if sampled.scale > 1 {
+            p = sampled.focus
+        } else if let c = CursorOverlay.position(at: t, in: cursorSamples)?.p {
+            p = c
+        } else {
+            p = CGPoint(x: sourceSize.width / 2, y: sourceSize.height / 2)
+        }
+        zoomBlocks[i].focusX = Double(min(max(p.x / sourceSize.width, 0), 1))
+        zoomBlocks[i].focusY = Double(min(max(p.y / sourceSize.height, 0), 1))
+    }
+
     /// Replace the zoom-block list. Adding the first / removing the last flips
     /// the compositor on/off, so refresh the player item when `needsCompositor`
     /// changes, mirroring `setBlocks`.

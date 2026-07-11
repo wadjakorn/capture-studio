@@ -55,7 +55,13 @@ struct ZoomTimelineLane: View {
         let x0 = fraction(block.begin) * width
         let x1 = fraction(block.end) * width
         let selected = model.selectedZoomBlockID == block.id
-        let accent = Color.orange     // distinct from camera (accent) + text lanes
+        let manual = (block.mode ?? .follow) == .manual
+        // Manual holds a fixed frame (teal); follow tracks the cursor (orange).
+        let accent = manual ? Color.teal : Color.orange
+        let icon = manual ? "pin.fill" : "plus.magnifyingglass"
+        // A block that starts exactly where another ends is a continuous run: mark
+        // the shared edge as a start/stop seam.
+        let touchesPrev = model.zoomBlocks.contains { abs($0.end - block.begin) < 1e-6 }
         let bodyW = max(2, x1 - x0)
 
         ZStack(alignment: .leading) {
@@ -69,11 +75,19 @@ struct ZoomTimelineLane: View {
                 .contentShape(Rectangle())
                 .gesture(bodyGesture(block, width: width))
 
-            Image(systemName: "plus.magnifyingglass")
+            Image(systemName: icon)
                 .font(.system(size: 9))
                 .foregroundStyle(.secondary)
                 .frame(width: bodyW, height: laneHeight - 2)
                 .allowsHitTesting(false)
+
+            if touchesPrev {
+                Rectangle()
+                    .fill(.white)
+                    .frame(width: 1.5, height: laneHeight - 6)
+                    .position(x: 0.75, y: laneHeight / 2)
+                    .allowsHitTesting(false)
+            }
 
             edgeHandle(accent).position(x: 0, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
