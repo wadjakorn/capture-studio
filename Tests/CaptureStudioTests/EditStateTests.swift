@@ -267,6 +267,45 @@ import Foundation
         #expect(edit.cameraHomeLayout == .mainAndFloat)
     }
 
+    @Test func zoomBlockModeAndFocusRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let bundle = try ProjectBundle.createNew(in: dir)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let blocks = [
+            ZoomBlock(begin: 0, end: 2, scale: 2),                        // follow (default)
+            ZoomBlock(begin: 2, end: 4, scale: 2, mode: .manual, focusX: 0.7, focusY: 0.3),
+        ]
+        let edit = EditState(zoomBlocks: blocks)
+        try bundle.writeEdit(edit)
+        #expect(bundle.loadEdit().zoomBlocks == blocks)
+    }
+
+    @Test func legacyZoomBlockDefaultsToFollow() throws {
+        // A bundle written before manual mode: the zoom block has no mode/focus.
+        let json = #"""
+        {"schemaVersion":1,"zoomBlocks":[
+          {"id":"00000000-0000-0000-0000-000000000001","begin":0,"end":2,"scale":2}
+        ]}
+        """#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.zoomBlocks.count == 1)
+        #expect(edit.zoomBlocks[0].mode == nil)     // nil is treated as .follow
+        #expect(edit.zoomBlocks[0].focusX == nil)
+        #expect(edit.zoomBlocks[0].focusY == nil)
+    }
+
+    @Test func unknownZoomModeFallsBackToFollow() throws {
+        let json = #"""
+        {"schemaVersion":1,"zoomBlocks":[
+          {"id":"00000000-0000-0000-0000-000000000001","begin":0,"end":2,"scale":2,"mode":"wobble"}
+        ]}
+        """#
+        let edit = try JSONDecoder().decode(EditState.self, from: Data(json.utf8))
+        #expect(edit.zoomBlocks[0].mode == .follow)
+    }
+
     @Test func legacyVisibleBlocksMigrateToLayout() throws {
         // A bundle written before layouts: blocks carry `visible`, no `layout`;
         // top-level `cameraVisible:false` → the home becomes main-only.
