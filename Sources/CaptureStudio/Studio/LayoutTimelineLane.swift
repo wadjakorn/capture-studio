@@ -11,7 +11,6 @@ struct LayoutTimelineLane: View {
 
     private let laneHeight: CGFloat = 26
     private let handleWidth: CGFloat = 7
-    private let edgeHitWidth: CGFloat = 16
     private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let laneSpace = "layoutLane"
 
@@ -62,7 +61,6 @@ struct LayoutTimelineLane: View {
         let selected = model.selectedLayoutBlockID == block.id
         let tint = color(for: block.layout)
         let bodyW = max(x1 - x0, 2)
-        let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
         let siblings = model.layoutBlocks.filter { $0.id != block.id }
         let beginShared = TimelineEdgeShare.isShared(
             Double(x0), with: siblings.map { Double(fraction($0.end) * width) }, tolerance: Double(edgeProximity))
@@ -88,21 +86,19 @@ struct LayoutTimelineLane: View {
                     .allowsHitTesting(false)
             }
 
-            // Visible grips sit on the edges (staggered top/bottom at a shared
-            // boundary so neighbours read apart); the invisible hit targets
-            // below carry the drag gestures, biased into the block interior.
+            // Edge grips carry the resize gesture directly — the hit area is
+            // just the visible capsule, so the rest of the block stays free for
+            // drag-to-move. Grips stagger top/bottom at a shared boundary so
+            // neighbours read apart and their hit areas don't overlap.
             TimelineEdgeHandle(color: tint,
                                placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
                                contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
-                .position(x: 0, y: laneHeight / 2).allowsHitTesting(false)
+                .position(x: 0, y: laneHeight / 2)
+                .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
             TimelineEdgeHandle(color: tint,
                                placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
                                contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
-                .position(x: bodyW, y: laneHeight / 2).allowsHitTesting(false)
-
-            edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: laneHeight / 2)
-                .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHitTarget(width: hits.endWidth).position(x: hits.endMidX, y: laneHeight / 2)
+                .position(x: bodyW, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: laneHeight, alignment: .leading)
@@ -117,12 +113,6 @@ struct LayoutTimelineLane: View {
         case .floatCamera: return .teal
         case .cameraStatic: return .purple
         }
-    }
-
-    private func edgeHitTarget(width: CGFloat) -> some View {
-        Color.clear
-            .frame(width: width, height: laneHeight)
-            .contentShape(Rectangle())
     }
 
     // MARK: - Gestures

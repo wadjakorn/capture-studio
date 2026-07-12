@@ -13,7 +13,6 @@ struct TextTimelineLane: View {
     private let rowHeight: CGFloat = 22
     private let rowSpacing: CGFloat = 3
     private let handleWidth: CGFloat = 7
-    private let edgeHitWidth: CGFloat = 16
     private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let maxVisibleRows = 3
     private let laneSpace = "textLane"
@@ -87,7 +86,6 @@ struct TextTimelineLane: View {
         let selected = model.selectedTextBlockID == block.id
         let accent = Color.accentColor
         let bodyW = max(2, x1 - x0)
-        let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
         // Only same-row neighbours share a visible edge (overlaps pack onto
         // other rows), so detect coincident edges within this sub-row.
         let siblings = rowMates.filter { $0.id != block.id }
@@ -116,21 +114,19 @@ struct TextTimelineLane: View {
                 .frame(width: bodyW, height: rowHeight - 2, alignment: .leading)
                 .allowsHitTesting(false)
 
-            // Visible grips sit on the edges (staggered top/bottom at a shared
-            // boundary so neighbours read apart); the invisible hit targets
-            // below carry the drag gestures, biased into the block interior.
+            // Edge grips carry the resize gesture directly — the hit area is
+            // just the visible capsule, so the rest of the block stays free for
+            // drag-to-move. Grips stagger top/bottom at a shared boundary so
+            // neighbours read apart and their hit areas don't overlap.
             TimelineEdgeHandle(color: accent,
                                placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
                                contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
-                .position(x: 0, y: (rowHeight - 2) / 2).allowsHitTesting(false)
+                .position(x: 0, y: (rowHeight - 2) / 2)
+                .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
             TimelineEdgeHandle(color: accent,
                                placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
                                contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
-                .position(x: bodyW, y: (rowHeight - 2) / 2).allowsHitTesting(false)
-
-            edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: (rowHeight - 2) / 2)
-                .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHitTarget(width: hits.endWidth).position(x: hits.endMidX, y: (rowHeight - 2) / 2)
+                .position(x: bodyW, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: rowHeight, alignment: .leading)
@@ -139,12 +135,6 @@ struct TextTimelineLane: View {
 
     private func label(_ block: TextBlock) -> String {
         block.text.isEmpty ? "Text" : block.text
-    }
-
-    private func edgeHitTarget(width: CGFloat) -> some View {
-        Color.clear
-            .frame(width: width, height: rowHeight)
-            .contentShape(Rectangle())
     }
 
     // MARK: - Gestures

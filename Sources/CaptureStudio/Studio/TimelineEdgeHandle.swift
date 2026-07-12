@@ -1,14 +1,16 @@
 import SwiftUI
 
-/// The visible grip for a timeline block's begin/end edge (drag handling lives
-/// in each lane; this view is `allowsHitTesting(false)` decoration).
+/// The grip for a timeline block's begin/end edge. Its *hit area equals the
+/// visible capsule* — the lane attaches the resize gesture to this view, so
+/// only the pill you see grabs the edge; the rest of the block stays free for
+/// the drag-to-move gesture. The stem is decoration (`allowsHitTesting(false)`).
 ///
 /// - `.full`: one capsule centred on the edge — the normal, isolated case.
 /// - `.top` / `.bottom`: a shorter grip pushed into the top (end) or bottom
 ///   (begin) half, with a thin stem back to the vertical centre. When two
 ///   adjacent blocks share a boundary, one renders `.top` and the other
 ///   `.bottom`, so the two coincident lines read as separate handles instead of
-///   one ambiguous bar.
+///   one ambiguous bar — and their hit areas, following the grips, don't overlap.
 struct TimelineEdgeHandle: View {
     let color: Color
     let placement: EdgeHandlePlacement
@@ -45,10 +47,11 @@ struct TimelineEdgeHandle: View {
             .fill(color)
             .frame(width: width, height: h)
             .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
+            .contentShape(Capsule())   // hit area == the visible pill
     }
 
     /// Thin line from the block's vertical centre out to the grip's inner edge,
-    /// so two neighbouring stems meet in the middle.
+    /// so two neighbouring stems meet in the middle. Decoration only.
     private func stem(up: Bool) -> some View {
         let innerEdge = capsuleHeight * (gripOffset - gripFraction / 2)
         let dir: CGFloat = up ? -1 : 1
@@ -56,5 +59,6 @@ struct TimelineEdgeHandle: View {
             .fill(color)
             .frame(width: stemWidth, height: max(0, innerEdge))
             .offset(y: dir * innerEdge / 2)
+            .allowsHitTesting(false)
     }
 }
