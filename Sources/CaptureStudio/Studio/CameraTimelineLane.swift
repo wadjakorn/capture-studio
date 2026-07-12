@@ -78,6 +78,9 @@ struct CameraTimelineLane: View {
         } else {
             let bodyW = x1 - x0
             let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
+            let siblings = model.cameraBlocks.filter { $0.id != block.id }
+            let beginShared = TimelineEdgeShare.isShared(block.begin, with: siblings.map(\.end))
+            let endShared = TimelineEdgeShare.isShared(block.end, with: siblings.map(\.begin))
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 3)
                     .fill((block.layout.showsCamera ? accent : Color.secondary)
@@ -99,13 +102,18 @@ struct CameraTimelineLane: View {
                         .allowsHitTesting(false)
                 }
 
-                // Visible capsules sit on the edges; the invisible hit targets
-                // below carry the drag gestures, biased into the block interior
-                // so adjacent/short blocks stay separable (see EdgeHitRegions).
-                edgeCapsule(accent).position(x: 0, y: laneHeight / 2)
-                    .allowsHitTesting(false)
-                edgeCapsule(accent).position(x: bodyW, y: laneHeight / 2)
-                    .allowsHitTesting(false)
+                // Visible grips sit on the edges (staggered top/bottom at a
+                // shared boundary so neighbours read apart); the invisible hit
+                // targets below carry the drag gestures, biased into the block
+                // interior so adjacent/short blocks stay separable.
+                TimelineEdgeHandle(color: accent,
+                                   placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
+                                   contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
+                    .position(x: 0, y: laneHeight / 2).allowsHitTesting(false)
+                TimelineEdgeHandle(color: accent,
+                                   placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
+                                   contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
+                    .position(x: bodyW, y: laneHeight / 2).allowsHitTesting(false)
 
                 edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: laneHeight / 2)
                     .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
@@ -115,13 +123,6 @@ struct CameraTimelineLane: View {
             .frame(width: bodyW, height: laneHeight, alignment: .leading)
             .offset(x: x0)
         }
-    }
-
-    private func edgeCapsule(_ color: Color) -> some View {
-        Capsule()
-            .fill(color)
-            .frame(width: handleWidth, height: laneHeight - 6)
-            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
     }
 
     private func edgeHitTarget(width: CGFloat) -> some View {

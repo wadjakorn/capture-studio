@@ -42,7 +42,7 @@ struct ShapeTimelineLane: View {
 
                     ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, blocks in
                         ForEach(blocks) { block in
-                            blockView(block, width: width)
+                            blockView(block, rowMates: blocks, width: width)
                                 .offset(y: CGFloat(rowIndex) * (rowHeight + rowSpacing))
                         }
                     }
@@ -75,13 +75,18 @@ struct ShapeTimelineLane: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: ShapeBlock, width: CGFloat) -> some View {
+    private func blockView(_ block: ShapeBlock, rowMates: [ShapeBlock], width: CGFloat) -> some View {
         let x0 = fraction(block.begin) * width
         let x1 = fraction(block.end) * width
         let selected = model.selectedShapeBlockID == block.id
         let accent = Color.accentColor
         let bodyW = max(2, x1 - x0)
         let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
+        // Only same-row neighbours share a visible edge (overlaps pack onto
+        // other rows), so detect coincident edges within this sub-row.
+        let siblings = rowMates.filter { $0.id != block.id }
+        let beginShared = TimelineEdgeShare.isShared(block.begin, with: siblings.map(\.end))
+        let endShared = TimelineEdgeShare.isShared(block.end, with: siblings.map(\.begin))
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
@@ -104,13 +109,17 @@ struct ShapeTimelineLane: View {
                 .frame(width: bodyW, height: rowHeight - 2, alignment: .leading)
                 .allowsHitTesting(false)
 
-            // Visible capsules sit on the edges; the invisible hit targets below
-            // carry the drag gestures, biased into the block interior so
-            // adjacent/short blocks stay separable (see EdgeHitRegions).
-            edgeCapsule(accent).position(x: 0, y: (rowHeight - 2) / 2)
-                .allowsHitTesting(false)
-            edgeCapsule(accent).position(x: bodyW, y: (rowHeight - 2) / 2)
-                .allowsHitTesting(false)
+            // Visible grips sit on the edges (staggered top/bottom at a shared
+            // boundary so neighbours read apart); the invisible hit targets
+            // below carry the drag gestures, biased into the block interior.
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
+                               contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
+                .position(x: 0, y: (rowHeight - 2) / 2).allowsHitTesting(false)
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
+                               contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
+                .position(x: bodyW, y: (rowHeight - 2) / 2).allowsHitTesting(false)
 
             edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
@@ -127,13 +136,6 @@ struct ShapeTimelineLane: View {
         case .ellipse: return "oval"
         case .blur: return "drop.halffull"
         }
-    }
-
-    private func edgeCapsule(_ color: Color) -> some View {
-        Capsule()
-            .fill(color)
-            .frame(width: handleWidth, height: rowHeight - 8)
-            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
     }
 
     private func edgeHitTarget(width: CGFloat) -> some View {
