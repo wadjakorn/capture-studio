@@ -1168,11 +1168,14 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    /// Whether the selected zoom block spans the playhead, so it can be split
-    /// there (drives the inspector's Split button).
+    /// Whether the selected zoom block can be split at the playhead — the playhead
+    /// must sit inside it with at least `splitMinWidth` on each side (matching
+    /// `ZoomTimeline.split`), so the button disables instead of silently no-opping
+    /// near an edge. Drives the inspector's Split button.
     var canSplitSelectedZoomAtPlayhead: Bool {
         guard let b = selectedZoomBlock else { return false }
-        return b.begin < currentTime && currentTime < b.end
+        let w = ZoomTimeline.splitMinWidth
+        return currentTime - b.begin >= w && b.end - currentTime >= w
     }
 
     /// Split the SELECTED zoom block at the playhead into two touching blocks (a

@@ -5,6 +5,11 @@ import Foundation
 /// zoom state at a time), so the clamps here guarantee no overlap. Mirrors
 /// `CameraTimeline`'s edge logic. No AVFoundation, no UI — all unit-tested.
 enum ZoomTimeline {
+    /// Smallest piece a split may leave on either side; a split closer than this
+    /// to an edge is refused. Shared with the UI so the Split control can disable
+    /// itself instead of silently no-opping.
+    static let splitMinWidth = 0.05
+
     // MARK: - Edge clamps (non-overlap)
 
     static func clampBegin(_ blocks: [ZoomBlock], id: UUID, toTime: Double,
@@ -63,7 +68,7 @@ enum ZoomTimeline {
     /// run — switching one half to manual/follow is seamless. No-op (nil id) when
     /// no block spans the time or either piece would be narrower than `minWidth`.
     static func split(_ blocks: [ZoomBlock], atTime t: Double,
-                      minWidth: Double = 0.05) -> (blocks: [ZoomBlock], id: UUID?) {
+                      minWidth: Double = splitMinWidth) -> (blocks: [ZoomBlock], id: UUID?) {
         let sorted = sortedByBegin(blocks)
         guard let i = sorted.firstIndex(where: { $0.begin < t && t < $0.end }),
               t - sorted[i].begin >= minWidth,

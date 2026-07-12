@@ -196,21 +196,27 @@ enum AutoZoomTrack {
     /// with different scales interpolate rather than stepping.
     private static func blendedTarget(_ t: Double, run: [ZoomBlock],
                                       config: AutoZoomConfig) -> Double {
-        let blend = 0.3
         func tgt(_ b: ZoomBlock) -> Double { max(1, b.scale ?? config.defaultScale) }
+        func span(_ b: ZoomBlock) -> Double { b.end - b.begin }
         var i = 0
         while i < run.count - 1 && t >= run[i].end - 1e-9 { i += 1 }
         let cur = tgt(run[i])
+        let curSpan = span(run[i])
+        // Blend window clamped to both adjacent spans so it never overruns a short
+        // block (the two half-windows meet at the block midpoint at most, so each
+        // boundary blends on both sides).
         if i > 0 {
+            let blend = min(0.3, curSpan, span(run[i - 1]))
             let bT = run[i].begin
-            if t < bT + blend / 2 {
+            if blend > 1e-9, t < bT + blend / 2 {
                 let f = min(max((t - (bT - blend / 2)) / blend, 0), 1)
                 return tgt(run[i - 1]) + (cur - tgt(run[i - 1])) * f
             }
         }
         if i < run.count - 1 {
+            let blend = min(0.3, curSpan, span(run[i + 1]))
             let bT = run[i].end
-            if t > bT - blend / 2 {
+            if blend > 1e-9, t > bT - blend / 2 {
                 let f = min(max((t - (bT - blend / 2)) / blend, 0), 1)
                 return cur + (tgt(run[i + 1]) - cur) * f
             }
