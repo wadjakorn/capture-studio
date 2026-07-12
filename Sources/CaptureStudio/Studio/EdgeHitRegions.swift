@@ -10,14 +10,15 @@ import CoreGraphics
 ///   begin at the same x, A's end target lives inside A (left of the boundary)
 ///   and B's begin target lives inside B (right of the boundary), so the two
 ///   16pt targets no longer overlap and each edge stays grabbable.
-/// - **Short blocks stay resizable.** For a block too narrow to host two
-///   full-width targets, the body is split down the middle — the left half
-///   grabs begin, the right half grabs end — so both edges remain reachable
-///   down to a couple of points instead of collapsing into one another.
+/// - **Short blocks stay movable.** Each edge target is capped at a *fraction*
+///   of the body (`edgeFraction`), so a short block always keeps a central band
+///   free for the body drag-to-move gesture instead of the two edges swallowing
+///   the whole block. Edges shrink with the block; the body is never fully
+///   consumed.
 ///
 /// Coordinates are local to the block body (x = 0 at begin, x = `bodyWidth` at
-/// end). The regions are half-open in intent (`[lowerBound, upperBound)`); at a
-/// split they touch at the midpoint but never overlap.
+/// end). The regions are half-open in intent (`[lowerBound, upperBound)`) and
+/// never overlap (`edgeFraction` is clamped to ≤ 0.5).
 struct EdgeHitRegions: Equatable {
     /// Local-x span of the begin (left) edge hit target.
     let begin: ClosedRange<CGFloat>
@@ -26,11 +27,16 @@ struct EdgeHitRegions: Equatable {
 
     /// - Parameters:
     ///   - bodyWidth: rendered block width in points (negatives treated as 0).
-    ///   - handleWidth: desired hit-target width per edge (e.g. 16).
-    init(bodyWidth: CGFloat, handleWidth: CGFloat) {
+    ///   - handleWidth: max hit-target width per edge on a wide block (e.g. 16).
+    ///   - edgeFraction: share of the body each edge may take on a narrow block,
+    ///     clamped to `0...0.5`. The default 0.3 leaves ~40% of a short block as
+    ///     a central move zone.
+    init(bodyWidth: CGFloat, handleWidth: CGFloat, edgeFraction: CGFloat = 0.3) {
         let w = max(0, bodyWidth)
-        // Never let the two targets overlap: cap each at half the body.
-        let hw = min(max(0, handleWidth), w / 2)
+        let frac = min(0.5, max(0, edgeFraction))
+        // Cap each edge at the smaller of the fixed handle width and the
+        // fractional share, so a short block keeps a central move band.
+        let hw = min(max(0, handleWidth), w * frac)
         begin = 0...hw
         end = (w - hw)...w
     }

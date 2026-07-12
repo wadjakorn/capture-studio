@@ -38,29 +38,42 @@ import CoreGraphics
         }
     }
 
-    // MARK: - Short block (body split down the middle)
+    // MARK: - Short block (edges capped to a fraction, central move band kept)
 
-    @Test func narrowBlockSplitsBodyInHalf() {
-        let h = EdgeHitRegions(bodyWidth: 20, handleWidth: 16)
-        // 20 < 2*16, so each target caps at half the body and they meet at 10.
+    @Test func narrowBlockCapsEdgesToFractionAndKeepsCentre() {
+        let h = EdgeHitRegions(bodyWidth: 20, handleWidth: 16)   // default 0.3
+        // 0.3 * 20 = 6 per edge, leaving a 8pt central move band.
+        #expect(h.begin == 0...6)
+        #expect(h.end == 14...20)
+        #expect(h.beginWidth == 6)
+        #expect(h.endWidth == 6)
+        #expect(h.end.lowerBound - h.begin.upperBound == 8)   // body stays grabbable
+    }
+
+    @Test func shortBlocksAlwaysReserveACentralMoveBand() {
+        // Across a range of short widths the two edges never meet: a middle
+        // strip is always left for the body drag-to-move gesture.
+        for w in stride(from: CGFloat(2), through: 60, by: 3) {
+            let h = EdgeHitRegions(bodyWidth: w, handleWidth: 16)
+            #expect(h.begin.upperBound < h.end.lowerBound)     // strict gap
+            let centre = h.end.lowerBound - h.begin.upperBound
+            #expect(centre >= w * 0.4 - 0.0001)                // ~40% stays body
+        }
+    }
+
+    @Test func tinyBlockStillLeavesAGap() {
+        let h = EdgeHitRegions(bodyWidth: 4, handleWidth: 16)
+        #expect(abs(h.beginWidth - 1.2) < 0.0001)
+        #expect(abs(h.endWidth - 1.2) < 0.0001)
+        #expect(h.begin.upperBound < h.end.lowerBound)   // never swallow the body
+    }
+
+    @Test func edgeFractionClampsToHalfSoTargetsNeverOverlap() {
+        let h = EdgeHitRegions(bodyWidth: 20, handleWidth: 16, edgeFraction: 0.9)
+        // 0.9 clamps to 0.5 → each edge caps at half; they touch, never overlap.
+        #expect(h.begin.upperBound <= h.end.lowerBound)
         #expect(h.begin == 0...10)
         #expect(h.end == 10...20)
-        #expect(h.beginWidth == 10)
-        #expect(h.endWidth == 10)
-    }
-
-    @Test func exactlyTwiceHandleWidthTouchesWithoutGapOrOverlap() {
-        let h = EdgeHitRegions(bodyWidth: 32, handleWidth: 16)
-        #expect(h.begin == 0...16)
-        #expect(h.end == 16...32)
-        #expect(h.begin.upperBound == h.end.lowerBound)   // touch, no gap
-    }
-
-    @Test func tinyBlockKeepsBothEdgesReachable() {
-        let h = EdgeHitRegions(bodyWidth: 4, handleWidth: 16)
-        #expect(h.beginWidth == 2)
-        #expect(h.endWidth == 2)
-        #expect(h.begin.upperBound == h.end.lowerBound)   // no overlap
     }
 
     // MARK: - Degenerate inputs
