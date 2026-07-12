@@ -12,6 +12,7 @@ struct ShapeTimelineLane: View {
     private let rowHeight: CGFloat = 22
     private let rowSpacing: CGFloat = 3
     private let handleWidth: CGFloat = 7
+    private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let maxVisibleRows = 3
     private let laneSpace = "shapeLane"
 
@@ -41,7 +42,7 @@ struct ShapeTimelineLane: View {
 
                     ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, blocks in
                         ForEach(blocks) { block in
-                            blockView(block, width: width)
+                            blockView(block, rowMates: blocks, width: width)
                                 .offset(y: CGFloat(rowIndex) * (rowHeight + rowSpacing))
                         }
                     }
@@ -74,12 +75,19 @@ struct ShapeTimelineLane: View {
     }
 
     @ViewBuilder
-    private func blockView(_ block: ShapeBlock, width: CGFloat) -> some View {
+    private func blockView(_ block: ShapeBlock, rowMates: [ShapeBlock], width: CGFloat) -> some View {
         let x0 = fraction(block.begin) * width
         let x1 = fraction(block.end) * width
         let selected = model.selectedShapeBlockID == block.id
         let accent = Color.accentColor
         let bodyW = max(2, x1 - x0)
+        // Only same-row neighbours share a visible edge (overlaps pack onto
+        // other rows), so detect coincident edges within this sub-row.
+        let siblings = rowMates.filter { $0.id != block.id }
+        let beginShared = TimelineEdgeShare.isShared(
+            Double(x0), with: siblings.map { Double(fraction($0.end) * width) }, tolerance: Double(edgeProximity))
+        let endShared = TimelineEdgeShare.isShared(
+            Double(x1), with: siblings.map { Double(fraction($0.begin) * width) }, tolerance: Double(edgeProximity))
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
@@ -102,9 +110,19 @@ struct ShapeTimelineLane: View {
                 .frame(width: bodyW, height: rowHeight - 2, alignment: .leading)
                 .allowsHitTesting(false)
 
-            edgeHandle(accent).position(x: 0, y: (rowHeight - 2) / 2)
+            // Edge grips carry the resize gesture directly — the hit area is
+            // just the visible capsule, so the rest of the block stays free for
+            // drag-to-move. Grips stagger top/bottom at a shared boundary so
+            // neighbours read apart and their hit areas don't overlap.
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
+                               contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
+                .position(x: 0, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHandle(accent).position(x: bodyW, y: (rowHeight - 2) / 2)
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
+                               contentHeight: rowHeight - 2, capsuleHeight: rowHeight - 8, width: handleWidth)
+                .position(x: bodyW, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: rowHeight, alignment: .leading)
@@ -117,15 +135,6 @@ struct ShapeTimelineLane: View {
         case .ellipse: return "oval"
         case .blur: return "drop.halffull"
         }
-    }
-
-    private func edgeHandle(_ color: Color) -> some View {
-        Capsule()
-            .fill(color)
-            .frame(width: handleWidth, height: rowHeight - 8)
-            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
-            .frame(width: 16, height: rowHeight)
-            .contentShape(Rectangle())
     }
 
     // MARK: - Gestures

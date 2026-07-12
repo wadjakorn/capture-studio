@@ -9,6 +9,7 @@ struct ZoomTimelineLane: View {
 
     private let laneHeight: CGFloat = 26
     private let handleWidth: CGFloat = 7
+    private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let laneSpace = "zoomLane"
 
     @State private var dragMoved = false
@@ -63,6 +64,11 @@ struct ZoomTimelineLane: View {
         // the shared edge as a start/stop seam.
         let touchesPrev = model.zoomBlocks.contains { abs($0.end - block.begin) < 1e-6 }
         let bodyW = max(2, x1 - x0)
+        let siblings = model.zoomBlocks.filter { $0.id != block.id }
+        let beginShared = TimelineEdgeShare.isShared(
+            Double(x0), with: siblings.map { Double(fraction($0.end) * width) }, tolerance: Double(edgeProximity))
+        let endShared = TimelineEdgeShare.isShared(
+            Double(x1), with: siblings.map { Double(fraction($0.begin) * width) }, tolerance: Double(edgeProximity))
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
@@ -89,22 +95,23 @@ struct ZoomTimelineLane: View {
                     .allowsHitTesting(false)
             }
 
-            edgeHandle(accent).position(x: 0, y: laneHeight / 2)
+            // Edge grips carry the resize gesture directly — the hit area is
+            // just the visible capsule, so the rest of the block stays free for
+            // drag-to-move. Grips stagger top/bottom at a shared boundary so
+            // neighbours read apart and their hit areas don't overlap.
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: true, shared: beginShared),
+                               contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
+                .position(x: 0, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHandle(accent).position(x: bodyW, y: laneHeight / 2)
+            TimelineEdgeHandle(color: accent,
+                               placement: TimelineEdgeShare.placement(isBegin: false, shared: endShared),
+                               contentHeight: laneHeight, capsuleHeight: laneHeight - 6, width: handleWidth)
+                .position(x: bodyW, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: laneHeight, alignment: .leading)
         .offset(x: x0)
-    }
-
-    private func edgeHandle(_ color: Color) -> some View {
-        Capsule()
-            .fill(color)
-            .frame(width: handleWidth, height: laneHeight - 6)
-            .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
-            .frame(width: 16, height: laneHeight)
-            .contentShape(Rectangle())
     }
 
     private func bodyGesture(_ block: ZoomBlock, width: CGFloat) -> some Gesture {
