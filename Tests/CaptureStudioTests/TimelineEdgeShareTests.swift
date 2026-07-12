@@ -23,6 +23,15 @@ import Testing
         #expect(!TimelineEdgeShare.isShared(2.0, with: []))
     }
 
+    // Lanes call this in screen-space x with a pixel tolerance, so near-but-not-
+    // touching edges also count as crowded.
+    @Test func proximityToleranceCatchesNearEdges() {
+        // Begin at x=100, a neighbour end at x=110: within a 14px tolerance.
+        #expect(TimelineEdgeShare.isShared(100, with: [110], tolerance: 14))
+        // 20px apart: outside tolerance, stays full.
+        #expect(!TimelineEdgeShare.isShared(100, with: [120], tolerance: 14))
+    }
+
     // MARK: - placement
 
     @Test func sharedBeginGoesToBottomEndToTop() {

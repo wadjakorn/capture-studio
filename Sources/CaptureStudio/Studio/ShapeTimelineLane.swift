@@ -13,6 +13,7 @@ struct ShapeTimelineLane: View {
     private let rowSpacing: CGFloat = 3
     private let handleWidth: CGFloat = 7
     private let edgeHitWidth: CGFloat = 16
+    private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let maxVisibleRows = 3
     private let laneSpace = "shapeLane"
 
@@ -85,8 +86,10 @@ struct ShapeTimelineLane: View {
         // Only same-row neighbours share a visible edge (overlaps pack onto
         // other rows), so detect coincident edges within this sub-row.
         let siblings = rowMates.filter { $0.id != block.id }
-        let beginShared = TimelineEdgeShare.isShared(block.begin, with: siblings.map(\.end))
-        let endShared = TimelineEdgeShare.isShared(block.end, with: siblings.map(\.begin))
+        let beginShared = TimelineEdgeShare.isShared(
+            Double(x0), with: siblings.map { Double(fraction($0.end) * width) }, tolerance: Double(edgeProximity))
+        let endShared = TimelineEdgeShare.isShared(
+            Double(x1), with: siblings.map { Double(fraction($0.begin) * width) }, tolerance: Double(edgeProximity))
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
