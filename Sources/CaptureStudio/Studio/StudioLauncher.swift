@@ -27,6 +27,12 @@ enum StudioLauncher {
         window.isReleasedWhenClosed = false
 
         let controller = NSWindowController(window: window)
+        // First Studio window: become a regular Dock app so the window gets a
+        // Dock tile and can be minimized/restored. Cold launch stays dockless
+        // (LSUIElement); this only flips while >=1 editor window is open.
+        if controllers.isEmpty {
+            NSApp.setActivationPolicy(.regular)
+        }
         controllers.append(controller)
 
         NotificationCenter.default.addObserver(
@@ -34,6 +40,10 @@ enum StudioLauncher {
         ) { _ in
             Task { @MainActor in
                 controllers.removeAll { $0.window === window }
+                // Last Studio window closed: revert to menu-bar-only.
+                if controllers.isEmpty {
+                    NSApp.setActivationPolicy(.accessory)
+                }
             }
         }
 
