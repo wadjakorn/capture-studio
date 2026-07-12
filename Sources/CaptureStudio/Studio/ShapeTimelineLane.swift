@@ -13,7 +13,7 @@ struct ShapeTimelineLane: View {
     private let rowSpacing: CGFloat = 3
     private let handleWidth: CGFloat = 7
     private let edgeHitWidth: CGFloat = 16
-    private let edgeProximity: CGFloat = 30   // stagger grips within this px gap
+    private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
     private let maxVisibleRows = 3
     private let laneSpace = "shapeLane"
 
