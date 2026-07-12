@@ -30,7 +30,7 @@ struct ZoomInspector: View {
             Button { model.splitZoomBlockAtPlayhead() } label: {
                 Label("Split at playhead", systemImage: "square.split.2x1")
             }
-            .disabled(model.selectedZoomBlockID == nil)
+            .disabled(!model.canSplitSelectedZoomAtPlayhead)
             .help("Split the selected zoom block at the playhead so you can switch follow/manual mid-zoom")
 
             Divider()

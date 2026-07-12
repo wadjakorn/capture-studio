@@ -1168,11 +1168,20 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
-    /// Split the selected/underlying zoom block at the playhead into two touching
-    /// blocks (a start/stop point). They stay one continuous run, so the zoom
-    /// holds across the seam; the new right-hand block becomes selected.
+    /// Whether the selected zoom block spans the playhead, so it can be split
+    /// there (drives the inspector's Split button).
+    var canSplitSelectedZoomAtPlayhead: Bool {
+        guard let b = selectedZoomBlock else { return false }
+        return b.begin < currentTime && currentTime < b.end
+    }
+
+    /// Split the SELECTED zoom block at the playhead into two touching blocks (a
+    /// start/stop point). They stay one continuous run, so the zoom holds across
+    /// the seam; the new right-hand block becomes selected. No-op unless the
+    /// selected block spans the playhead.
     func splitZoomBlockAtPlayhead() {
         let t = min(max(currentTime, 0), duration)
+        guard let b = selectedZoomBlock, b.begin < t, t < b.end else { return }
         let res = ZoomTimeline.split(zoomBlocks, atTime: t)
         guard let id = res.id else { return }
         setZoomBlocks(res.blocks, select: id)
