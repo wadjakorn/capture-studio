@@ -64,4 +64,48 @@ import Foundation
         #expect(out.count == 1)
         #expect(!out.contains { $0.id == aId })
     }
+
+    // MARK: - Split (start/stop point mid-zoom)
+
+    @Test func splitProducesTwoTouchingBlocks() {
+        let aId = UUID()
+        let a = ZoomBlock(id: aId, begin: 0, end: 4, scale: 2)
+        let (out, newID) = ZoomTimeline.split([a], atTime: 2.5)
+        #expect(out.count == 2)
+        #expect(newID != nil)
+        let left = out.first { $0.id == aId }!
+        let right = out.first { $0.id == newID }!
+        #expect(left.begin == 0)
+        #expect(left.end == 2.5)
+        #expect(right.begin == 2.5)     // touching → continuous run
+        #expect(right.end == 4)
+    }
+
+    @Test func splitKeepsSettingsOnBothHalves() {
+        let a = ZoomBlock(begin: 0, end: 4, scale: 3, sensitivity: 0.2,
+                          overflow: true, mode: .manual, focusX: 0.6, focusY: 0.4)
+        let (out, newID) = ZoomTimeline.split([a], atTime: 2)
+        for b in out {
+            #expect(b.scale == 3)
+            #expect(b.sensitivity == 0.2)
+            #expect(b.overflow == true)
+            #expect(b.mode == .manual)
+            #expect(b.focusX == 0.6)
+            #expect(b.focusY == 0.4)
+        }
+        #expect(out.contains { $0.id == newID })
+    }
+
+    @Test func splitOutsideAnyBlockIsNoOp() {
+        let blocks = [block(0, 2), block(3, 5)]
+        let (out, newID) = ZoomTimeline.split(blocks, atTime: 2.5)   // in the gap
+        #expect(newID == nil)
+        #expect(out.count == 2)
+    }
+
+    @Test func splitTooCloseToEdgeIsNoOp() {
+        let (out, newID) = ZoomTimeline.split([block(0, 4)], atTime: 0.01)
+        #expect(newID == nil)
+        #expect(out.count == 1)
+    }
 }

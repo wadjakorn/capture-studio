@@ -24,7 +24,34 @@ struct ZoomInspector: View {
                 .help("Delete the selected zoom block")
             }
 
+            // Split the block at the playhead into two touching segments (a
+            // start/stop point) so follow and manual can alternate without the
+            // zoom dropping back out.
+            Button { model.splitZoomBlockAtPlayhead() } label: {
+                Label("Split at playhead", systemImage: "square.split.2x1")
+            }
+            .disabled(!model.canSplitSelectedZoomAtPlayhead)
+            .help("Split the selected zoom block at the playhead so you can switch follow/manual mid-zoom")
+
             Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Mode", systemImage: "cursorarrow.motionlines")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Mode", selection: Binding(get: { model.selectedZoomMode },
+                                                  set: { model.setZoomMode($0) })) {
+                    Text("Follow mouse").tag(ZoomMode.follow)
+                    Text("Manual").tag(ZoomMode.manual)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(model.selectedZoomBlockID == nil)
+                Text(model.selectedZoomMode == .manual
+                     ? "Holds a fixed frame; ignores the cursor for this segment."
+                     : "Pans to follow the cursor.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -42,23 +69,37 @@ struct ZoomInspector: View {
                 )
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label("Follow sensitivity", systemImage: "hand.draw")
+            if model.selectedZoomMode == .manual {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Manual target", systemImage: "scope")
                         .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Button { model.centerManualTargetOnCursor() } label: {
+                        Label("Center on cursor at playhead", systemImage: "cursorarrow")
+                    }
+                    .disabled(!model.hasCursorData)
+                    Text("Seeded when you switch from follow at a split. Drag the reticle on the canvas to reposition, or re-center on the cursor here.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Slider(
-                    value: Binding(get: { model.selectedZoomSensitivity },
-                                   set: { model.setZoomSensitivity($0) }),
-                    in: 0...1,
-                    onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
-                )
-                Text("How aggressively the zoom pans toward the cursor — low = calm, high = snappy.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Label("Follow sensitivity", systemImage: "hand.draw")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(Int((model.selectedZoomSensitivity * 100).rounded()))%")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(get: { model.selectedZoomSensitivity },
+                                       set: { model.setZoomSensitivity($0) }),
+                        in: 0...1,
+                        onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
+                    )
+                    Text("How aggressively the zoom pans toward the cursor — low = calm, high = snappy.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {

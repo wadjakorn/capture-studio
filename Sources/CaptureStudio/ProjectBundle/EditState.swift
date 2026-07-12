@@ -236,10 +236,26 @@ struct LayoutBlock: Codable, Equatable, Identifiable {
     }
 }
 
+/// How a zoom block frames the source. `.follow` pans to track the cursor (the
+/// default and legacy behavior); `.manual` holds a fixed frame at the block's
+/// `focusX`/`focusY`, ignoring the cursor. Unknown raw strings (future versions)
+/// decode as `.follow`.
+enum ZoomMode: String, Codable {
+    case follow, manual
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ZoomMode(rawValue: raw) ?? .follow
+    }
+}
+
 /// One auto-zoom span on the screen-track timeline. During `[begin, end)` the
-/// canvas zooms in and pans to follow the cursor (see `AutoZoomTrack`). Blocks
-/// never overlap (a single zoom state at a time), mirroring `CameraBlock`.
-/// `scale` is the target magnification (≥1); nil means use the global default
+/// canvas zooms in and either pans to follow the cursor or holds a fixed manual
+/// frame (see `AutoZoomTrack`, `mode`). Blocks never overlap (a single zoom state
+/// at a time), mirroring `CameraBlock`. Adjacent (touching) blocks form one
+/// continuous zoom "run" — the zoom holds across their shared boundary instead of
+/// dropping to 1×, so follow↔manual can be switched mid-zoom seamlessly. `scale`
+/// is the target magnification (≥1); nil means use the global default
 /// (`autoZoomDefaultScale`).
 struct ZoomBlock: Codable, Equatable, Identifiable {
     var id: UUID
@@ -256,15 +272,28 @@ struct ZoomBlock: Codable, Equatable, Identifiable {
     /// stays contained: the pan is clamped so it always fills the framing window
     /// (cursor centred within the window). nil decodes as false (back-compat).
     var overflow: Bool?
+    /// Framing mode. nil decodes as `.follow` (back-compat: legacy blocks are all
+    /// cursor-follow).
+    var mode: ZoomMode?
+    /// Manual target focus as a fraction (0…1) of the source width/height, used
+    /// only when `mode == .manual`. nil when following the cursor. Stored
+    /// normalized so it survives source-dimension / crop changes; converted to
+    /// source pixels at build time.
+    var focusX: Double?
+    var focusY: Double?
 
     init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
-         sensitivity: Double? = nil, overflow: Bool? = nil) {
+         sensitivity: Double? = nil, overflow: Bool? = nil,
+         mode: ZoomMode? = nil, focusX: Double? = nil, focusY: Double? = nil) {
         self.id = id
         self.begin = begin
         self.end = end
         self.scale = scale
         self.sensitivity = sensitivity
         self.overflow = overflow
+        self.mode = mode
+        self.focusX = focusX
+        self.focusY = focusY
     }
 }
 

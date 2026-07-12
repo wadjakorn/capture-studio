@@ -252,4 +252,80 @@ import CoreGraphics
         #expect(f.x <= 1000)
         #expect(f.x >= 0)
     }
+
+    // MARK: - Manual mode (ignores the cursor, holds a fixed target)
+
+    @Test func manualBlockHoldsFixedTargetIgnoringCursor() {
+        // Manual target at (0.7, 0.3) of source; cursor sweeps elsewhere. The focus
+        // must sit on the target and never follow the cursor.
+        let block = ZoomBlock(begin: 0, end: 4, scale: 2, mode: .manual,
+                              focusX: 0.7, focusY: 0.3)
+        let track = AutoZoomTrack.build(blocks: [block], cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        let f = AutoZoomTrack.sample(at: 2.0, track: track).focus
+        #expect(abs(f.x - 700) < 1)
+        #expect(abs(f.y - 300) < 1)
+        // Still fixed later, even as the cursor has moved to x=800.
+        let f2 = AutoZoomTrack.sample(at: 3.5, track: track).focus
+        #expect(abs(f2.x - 700) < 1)
+        #expect(abs(f2.y - 300) < 1)
+    }
+
+    // MARK: - Run continuity (touching blocks hold the zoom; gaps re-zoom)
+
+    @Test func touchingBlocksHoldZoomAcrossBoundary() {
+        // Follow then manual, touching at t=2. The zoom must stay held at the seam —
+        // no dip toward 1x — because the blocks form one continuous run.
+        let blocks = [ZoomBlock(begin: 0, end: 2, scale: 2),
+                      ZoomBlock(begin: 2, end: 4, scale: 2, mode: .manual,
+                                focusX: 0.5, focusY: 0.5)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        #expect(sampleScale(track, at: 1.9) > 1.9)
+        #expect(sampleScale(track, at: 2.0) > 1.9)   // the seam
+        #expect(sampleScale(track, at: 2.1) > 1.9)
+    }
+
+    @Test func gapBetweenBlocksReturnsToOne() {
+        // A real gap (block1 ends at 2, block2 starts at 3) is an intentional
+        // re-zoom: mid-gap the scale returns to 1x.
+        let blocks = [ZoomBlock(begin: 0, end: 2, scale: 2),
+                      ZoomBlock(begin: 3, end: 5, scale: 2)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        #expect(abs(sampleScale(track, at: 2.5) - 1) < 0.02)
+    }
+
+    @Test func touchingBlocksBlendDifferentScalesWithoutDip() {
+        // Touching blocks with different targets (2× then 3×) interpolate across the
+        // seam and never dip toward 1x.
+        let blocks = [ZoomBlock(begin: 0, end: 2, scale: 2),
+                      ZoomBlock(begin: 2, end: 4, scale: 3)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: movingCursor(),
+                                        sourceSize: source)
+        #expect(abs(sampleScale(track, at: 1.0) - 2) < 0.1)   // held near first target
+        #expect(abs(sampleScale(track, at: 3.2) - 3) < 0.1)   // held near second target
+        let seam = sampleScale(track, at: 2.0)
+        #expect(seam > 1.9)                                   // never dips to 1
+        #expect(seam > 2.0 && seam < 3.0)                     // blended between targets
+    }
+
+    @Test func followToManualFocusIsContinuousAcrossBoundary() {
+        // Follow settles on a resting cursor (x=200); the next manual block targets a
+        // far point (x=900). At the seam the focus must not teleport — it eases from
+        // where follow left it and reaches the manual target later in the block.
+        let cur = (0...300).map {
+            CursorSample(t: Double($0) / 60, p: CGPoint(x: 200, y: 500), cursor: "arrow")
+        }
+        let blocks = [ZoomBlock(begin: 0, end: 2, scale: 2, sensitivity: 1),
+                      ZoomBlock(begin: 2, end: 5, scale: 2, mode: .manual,
+                                focusX: 0.9, focusY: 0.5)]
+        let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: cur,
+                                        sourceSize: source)
+        let before = AutoZoomTrack.sample(at: 1.98, track: track).focus.x
+        let after = AutoZoomTrack.sample(at: 2.05, track: track).focus.x
+        #expect(before < 300)               // was following the cursor near x=200
+        #expect(abs(after - before) < 60)   // continuous across the seam, no teleport
+        #expect(AutoZoomTrack.sample(at: 4.5, track: track).focus.x > 700)  // reaches target
+    }
 }

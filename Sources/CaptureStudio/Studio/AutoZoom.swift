@@ -52,76 +52,176 @@ enum AutoZoomTrack {
                       config: AutoZoomConfig = AutoZoomConfig()) -> [ZoomKeyframe] {
         guard !blocks.isEmpty else { return [] }
         let center = CGPoint(x: sourceSize.width / 2, y: sourceSize.height / 2)
-        var out: [ZoomKeyframe] = []
+        let sorted = blocks.filter { $0.end - $0.begin > 0 }
+            .sorted { $0.begin < $1.begin }
+        guard !sorted.isEmpty else { return [] }
 
-        for block in blocks.sorted(by: { $0.begin < $1.begin }) {
-            let span = block.end - block.begin
-            guard span > 0 else { continue }
-            let target = max(1, block.scale ?? config.defaultScale)
-            let sensitivity = block.sensitivity ?? config.defaultSensitivity
-            // Per-block sensitivity drives BOTH the zoom-in/out ramp (how fast the
-            // block eases into and out of the zoom, with the recenter pan riding
-            // that ramp) and the cursor-follow ease speed. Low = slow & gentle,
-            // high = snappy. Ramp is capped at half the span so it always
-            // completes.
-            let ramp = min(rampFor(sensitivity), span / 2)
-            // Per-block sensitivity → settle delay + ignore-zone + ease speed.
-            let (deadzoneFrac, dwell, smoothTime) = tuning(sensitivity)
+        // Group touching blocks (prev.end == next.begin) into continuous "runs".
+        // The zoom ramps in only at a run's start and out only at its end; inside a
+        // run the scale is held (never returns to 1×) and the smoothed focus is
+        // carried across block boundaries — so switching follow↔manual mid-run is
+        // seamless. A gap between blocks starts a new run and re-zooms from 1×.
+        var runs: [[ZoomBlock]] = []
+        for b in sorted {
+            if let prev = runs.last?.last, abs(b.begin - prev.end) < 1e-6 {
+                runs[runs.count - 1].append(b)
+            } else {
+                runs.append([b])
+            }
+        }
+
+        var out: [ZoomKeyframe] = []
+        for run in runs {
+            appendRun(run, into: &out, cursorSamples: cursorSamples,
+                      sourceSize: sourceSize, center: center, config: config)
+        }
+        return out
+    }
+
+    /// Emit keyframes for one run of touching blocks. Scale follows a run-wide
+    /// envelope (ramp in at the run start, hold, ramp out at the run end) times a
+    /// per-instant target blended across internal boundaries; the focus state
+    /// (position, velocity, settle timer) is carried across every block boundary so
+    /// there is no jump when the mode changes mid-run.
+    private static func appendRun(_ run: [ZoomBlock], into out: inout [ZoomKeyframe],
+                                  cursorSamples: [CursorSample], sourceSize: CGSize,
+                                  center: CGPoint, config: AutoZoomConfig) {
+        guard let first = run.first, let last = run.last else { return }
+        let runStart = first.begin, runEnd = last.end
+        let runSpan = runEnd - runStart
+        guard runSpan > 0 else { return }
+
+        // Run-edge ramps: in from the first block's sensitivity, out from the last's.
+        // Scale both down together if they'd overlap so each still completes.
+        var rIn = rampFor(first.sensitivity ?? config.defaultSensitivity)
+        var rOut = rampFor(last.sensitivity ?? config.defaultSensitivity)
+        if rIn + rOut > runSpan {
+            let k = runSpan / (rIn + rOut)
+            rIn *= k; rOut *= k
+        }
+
+        let restRadius = config.restRadiusFrac * sourceSize.width
+        // Seed the smoothed focus: on the manual target if the run opens manual,
+        // else on the cursor at the run start.
+        var focus = aimAtStart(of: first, cursorSamples: cursorSamples,
+                               sourceSize: sourceSize, center: center)
+        var restPos = focus
+        var restElapsed = 0.0
+        var velX = 0.0, velY = 0.0
+
+        var t = runStart, bi = 0
+        while t < runEnd - 1e-9 {
+            while bi < run.count - 1 && t >= run[bi].end - 1e-9 { bi += 1 }
+            let block = run[bi]
+            let mode = block.mode ?? .follow
+            let (deadzoneFrac, dwell, smoothTime) = tuning(block.sensitivity ?? config.defaultSensitivity)
             let deadzonePx = deadzoneFrac * sourceSize.width
-            let restRadius = config.restRadiusFrac * sourceSize.width
             let overflow = block.overflow ?? false
 
-            // Seed the smoothed focus on the cursor at the block start.
-            var focus = cursorPoint(at: block.begin, in: cursorSamples) ?? center
-            var restPos = focus
-            var restElapsed = 0.0
-            // Pan velocity (px/s) carried by the critically-damped easing, so the
-            // pan accelerates and decelerates smoothly instead of starting at full
-            // speed. Resets per block (each block starts at rest).
-            var velX = 0.0, velY = 0.0
+            // Scale = run envelope × blended target. weight (recenter blend) tracks
+            // the envelope: full inside the run, easing to 0 only at the run edges.
+            let env = envelope(t, runStart: runStart, runEnd: runEnd, rIn: rIn, rOut: rOut)
+            let target = blendedTarget(t, run: run, config: config)
+            let scale = 1 + (target - 1) * env
+            // Recenter blend tracks the zoom envelope, but stays 0 when there is no
+            // magnification (target ≤ 1) so an un-zoomed block never recenters.
+            let weight = target > 1 ? env : 0
 
-            var t = block.begin
-            while t < block.end - 1e-9 {
-                // Scale ramp (smoothstep in, hold, smoothstep out).
-                let scale = scaleAt(t, begin: block.begin, end: block.end,
-                                    ramp: ramp, target: target)
-                // Recenter blend: 0 while un-zoomed, 1 at full hold. Ties the
-                // focus→frame-centre pan to the same ramp as the scale, so the
-                // pan eases in and out together with the zoom.
-                let weight = target > 1 ? (scale - 1) / (target - 1) : 0
-                // Track how long the cursor has rested near the same spot.
+            // Aim: manual holds the fixed target (ignores the cursor); follow tracks
+            // the settled cursor spot. Either way the same critically-damped ease
+            // moves the focus, so a follow→manual seam eases with no teleport.
+            let aim: CGPoint
+            if mode == .manual {
+                aim = manualTarget(block, sourceSize: sourceSize) ?? focus
+                // Reset the settle tracker so a following block starts fresh.
+                restPos = aim; restElapsed = 0
+            } else {
                 let pos = cursorPoint(at: t, in: cursorSamples) ?? center
                 if hypot(pos.x - restPos.x, pos.y - restPos.y) <= restRadius {
                     restElapsed += config.step
                 } else {
-                    restPos = pos
-                    restElapsed = 0
+                    restPos = pos; restElapsed = 0
                 }
-                // Pan toward the rest spot only once it has settled past the delay
-                // AND is beyond the ignore-zone; otherwise hold (ignore jiggle).
                 let settled = restElapsed >= dwell
                 let beyond = hypot(restPos.x - focus.x, restPos.y - focus.y) > deadzonePx
-                let aim = (settled && beyond) ? restPos : focus
-                // Critically-damped ease: smooth acceleration into the pan and
-                // smooth deceleration out of it, with no overshoot.
-                focus.x = smoothDamp(focus.x, aim.x, &velX, smoothTime: smoothTime, dt: config.step)
-                focus.y = smoothDamp(focus.y, aim.y, &velY, smoothTime: smoothTime, dt: config.step)
-                if focus.x < 0 { focus.x = 0; velX = 0 }
-                else if focus.x > sourceSize.width { focus.x = sourceSize.width; velX = 0 }
-                if focus.y < 0 { focus.y = 0; velY = 0 }
-                else if focus.y > sourceSize.height { focus.y = sourceSize.height; velY = 0 }
-
-                out.append(ZoomKeyframe(t: t, scale: scale,
-                                        focusX: focus.x, focusY: focus.y,
-                                        weight: weight, overflow: overflow))
-                t += config.step
+                aim = (settled && beyond) ? restPos : focus
             }
-            // Exact end keyframe (scale back to 1) for a clean handoff to the gap.
-            out.append(ZoomKeyframe(t: block.end, scale: 1,
-                                    focusX: focus.x, focusY: focus.y,
-                                    weight: 0, overflow: overflow))
+            focus.x = smoothDamp(focus.x, aim.x, &velX, smoothTime: smoothTime, dt: config.step)
+            focus.y = smoothDamp(focus.y, aim.y, &velY, smoothTime: smoothTime, dt: config.step)
+            if focus.x < 0 { focus.x = 0; velX = 0 }
+            else if focus.x > sourceSize.width { focus.x = sourceSize.width; velX = 0 }
+            if focus.y < 0 { focus.y = 0; velY = 0 }
+            else if focus.y > sourceSize.height { focus.y = sourceSize.height; velY = 0 }
+
+            out.append(ZoomKeyframe(t: t, scale: scale, focusX: focus.x, focusY: focus.y,
+                                    weight: weight, overflow: overflow))
+            t += config.step
         }
-        return out
+        // Exact end keyframe (scale back to 1) for a clean handoff to the gap.
+        out.append(ZoomKeyframe(t: runEnd, scale: 1, focusX: focus.x, focusY: focus.y,
+                                weight: 0, overflow: last.overflow ?? false))
+    }
+
+    /// The focus a run should seed on: the manual target if the first block opens
+    /// manual (so a standalone manual block holds a constant frame from the start),
+    /// else the cursor position at the run start.
+    private static func aimAtStart(of block: ZoomBlock, cursorSamples: [CursorSample],
+                                   sourceSize: CGSize, center: CGPoint) -> CGPoint {
+        if (block.mode ?? .follow) == .manual,
+           let target = manualTarget(block, sourceSize: sourceSize) {
+            return target
+        }
+        return cursorPoint(at: block.begin, in: cursorSamples) ?? center
+    }
+
+    /// A manual block's target focus in source pixels, or nil if it has no stored
+    /// target (falls back to holding the current focus).
+    private static func manualTarget(_ block: ZoomBlock, sourceSize: CGSize) -> CGPoint? {
+        guard let fx = block.focusX, let fy = block.focusY else { return nil }
+        return CGPoint(x: fx * sourceSize.width, y: fy * sourceSize.height)
+    }
+
+    /// Run envelope in [0, 1]: 0 at the run edges, smoothstep ramps in over `rIn`
+    /// and out over `rOut`, held at 1 in between.
+    private static func envelope(_ t: Double, runStart: Double, runEnd: Double,
+                                 rIn: Double, rOut: Double) -> Double {
+        var w = 1.0
+        if rIn > 1e-9, t < runStart + rIn { w = min(w, smoothstep((t - runStart) / rIn)) }
+        if rOut > 1e-9, t > runEnd - rOut { w = min(w, smoothstep((runEnd - t) / rOut)) }
+        return max(0, w)
+    }
+
+    /// The zoom target at `t`: the current block's target, linearly blended with a
+    /// neighbour across a short window centred on each internal boundary so blocks
+    /// with different scales interpolate rather than stepping.
+    private static func blendedTarget(_ t: Double, run: [ZoomBlock],
+                                      config: AutoZoomConfig) -> Double {
+        func tgt(_ b: ZoomBlock) -> Double { max(1, b.scale ?? config.defaultScale) }
+        func span(_ b: ZoomBlock) -> Double { b.end - b.begin }
+        var i = 0
+        while i < run.count - 1 && t >= run[i].end - 1e-9 { i += 1 }
+        let cur = tgt(run[i])
+        let curSpan = span(run[i])
+        // Blend window clamped to both adjacent spans so it never overruns a short
+        // block (the two half-windows meet at the block midpoint at most, so each
+        // boundary blends on both sides).
+        if i > 0 {
+            let blend = min(0.3, curSpan, span(run[i - 1]))
+            let bT = run[i].begin
+            if blend > 1e-9, t < bT + blend / 2 {
+                let f = min(max((t - (bT - blend / 2)) / blend, 0), 1)
+                return tgt(run[i - 1]) + (cur - tgt(run[i - 1])) * f
+            }
+        }
+        if i < run.count - 1 {
+            let blend = min(0.3, curSpan, span(run[i + 1]))
+            let bT = run[i].end
+            if blend > 1e-9, t > bT - blend / 2 {
+                let f = min(max((t - (bT - blend / 2)) / blend, 0), 1)
+                return cur + (tgt(run[i + 1]) - cur) * f
+            }
+        }
+        return cur
     }
 
     /// Interpolate the track at `t`. Outside the track (gaps / ends) → no zoom.
@@ -172,18 +272,6 @@ enum AutoZoomTrack {
     static func rampFor(_ s: Double) -> Double {
         let c = min(max(s, 0), 1)
         return 0.80 - 0.65 * c
-    }
-
-    private static func scaleAt(_ t: Double, begin: Double, end: Double,
-                                ramp: Double, target: Double) -> Double {
-        guard ramp > 1e-9 else { return target }
-        if t < begin + ramp {
-            return 1 + (target - 1) * smoothstep((t - begin) / ramp)
-        }
-        if t > end - ramp {
-            return 1 + (target - 1) * smoothstep((end - t) / ramp)
-        }
-        return target
     }
 
     private static func smoothstep(_ x: Double) -> Double {

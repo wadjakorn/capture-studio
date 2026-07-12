@@ -119,6 +119,10 @@ struct StudioView: View {
                     if model.selectedShapeBlock != nil {
                         ShapeCanvasOverlay(model: model)
                     }
+                    // Reticle to reposition a manual zoom block's held frame.
+                    if model.selectedZoomMode == .manual {
+                        ZoomCanvasOverlay(model: model)
+                    }
                     if model.subtitleSelected {
                         SubtitleCanvasOverlay(model: model)
                     }
