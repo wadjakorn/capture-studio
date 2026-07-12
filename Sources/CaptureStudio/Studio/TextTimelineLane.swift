@@ -13,6 +13,7 @@ struct TextTimelineLane: View {
     private let rowHeight: CGFloat = 22
     private let rowSpacing: CGFloat = 3
     private let handleWidth: CGFloat = 7
+    private let edgeHitWidth: CGFloat = 16
     private let maxVisibleRows = 3
     private let laneSpace = "textLane"
 
@@ -85,6 +86,7 @@ struct TextTimelineLane: View {
         let selected = model.selectedTextBlockID == block.id
         let accent = Color.accentColor
         let bodyW = max(2, x1 - x0)
+        let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
@@ -106,9 +108,17 @@ struct TextTimelineLane: View {
                 .frame(width: bodyW, height: rowHeight - 2, alignment: .leading)
                 .allowsHitTesting(false)
 
-            edgeHandle(accent).position(x: 0, y: (rowHeight - 2) / 2)
+            // Visible capsules sit on the edges; the invisible hit targets below
+            // carry the drag gestures, biased into the block interior so
+            // adjacent/short blocks stay separable (see EdgeHitRegions).
+            edgeCapsule(accent).position(x: 0, y: (rowHeight - 2) / 2)
+                .allowsHitTesting(false)
+            edgeCapsule(accent).position(x: bodyW, y: (rowHeight - 2) / 2)
+                .allowsHitTesting(false)
+
+            edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHandle(accent).position(x: bodyW, y: (rowHeight - 2) / 2)
+            edgeHitTarget(width: hits.endWidth).position(x: hits.endMidX, y: (rowHeight - 2) / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: rowHeight, alignment: .leading)
@@ -119,12 +129,16 @@ struct TextTimelineLane: View {
         block.text.isEmpty ? "Text" : block.text
     }
 
-    private func edgeHandle(_ color: Color) -> some View {
+    private func edgeCapsule(_ color: Color) -> some View {
         Capsule()
             .fill(color)
             .frame(width: handleWidth, height: rowHeight - 8)
             .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
-            .frame(width: 16, height: rowHeight)      // larger hit area
+    }
+
+    private func edgeHitTarget(width: CGFloat) -> some View {
+        Color.clear
+            .frame(width: width, height: rowHeight)
             .contentShape(Rectangle())
     }
 

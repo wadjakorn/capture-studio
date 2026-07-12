@@ -11,6 +11,7 @@ struct LayoutTimelineLane: View {
 
     private let laneHeight: CGFloat = 26
     private let handleWidth: CGFloat = 7
+    private let edgeHitWidth: CGFloat = 16
     private let laneSpace = "layoutLane"
 
     @State private var dragMoved = false
@@ -60,6 +61,7 @@ struct LayoutTimelineLane: View {
         let selected = model.selectedLayoutBlockID == block.id
         let tint = color(for: block.layout)
         let bodyW = max(x1 - x0, 2)
+        let hits = EdgeHitRegions(bodyWidth: bodyW, handleWidth: edgeHitWidth)
 
         ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 3)
@@ -80,9 +82,17 @@ struct LayoutTimelineLane: View {
                     .allowsHitTesting(false)
             }
 
-            edgeHandle(tint).position(x: 0, y: laneHeight / 2)
+            // Visible capsules sit on the edges; the invisible hit targets below
+            // carry the drag gestures, biased into the block interior so
+            // adjacent/short blocks stay separable (see EdgeHitRegions).
+            edgeCapsule(tint).position(x: 0, y: laneHeight / 2)
+                .allowsHitTesting(false)
+            edgeCapsule(tint).position(x: bodyW, y: laneHeight / 2)
+                .allowsHitTesting(false)
+
+            edgeHitTarget(width: hits.beginWidth).position(x: hits.beginMidX, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: true))
-            edgeHandle(tint).position(x: bodyW, y: laneHeight / 2)
+            edgeHitTarget(width: hits.endWidth).position(x: hits.endMidX, y: laneHeight / 2)
                 .highPriorityGesture(edgeGesture(block, width: width, isBegin: false))
         }
         .frame(width: bodyW, height: laneHeight, alignment: .leading)
@@ -99,12 +109,16 @@ struct LayoutTimelineLane: View {
         }
     }
 
-    private func edgeHandle(_ color: Color) -> some View {
+    private func edgeCapsule(_ color: Color) -> some View {
         Capsule()
             .fill(color)
             .frame(width: handleWidth, height: laneHeight - 6)
             .overlay(Capsule().stroke(Color.black.opacity(0.25), lineWidth: 0.5))
-            .frame(width: 16, height: laneHeight)      // larger hit area
+    }
+
+    private func edgeHitTarget(width: CGFloat) -> some View {
+        Color.clear
+            .frame(width: width, height: laneHeight)
             .contentShape(Rectangle())
     }
 
