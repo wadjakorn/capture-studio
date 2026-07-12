@@ -12,7 +12,7 @@ struct LayoutTimelineLane: View {
     private let laneHeight: CGFloat = 26
     private let handleWidth: CGFloat = 7
     private let edgeHitWidth: CGFloat = 16
-    private let edgeProximity: CGFloat = 14   // stagger grips within this px gap
+    private let edgeProximity: CGFloat = 30   // stagger grips within this px gap
     private let laneSpace = "layoutLane"
 
     @State private var dragMoved = false
