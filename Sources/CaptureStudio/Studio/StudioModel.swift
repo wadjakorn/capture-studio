@@ -341,6 +341,27 @@ final class StudioModel: ObservableObject {
     /// never exported); auto-on when the template aspect is selected.
     @Published var templateGuideVisible = false
 
+    /// Horizontal zoom of the editor timeline: 1 = fit the whole clip to the
+    /// timeline width (classic behavior); higher widens the content so lanes
+    /// scroll horizontally at finer resolution. Session-only (never persisted /
+    /// exported); resets to fit each launch. See `TimelineScale`.
+    @Published var timelineZoom: Double = 1
+
+    func setTimelineZoom(_ zoom: Double) {
+        timelineZoom = TimelineScale.clampZoom(zoom)
+    }
+
+    /// Multiply the current zoom (e.g. from a Ctrl+scroll step). Anchoring at the
+    /// pointer is handled in the view via `TimelineScale.scrollX`.
+    func zoomTimeline(by factor: Double) {
+        setTimelineZoom(timelineZoom * factor)
+    }
+
+    /// Reset to fit the whole clip in the window.
+    func fitTimeline() { timelineZoom = 1 }
+
+    var isTimelineZoomed: Bool { timelineZoom > 1.0001 }
+
     // Framing window: a single static rectangle (normalized 0–1 canvas coords,
     // center + size) masking the main video for the whole timeline. The video
     // pans behind it via auto zoom; texts/subtitles/camera are never clipped.
