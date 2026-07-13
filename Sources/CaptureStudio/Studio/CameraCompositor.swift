@@ -681,17 +681,24 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         // Cover constraint per axis: content.min·scale-mapped ≤ region.min and
         // content.max·scale-mapped ≥ region.max. Solving for the target gives a
         // [lower, upper] band; if the scaled content is too small to cover the
-        // region the band inverts → fall back to the region centre.
+        // region the band inverts → fall back to the band midpoint, which centres
+        // the content in the region (best coverage when it can't fully cover).
+        // Using the midpoint rather than the region centre keeps the target
+        // CONTINUOUS across the inversion boundary: as scale falls to the exact
+        // covering scale, lower→upper→midpoint == the clamped band edge, so the
+        // auto zoom-out eases smoothly instead of snapping when the scaled content
+        // shrinks below covering the region (the "weird jump", clamp/overflow-off
+        // only).
         func bound(_ t: CGFloat, _ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
-                   _ rMin: CGFloat, _ rMax: CGFloat, _ centre: CGFloat) -> CGFloat {
+                   _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
             let lower = rMax - scale * (cMax - f)
             let upper = rMin - scale * (cMin - f)
-            return lower <= upper ? min(max(t, lower), upper) : centre
+            return lower <= upper ? min(max(t, lower), upper) : (lower + upper) / 2
         }
         target.x = bound(target.x, focus.x, content.minX, content.maxX,
-                         region.minX, region.maxX, centre.x)
+                         region.minX, region.maxX)
         target.y = bound(target.y, focus.y, content.minY, content.maxY,
-                         region.minY, region.maxY, centre.y)
+                         region.minY, region.maxY)
         return target
     }
 
