@@ -38,6 +38,29 @@ final class StudioModel: ObservableObject {
     /// narrowed by `applyTrim()`. See `TrimTimeline`.
     private(set) var committedTrimStart: Double = 0
     private(set) var committedTrimEnd: Double? = nil
+    /// One-level undo snapshot of the whole edit state captured right before the
+    /// last `applyTrim()`. `resetTrim()` restores it, bringing the full (un-cut)
+    /// timeline and every block/cursor edit back. Session-only (in-memory);
+    /// cleared once consumed. `nil` when no applied trim is pending undo.
+    private var trimUndo: TrimUndoState? = nil
+    /// Everything `applyTrim()` mutates, so `resetTrim()` can put it all back.
+    /// `composition` is a `mutableCopy()` of the pre-trim composition (edit lists
+    /// only — no re-encode), so swapping it back restores the full-length video.
+    private struct TrimUndoState {
+        var composition: AVMutableComposition
+        var committedTrimStart: Double
+        var committedTrimEnd: Double?
+        var duration: Double
+        var cameraBlocks: [CameraBlock]
+        var layoutBlocks: [LayoutBlock]
+        var zoomBlocks: [ZoomBlock]
+        var textBlocks: [TextBlock]
+        var shapeBlocks: [ShapeBlock]
+        var subtitles: SubtitleTrack?
+        var cursorSamples: [CursorSample]
+        var clickSamples: [ClickSample]
+        var segments: [TimelineSegment]
+    }
     /// True once any in/out markers carve a sub-range of the current timeline —
     /// gates the "Apply Trim" affordance.
     var canApplyTrim: Bool { trimIn > 0.001 || trimOut < duration - 0.001 }
@@ -2660,9 +2683,48 @@ final class StudioModel: ObservableObject {
 
     func resetTrim() {
         guard !isExporting else { return }
+        // If a trim was applied (destructive cut), undo it: restore the full-length
+        // composition and every block/cursor edit from the pre-apply snapshot.
+        if let undo = trimUndo {
+            restoreTrimUndo(undo)
+            return
+        }
+        // Otherwise there is only a live In/Out selection — reset the markers.
         trimIn = 0
         trimOut = duration
         saveEdit()
+    }
+
+    /// Put back everything the last `applyTrim()` changed: swap the pre-trim
+    /// composition (edit lists) back in, restore committed window, blocks, cursor
+    /// / click samples, splits, and duration, then rebuild the preview so the
+    /// player shows the full-length timeline again. Consumes the snapshot.
+    private func restoreTrimUndo(_ s: TrimUndoState) {
+        composition = s.composition
+        committedTrimStart = s.committedTrimStart
+        committedTrimEnd = s.committedTrimEnd
+        cameraBlocks = s.cameraBlocks
+        layoutBlocks = s.layoutBlocks
+        zoomBlocks = s.zoomBlocks
+        textBlocks = s.textBlocks
+        shapeBlocks = s.shapeBlocks
+        subtitles = s.subtitles
+        cursorSamples = s.cursorSamples
+        clickSamples = s.clickSamples
+        segments = s.segments
+        duration = s.duration
+        // Clear the live In/Out selection: the pre-apply markers described the cut
+        // we just undid, so keeping them would leave `canApplyTrim` true and let a
+        // later export/apply re-trim the now-restored full timeline.
+        trimIn = 0
+        trimOut = duration
+        trimUndo = nil
+        // Rebuild the player item from the restored composition (re-collapses any
+        // restored cuts, rebuilds overlays + audio), then park at the start.
+        rebuildPreview()
+        seek(to: 0)
+        saveEdit()
+        Log.studio.info("resetTrim: restored pre-apply timeline, duration=\(self.duration, format: .fixed(precision: 2))s")
     }
 
     /// Commit the current in/out markers: cut the head `[0, trimIn)` and tail
@@ -2670,13 +2732,32 @@ final class StudioModel: ObservableObject {
     /// rebase every lane + cursor overlay so the clip starts at the in-point.
     /// Destructive — blocks outside the window are dropped, straddlers clamped.
     /// The masters are untouched; the committed window is persisted so the cut
-    /// survives reload. Reversible only before commit (Reset restores markers).
+    /// survives reload. Reversible in-session: `resetTrim()` restores the
+    /// pre-apply snapshot captured below (full length + every block/cursor edit).
     func applyTrim() {
         guard let composition, duration > 0, canApplyTrim else { return }
         let inP = min(max(0, trimIn), duration)
         let outP = min(max(inP + 0.1, trimOut), duration)
         let oldDuration = duration
         let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
+
+        // Snapshot the full pre-trim state (composition edit lists + all edits) so
+        // Reset can undo this destructive cut. `mutableCopy()` is cheap — it copies
+        // edit lists only, no media. Capture BEFORE the removeTimeRange calls below.
+        let undo = TrimUndoState(
+            composition: composition.mutableCopy() as! AVMutableComposition,
+            committedTrimStart: committedTrimStart,
+            committedTrimEnd: committedTrimEnd,
+            duration: duration,
+            cameraBlocks: cameraBlocks,
+            layoutBlocks: layoutBlocks,
+            zoomBlocks: zoomBlocks,
+            textBlocks: textBlocks,
+            shapeBlocks: shapeBlocks,
+            subtitles: subtitles,
+            cursorSamples: cursorSamples,
+            clickSamples: clickSamples,
+            segments: segments)
 
         // Cut the composition (tail first so the head cut's coordinates hold).
         if outP < oldDuration - 0.001 {
@@ -2728,6 +2809,7 @@ final class StudioModel: ObservableObject {
         // resets `previewCuts`), then park at the new start.
         rebuildPreview()
         seek(to: 0)
+        trimUndo = undo
         saveEdit()
         Log.studio.info("applyTrim: window [\(self.committedTrimStart, format: .fixed(precision: 2)), \(self.committedTrimEnd ?? -1, format: .fixed(precision: 2))] newDuration=\(newDuration, format: .fixed(precision: 2))s")
     }
