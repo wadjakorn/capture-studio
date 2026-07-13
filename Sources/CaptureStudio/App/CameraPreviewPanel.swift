@@ -13,11 +13,14 @@ import AVFoundation
 final class CameraPreviewPanel: NSObject {
     private static let mirrorDefaultsKey = "previewMirrored"
 
-    private let panel: NSPanel
+    private let panel: CameraPanel
     private let previewLayer: AVCaptureVideoPreviewLayer
     private var mirrored: Bool
 
-    init(session: AVCaptureSession, onDisplay displayID: CGDirectDisplayID?) {
+    /// `onCancel` fires on ESC while the preview is the key window, so cancelling
+    /// works even when the user last clicked (focused) the camera preview.
+    init(session: AVCaptureSession, onDisplay displayID: CGDirectDisplayID?,
+         onCancel: @escaping () -> Void = {}) {
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
                 .uint32Value == displayID
@@ -29,11 +32,12 @@ final class CameraPreviewPanel: NSObject {
             x: screen.frame.maxX - size.width - margin,
             y: screen.frame.minY + margin
         )
-        panel = NSPanel(
+        panel = CameraPanel(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.titled, .resizable, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered, defer: false
         )
+        panel.onCancel = onCancel
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspect
         mirrored = UserDefaults.standard.bool(forKey: Self.mirrorDefaultsKey)
@@ -100,6 +104,16 @@ final class CameraPreviewPanel: NSObject {
                 accessibilityDescription: "Mirror")
             ?? NSImage(systemSymbolName: "arrow.left.arrow.right", accessibilityDescription: "Mirror")
             ?? NSImage()
+    }
+}
+
+/// Non-activating preview panel that routes ESC to a cancel callback, so the
+/// preview can be dismissed while it (rather than the tray popover) is focused.
+private final class CameraPanel: NSPanel {
+    var onCancel: () -> Void = {}
+    override func cancelOperation(_ sender: Any?) { onCancel() }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { onCancel() } else { super.keyDown(with: event) }
     }
 }
 

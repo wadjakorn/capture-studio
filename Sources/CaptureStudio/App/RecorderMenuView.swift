@@ -192,6 +192,9 @@ struct RecorderMenuView: View {
     /// Armed-view header: interactive area nudges the user to adjust the box.
     private var armedHeader: String {
         if session.counting { return "Starting…" }
+        // Area mode with nothing selected yet: Record is disabled until the user
+        // picks an area (via the on-screen Select Area toggle).
+        if captureAreaEnabled && !session.canBeginArmed { return "Select an area to record" }
         return captureAreaEnabled ? "Adjust area, then record" : "Sources ready"
     }
 
@@ -271,13 +274,22 @@ struct RecorderMenuView: View {
 
             Button {
                 elapsed = 0
+                // Read the persisted area FRESH from AppSettings — the session
+                // writes it there directly after a drag, so the view's @State
+                // copies can be stale within the same MenuBarExtra lifecycle.
+                let savedRegion = AppSettings.captureRegion
+                let savedDisplay = AppSettings.captureRegionDisplayID
                 // Area mode seeds the saved region (editable live); full mode the picker's.
-                let region = captureAreaEnabled ? captureRegion : nil
+                let region = captureAreaEnabled ? savedRegion : nil
                 // Seed display from the saved region; fall back to the picker so a
                 // never-set area still has a screen to open the overlay on.
                 let useDisplay = captureAreaEnabled
-                    ? (captureRegionDisplayID ?? selectedDisplayID)
+                    ? (savedDisplay ?? selectedDisplayID)
                     : selectedDisplayID
+                // Require a selection only when Area mode has NO saved area at all
+                // (a full-display area keeps its display id, so it's recordable).
+                let requireAreaSelection = captureAreaEnabled
+                    && savedRegion == nil && savedDisplay == nil
                 Task {
                     await session.toggle(displayID: useDisplay,
                                          cameraID: selectedCameraID,
@@ -286,7 +298,7 @@ struct RecorderMenuView: View {
                                          region: region,
                                          activateForPrompts: false,
                                          previewFirst: true,
-                                         interactiveArea: captureAreaEnabled)
+                                         requireAreaSelection: requireAreaSelection)
                 }
             } label: {
                 // Area mode opens the live selection overlay; full-display just
