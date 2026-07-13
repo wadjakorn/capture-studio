@@ -66,6 +66,45 @@ import CoreGraphics
         #expect(abs(t.y - window.midY) < 0.001)   // -> 500
     }
 
+    @Test func contentSmallerThanRegionCentresContentNotSnaps() {
+        // Fitted content smaller than the region on both axes (e.g. a letterboxed
+        // source, or a framing window larger than the fit). The scaled content
+        // can't cover the region → the clamp band inverts. The fallback must place
+        // the content's CENTRE on the region centre (best coverage), not do
+        // anything discontinuous.
+        let content = CGRect(x: 250, y: 250, width: 500, height: 500)
+        let scale: CGFloat = 1
+        let t = StudioCompositor.recenterTarget(focus: rightEdge, weight: 1, scale: scale,
+                                                content: content, region: canvas, clamp: true)
+        // out(p) = target + scale·(p − focus); content centre must land on region centre.
+        let outMidX = t.x + scale * (content.midX - rightEdge.x)
+        let outMidY = t.y + scale * (content.midY - rightEdge.y)
+        #expect(abs(outMidX - canvas.midX) < 0.001)
+        #expect(abs(outMidY - canvas.midY) < 0.001)
+    }
+
+    @Test func clampedZoomOutIsContinuousAcrossCoveringBoundary() {
+        // Regression for the "weird jump": as the auto zoom-out ramp lowers the
+        // scale past the exact covering scale, the clamped target must stay
+        // CONTINUOUS (no snap to region centre). Content 500 wide, region 1000
+        // wide → covering scale is 2. Sample either side of it and require the
+        // target barely moves.
+        let content = CGRect(x: 250, y: 250, width: 500, height: 500)
+        let covering: CGFloat = canvas.width / content.width   // 2
+        let eps: CGFloat = 1e-3
+        func target(at scale: CGFloat) -> CGPoint {
+            StudioCompositor.recenterTarget(focus: rightEdge, weight: 1, scale: scale,
+                                            content: content, region: canvas, clamp: true)
+        }
+        let above = target(at: covering + eps)
+        let below = target(at: covering - eps)
+        // Continuous: the step across the boundary is on the order of the local
+        // slope × 2·eps (≈ 1px here), NOT the ~1000px snap the old region-centre
+        // fallback produced (clamped band edge ≈ 1500 vs region centre 500).
+        #expect(abs(above.x - below.x) < 5)
+        #expect(abs(above.y - below.y) < 5)
+    }
+
     @Test func zeroWeightIsAnInPlaceZoom() {
         // weight 0 (block edge / un-zoomed) → target == focus regardless of mode.
         let free = StudioCompositor.recenterTarget(focus: rightEdge, weight: 0, scale: 2,
