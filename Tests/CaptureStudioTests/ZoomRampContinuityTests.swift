@@ -50,8 +50,8 @@ import CoreGraphics
         // in fine steps that straddle the magnify cut-off, and require the composed
         // centre never to jump — in particular no snap as the zoom ends.
         var prev: CGPoint?
-        var maxJump = 0.0, atScale = 0.0
-        var s = 1.30
+        var maxJump: CGFloat = 0, atScale: CGFloat = 0
+        var s: CGFloat = 1.30
         while s >= 0.9999 {
             let o = outputCentre(scale: s, weight: max(0, s - 1))
             if let p = prev {
@@ -107,7 +107,7 @@ import CoreGraphics
     @Test func recenterErasesClampOffsetAsWeightFalls() {
         // The clamp offset (target − focus) must scale down with weight so it fades
         // out with the zoom — monotonically, reaching ≈0 at weight 0.
-        var prevOffset = Double.infinity
+        var prevOffset: CGFloat = .infinity
         for i in stride(from: 100, through: 0, by: -1) {
             let w = CGFloat(i) / 100
             let t = StudioCompositor.recenterTarget(focus: focus, weight: w, scale: 1 + w,
