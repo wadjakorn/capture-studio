@@ -1324,8 +1324,7 @@ final class StudioModel: ObservableObject {
     /// During playback, hop over a hidden range the moment the playhead enters it,
     /// so cut sections are skipped seamlessly in the preview (export removal is
     /// separate). Seeks `toleranceBefore: .zero` so it can never land back inside
-    /// the cut, with a small `toleranceAfter` so the seek is fast enough to keep
-    /// playing; playback is explicitly resumed if the seek drops it out of playing.
+    /// the cut, then force-resumes with `playImmediately`.
     private func skipHiddenDuringPlayback() {
         guard isPlaying, !isSkippingCut, !segments.isEmpty,
               let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments)
@@ -1337,7 +1336,7 @@ final class StudioModel: ObservableObject {
         currentTime = target
         player?.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                      toleranceBefore: .zero,
-                     toleranceAfter: CMTime(seconds: 0.05, preferredTimescale: 600)
+                     toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: 600)
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -1345,9 +1344,12 @@ final class StudioModel: ObservableObject {
                 // Only resume if this skip is still current — a pause (or a newer
                 // skip) during the async seek bumps `skipGeneration` and cancels it.
                 guard gen == self.skipGeneration else { return }
-                // A seek issued mid-playback can leave the player paused; resume so
-                // the cut is skipped without interrupting playback.
-                if self.player?.rate == 0 { self.player?.play() }
+                // An abrupt mid-playback seek can leave the player STALLED in
+                // `.waitingToPlayAtSpecifiedRate` (rate stays 1 but it never
+                // advances) — a plain `play()` won't clear it. `playImmediately`
+                // forces it to resume as soon as it's buffered, so the cut is
+                // skipped without the player getting stuck at the next segment.
+                self.player?.playImmediately(atRate: 1.0)
             }
         }
     }
