@@ -602,6 +602,9 @@ final class StudioModel: ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     self.currentTime = time.seconds
+                    if !self.segments.isEmpty, let p = self.player {
+                        Log.studio.info("SKIPDBG tick t=\(time.seconds, format: .fixed(precision: 3)) status=\(self.statusString(p)) rate=\(p.rate, format: .fixed(precision: 2)) skipping=\(self.isSkippingCut)")
+                    }
                     self.skipHiddenDuringPlayback()
                 }
             }
@@ -1323,34 +1326,44 @@ final class StudioModel: ObservableObject {
 
     /// During playback, hop over a hidden range the moment the playhead enters it,
     /// so cut sections are skipped seamlessly in the preview (export removal is
-    /// separate). Seeks `toleranceBefore: .zero` so it can never land back inside
-    /// the cut, then force-resumes with `playImmediately`.
+    /// separate). Pauses before seeking (seeking a *playing* player mid-frame left
+    /// it wedged reporting `.playing` but not advancing), lands past the cut, then
+    /// force-resumes with `playImmediately`.
     private func skipHiddenDuringPlayback() {
         guard isPlaying, !isSkippingCut, !segments.isEmpty,
               let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments)
         else { return }
+        guard let player else { return }
         isSkippingCut = true
         skipGeneration += 1
         let gen = skipGeneration
         let target = min(max(0, r.upperBound), duration)
+        Log.studio.info("SKIPDBG fire t=\(self.currentTime, format: .fixed(precision: 3)) -> target=\(target, format: .fixed(precision: 3)) range=[\(r.lowerBound, format: .fixed(precision: 3)),\(r.upperBound, format: .fixed(precision: 3))) dur=\(self.duration, format: .fixed(precision: 3))")
         currentTime = target
-        player?.seek(to: CMTime(seconds: target, preferredTimescale: 600),
-                     toleranceBefore: .zero,
-                     toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: 600)
-        ) { [weak self] _ in
+        player.pause()
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero,
+                    toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: 600)
+        ) { [weak self] finished in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let player = self.player else { return }
                 self.isSkippingCut = false
+                Log.studio.info("SKIPDBG seeked finished=\(finished) at=\(player.currentTime().seconds, format: .fixed(precision: 3)) gen=\(gen)/\(self.skipGeneration)")
                 // Only resume if this skip is still current — a pause (or a newer
                 // skip) during the async seek bumps `skipGeneration` and cancels it.
                 guard gen == self.skipGeneration else { return }
-                // An abrupt mid-playback seek can leave the player STALLED in
-                // `.waitingToPlayAtSpecifiedRate` (rate stays 1 but it never
-                // advances) — a plain `play()` won't clear it. `playImmediately`
-                // forces it to resume as soon as it's buffered, so the cut is
-                // skipped without the player getting stuck at the next segment.
-                self.player?.playImmediately(atRate: 1.0)
+                player.playImmediately(atRate: 1.0)
             }
+        }
+    }
+
+    /// Maps `timeControlStatus` to a short string for diagnostics.
+    private func statusString(_ p: AVPlayer) -> String {
+        switch p.timeControlStatus {
+        case .paused: return "paused"
+        case .waitingToPlayAtSpecifiedRate: return "waiting(\(p.reasonForWaitingToPlay?.rawValue ?? "?"))"
+        case .playing: return "playing"
+        @unknown default: return "?"
         }
     }
 
