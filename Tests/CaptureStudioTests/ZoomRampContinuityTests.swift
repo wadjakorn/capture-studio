@@ -64,6 +64,24 @@ import CoreGraphics
         #expect(maxJump < 2, "composed centre jumped \(maxJump)px near scale=\(atScale)")
     }
 
+    @Test func validCoverBandStaysClampedMidRamp() {
+        // When the scaled content CAN cover the region, contained mode must keep the
+        // full cover clamp even mid-ramp (weight 0.5) — easing must not pull the
+        // target off a valid band and reveal background. Content 250…750 in region
+        // 0…1000 at 2× exactly covers; focus at the content edge → target pinned to
+        // keep the region covered, not eased inward.
+        let content2 = CGRect(x: 250, y: 0, width: 500, height: 1000)
+        let region2 = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let edge = CGPoint(x: 750, y: 500)
+        let t = StudioCompositor.recenterTarget(focus: edge, weight: 0.5, scale: 2,
+                                                content: content2, region: region2, clamp: true)
+        // Scaled content must still cover the region on x.
+        let left = t.x + 2 * (content2.minX - edge.x)
+        let right = t.x + 2 * (content2.maxX - edge.x)
+        #expect(left <= region2.minX + 0.001, "left edge \(left) uncovers region")
+        #expect(right >= region2.maxX - 0.001, "right edge \(right) uncovers region")
+    }
+
     @Test func recenterErasesClampOffsetAsWeightFalls() {
         // The clamp offset (target − focus) must scale down with weight so it fades
         // out with the zoom — monotonically, reaching ≈0 at weight 0.

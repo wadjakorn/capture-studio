@@ -675,37 +675,38 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     static func recenterTarget(focus: CGPoint, weight: CGFloat, scale: CGFloat,
                                content: CGRect, region: CGRect, clamp: Bool) -> CGPoint {
         let centre = CGPoint(x: region.midX, y: region.midY)
-        let eased = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
-                            y: focus.y + (centre.y - focus.y) * weight)
-        guard clamp else { return eased }
+        var target = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
+                             y: focus.y + (centre.y - focus.y) * weight)
+        guard clamp else { return target }
         // Cover constraint per axis: content.min·scale-mapped ≤ region.min and
         // content.max·scale-mapped ≥ region.max. Solving for the target gives a
-        // [lower, upper] band; if the scaled content is too small to cover the
-        // region the band inverts → fall back to the band midpoint, which centres
-        // the content in the region (best coverage when it can't fully cover).
-        // Using the midpoint rather than the region centre keeps the target
-        // CONTINUOUS across the inversion boundary.
+        // [lower, upper] band.
+        //  - Band VALID (content can cover the region): clamp into it — coverage is
+        //    guaranteed, and at a block edge (scale→1, weight→0) the band already
+        //    collapses onto the focus, so an in-place zoom lines up with the
+        //    un-zoomed frame and there is no snap.
+        //  - Band INVERTED (letterboxed content too small to cover, e.g. a landscape
+        //    source in a portrait canvas): coverage is impossible, so ease the
+        //    centring midpoint out with the zoom — `focus` at weight 0 (pure in-place
+        //    zoom, matching the un-zoomed placement), the midpoint at the hold. This
+        //    is what removes the "position jump in the first/last second" (#31): the
+        //    old code held the full midpoint offset even at weight 0, so `magnify`
+        //    kept translating by (target − focus) until scale crossed its 1.0001
+        //    cut-off and the frame SNAPPED. Easing only the inverted case keeps the
+        //    valid-band clamp (and its coverage) intact.
         func bound(_ t: CGFloat, _ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
                    _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
             let lower = rMax - scale * (cMax - f)
             let upper = rMin - scale * (cMin - f)
-            return lower <= upper ? min(max(t, lower), upper) : (lower + upper) / 2
+            if lower <= upper { return min(max(t, lower), upper) }
+            let mid = (lower + upper) / 2
+            return f + (mid - f) * weight
         }
-        var clamped = eased
-        clamped.x = bound(eased.x, focus.x, content.minX, content.maxX,
-                          region.minX, region.maxX)
-        clamped.y = bound(eased.y, focus.y, content.minY, content.maxY,
-                          region.minY, region.maxY)
-        // Ease the CLAMP out with the zoom: at weight 0 (a block edge) the target is
-        // a pure in-place zoom (== focus), so the magnified frame lines up with the
-        // un-zoomed natural placement and there is no snap when the zoom starts/ends;
-        // at weight 1 (full hold) it is the fully cover-clamped position. Without
-        // this blend the cover clamp (or its midpoint fallback for letterboxed
-        // content that can't cover the region) holds a large `target − focus` offset
-        // even at weight 0, which `magnify` keeps translating until scale crosses its
-        // cut-off — the reported "position jump in the first/last second" (#31).
-        return CGPoint(x: focus.x + (clamped.x - focus.x) * weight,
-                       y: focus.y + (clamped.y - focus.y) * weight)
+        target.x = bound(target.x, focus.x, content.minX, content.maxX,
+                         region.minX, region.maxX)
+        target.y = bound(target.y, focus.y, content.minY, content.maxY,
+                         region.minY, region.maxY)
+        return target
     }
 
     /// Magnify an already-placed canvas-space image by `scale`, mapping the
