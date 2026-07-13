@@ -335,6 +335,15 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             let targetCanvas = Self.recenterTarget(focus: focusCanvas, weight: zoom.weight,
                                                    scale: zoom.scale, content: content,
                                                    region: region, clamp: !zoom.overflow)
+            // TEMP DIAGNOSTIC (#31 zoom jump): log the per-frame zoom state across a
+            // block's ramp so a real recording shows where the pan actually jumps.
+            // Remove before merge. Composed centre = where the canvas centre lands.
+            if zoom.scale > 1.0001 || zoom.weight > 1e-6 {
+                let cx = layout.canvas.width / 2, cy = layout.canvas.height / 2
+                let ox = targetCanvas.x + zoom.scale * (cx - focusCanvas.x)
+                let oy = targetCanvas.y + zoom.scale * (cy - focusCanvas.y)
+                Log.studio.info("ZOOMDBG t=\(now, format: .fixed(precision: 4)) scale=\(zoom.scale, format: .fixed(precision: 4)) w=\(zoom.weight, format: .fixed(precision: 4)) ovf=\(zoom.overflow) fCanvas=(\(focusCanvas.x, format: .fixed(precision: 1)),\(focusCanvas.y, format: .fixed(precision: 1))) target=(\(targetCanvas.x, format: .fixed(precision: 1)),\(targetCanvas.y, format: .fixed(precision: 1))) outCentre=(\(ox, format: .fixed(precision: 1)),\(oy, format: .fixed(precision: 1)))")
+            }
             func zoomed(_ img: CIImage) -> CIImage {
                 Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
                              targetCanvas: targetCanvas, canvas: layout.canvas)
