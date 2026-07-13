@@ -51,8 +51,6 @@ final class StudioModel: ObservableObject {
         var committedTrimStart: Double
         var committedTrimEnd: Double?
         var duration: Double
-        var trimIn: Double
-        var trimOut: Double
         var cameraBlocks: [CameraBlock]
         var layoutBlocks: [LayoutBlock]
         var zoomBlocks: [ZoomBlock]
@@ -2715,13 +2713,16 @@ final class StudioModel: ObservableObject {
         clickSamples = s.clickSamples
         segments = s.segments
         duration = s.duration
-        trimIn = s.trimIn
-        trimOut = s.trimOut
+        // Clear the live In/Out selection: the pre-apply markers described the cut
+        // we just undid, so keeping them would leave `canApplyTrim` true and let a
+        // later export/apply re-trim the now-restored full timeline.
+        trimIn = 0
+        trimOut = duration
         trimUndo = nil
         // Rebuild the player item from the restored composition (re-collapses any
-        // restored cuts, rebuilds overlays + audio), then park at the in-point.
+        // restored cuts, rebuilds overlays + audio), then park at the start.
         rebuildPreview()
-        seek(to: min(max(0, trimIn), duration))
+        seek(to: 0)
         saveEdit()
         Log.studio.info("resetTrim: restored pre-apply timeline, duration=\(self.duration, format: .fixed(precision: 2))s")
     }
@@ -2748,8 +2749,6 @@ final class StudioModel: ObservableObject {
             committedTrimStart: committedTrimStart,
             committedTrimEnd: committedTrimEnd,
             duration: duration,
-            trimIn: trimIn,
-            trimOut: trimOut,
             cameraBlocks: cameraBlocks,
             layoutBlocks: layoutBlocks,
             zoomBlocks: zoomBlocks,
