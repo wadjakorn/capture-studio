@@ -1312,13 +1312,44 @@ final class StudioModel: ObservableObject {
         saveEdit()
     }
 
+    /// Guards `skipHiddenDuringPlayback` against re-entry: the 30 Hz time observer
+    /// keeps firing while an async seek settles, so without this a single cut would
+    /// trigger a storm of overlapping seeks that stalls the player.
+    private var isSkippingCut = false
+    /// Bumped whenever a cut-skip starts and whenever the user pauses, so a skip's
+    /// async completion only resumes playback if it wasn't superseded or cancelled
+    /// by an explicit pause in the meantime.
+    private var skipGeneration = 0
+
     /// During playback, hop over a hidden range the moment the playhead enters it,
-    /// so cut sections are skipped in the preview (export removal is separate).
+    /// so cut sections are skipped seamlessly in the preview (export removal is
+    /// separate). Seeks `toleranceBefore: .zero` so it can never land back inside
+    /// the cut, with a small `toleranceAfter` so the seek is fast enough to keep
+    /// playing; playback is explicitly resumed if the seek drops it out of playing.
     private func skipHiddenDuringPlayback() {
-        guard isPlaying, !segments.isEmpty,
+        guard isPlaying, !isSkippingCut, !segments.isEmpty,
               let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments)
         else { return }
-        seek(to: r.upperBound)
+        isSkippingCut = true
+        skipGeneration += 1
+        let gen = skipGeneration
+        let target = min(max(0, r.upperBound), duration)
+        currentTime = target
+        player?.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                     toleranceBefore: .zero,
+                     toleranceAfter: CMTime(seconds: 0.05, preferredTimescale: 600)
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isSkippingCut = false
+                // Only resume if this skip is still current — a pause (or a newer
+                // skip) during the async seek bumps `skipGeneration` and cancels it.
+                guard gen == self.skipGeneration else { return }
+                // A seek issued mid-playback can leave the player paused; resume so
+                // the cut is skipped without interrupting playback.
+                if self.player?.rate == 0 { self.player?.play() }
+            }
+        }
     }
 
     /// Set the selected manual block's target focus (normalized 0…1 of source),
@@ -2573,6 +2604,10 @@ final class StudioModel: ObservableObject {
     func togglePlay() {
         guard let player else { return }
         if player.timeControlStatus == .playing {
+            // Invalidate any in-flight cut-skip resume so an explicit pause during
+            // the async skip seek isn't undone by its completion handler.
+            skipGeneration += 1
+            isSkippingCut = false
             player.pause()
         } else {
             if currentTime >= duration - 0.05 { seek(to: trimIn) }
