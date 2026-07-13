@@ -2738,40 +2738,54 @@ final class StudioModel: ObservableObject {
     func export(preset: ExportPreset, to destination: URL) {
         guard let composition else { return }
         if case .exporting = exportState { return }
-        // Cuts are honored in the preview (playback skips hidden ranges) but not
-        // yet baked into the exported file — that lands with the export-collapse
-        // follow-up. Until then, refuse to export a state whose output wouldn't
-        // match the cuts, rather than silently shipping the cut content.
-        if hasCutSegments {
-            exportState = .failed("Export doesn’t remove cut segments yet. "
-                + "Restore the cuts or Reset the timeline before exporting.")
-            return
-        }
-        exportState = .exporting(0)
-        let range = CMTimeRange(
-            start: CMTime(seconds: trimIn, preferredTimescale: 600),
-            end: CMTime(seconds: trimOut, preferredTimescale: 600)
-        )
+
+        let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
         // Fixed-size session presets letterbox a portrait renderSize, so when
-        // reframing the output pixels come from the video composition's
-        // canvas and the session preset is quality-only.
-        let videoComposition: AVMutableVideoComposition?
-        let avPresetOverride: String?
-        if hasReframeCanvas {
-            videoComposition = buildVideoComposition(canvasOverride: exportCanvasSize(for: preset))
-            avPresetOverride = AVAssetExportPresetHighestQuality
-        } else {
+        // reframing the output pixels come from the video composition's canvas
+        // and the session preset is quality-only.
+        func buildVC() -> (AVMutableVideoComposition?, String?) {
+            if hasReframeCanvas {
+                return (buildVideoComposition(canvasOverride: exportCanvasSize(for: preset)),
+                        AVAssetExportPresetHighestQuality)
+            }
             // Camera-only (plain or styled): export at full source resolution
             // (renderSize may be capped for smooth preview), preset scales.
-            videoComposition = buildVideoComposition(canvasOverride: sourceSize)
-            avPresetOverride = nil
+            return (buildVideoComposition(canvasOverride: sourceSize), nil)
         }
+
+        // Bake any hidden ("cut") segments into the exported file: collapse a COPY
+        // of the composition (masters + live edit untouched) and render overlays
+        // rebased onto it. No cuts → export the live composition directly.
+        let cuts = TimelineSegments.cutRanges(segments)
+        let exportComposition: AVMutableComposition
+        let videoComposition: AVMutableVideoComposition?
+        let avPresetOverride: String?
+        let range: CMTimeRange
+        if cuts.isEmpty {
+            exportComposition = composition
+            (videoComposition, avPresetOverride) = buildVC()
+            range = CMTimeRange(start: ts(trimIn), end: ts(trimOut))
+        } else {
+            let origDuration = duration
+            let cutComp = cutComposition(composition, cuts: cuts)
+            (videoComposition, avPresetOverride) = withCollapsedTimeline(cuts: cuts,
+                                                                         cutComposition: cutComp) {
+                buildVC()
+            }
+            exportComposition = cutComp
+            let start = TimelineCut.map(min(max(0, trimIn), origDuration), cuts: cuts)
+            let end = TimelineCut.map(min(max(0, trimOut), origDuration), cuts: cuts)
+            range = CMTimeRange(start: ts(start), end: ts(max(start + 0.05, end)))
+        }
+
+        exportState = .exporting(0)
+        let audioMix = buildAudioMix()
         exportTask = Task {
             do {
                 let url = try await Exporter.export(
-                    composition: composition,
+                    composition: exportComposition,
                     videoComposition: videoComposition,
-                    audioMix: buildAudioMix(),
+                    audioMix: audioMix,
                     timeRange: range,
                     preset: preset,
                     avPresetOverride: avPresetOverride,
@@ -2792,6 +2806,107 @@ final class StudioModel: ObservableObject {
             }
             exportTask = nil
         }
+    }
+
+    // MARK: - Export: cut (hidden-segment) collapse
+
+    /// A COPY of `base` with each cut range physically removed (masters + the live
+    /// composition are untouched — export-only). Ranges are removed back-to-front
+    /// so the earlier ones keep their coordinates, matching `TimelineCut.map`.
+    private func cutComposition(_ base: AVMutableComposition,
+                                cuts: [Range<Double>]) -> AVMutableComposition {
+        let copy = base.mutableCopy() as! AVMutableComposition
+        let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
+        for c in cuts.sorted(by: { $0.lowerBound > $1.lowerBound }) {
+            copy.removeTimeRange(CMTimeRange(start: ts(c.lowerBound), end: ts(c.upperBound)))
+        }
+        return copy
+    }
+
+    /// Run `body` with the time-keyed timeline state temporarily collapsed onto the
+    /// cut timeline (composition, duration, every overlay lane + cursor/click
+    /// samples), then restore it. Lets the existing video-composition builder emit
+    /// overlays aligned to the cut composition without a permanent edit. Synchronous
+    /// — SwiftUI never observes the intermediate state.
+    private func withCollapsedTimeline<T>(cuts: [Range<Double>],
+                                          cutComposition: AVMutableComposition,
+                                          _ body: () -> T) -> T {
+        let snapComposition = composition
+        let snapDuration = duration
+        let snapCamera = cameraBlocks
+        let snapLayout = layoutBlocks
+        let snapText = textBlocks
+        let snapShape = shapeBlocks
+        let snapZoom = zoomBlocks
+        let snapSubtitles = subtitles
+        let snapCursor = cursorSamples
+        let snapClick = clickSamples
+        defer {
+            composition = snapComposition
+            duration = snapDuration
+            cameraBlocks = snapCamera
+            layoutBlocks = snapLayout
+            textBlocks = snapText
+            shapeBlocks = snapShape
+            zoomBlocks = snapZoom
+            subtitles = snapSubtitles
+            cursorSamples = snapCursor
+            clickSamples = snapClick
+        }
+        composition = cutComposition
+        duration = TimelineCut.remainingDuration(snapDuration, cuts: cuts)
+        cameraBlocks = snapCamera.compactMap { collapse($0, cuts: cuts) }
+        layoutBlocks = snapLayout.compactMap { collapse($0, cuts: cuts) }
+        textBlocks = snapText.compactMap { collapse($0, cuts: cuts) }
+        shapeBlocks = snapShape.compactMap { collapse($0, cuts: cuts) }
+        zoomBlocks = snapZoom.compactMap { collapse($0, cuts: cuts) }
+        subtitles = collapseSubtitles(snapSubtitles, cuts: cuts, originalDuration: snapDuration)
+        cursorSamples = snapCursor.compactMap { s in
+            TimelineCut.point(s.t, cuts: cuts).map { var c = s; c.t = $0; return c }
+        }
+        clickSamples = snapClick.compactMap { s in
+            TimelineCut.point(s.t, cuts: cuts).map { var c = s; c.t = $0; return c }
+        }
+        return body()
+    }
+
+    private func collapse(_ b: CameraBlock, cuts: [Range<Double>]) -> CameraBlock? {
+        TimelineCut.span(begin: b.begin, end: b.end, cuts: cuts)
+            .map { var n = b; n.begin = $0.begin; n.end = $0.end; return n }
+    }
+    private func collapse(_ b: LayoutBlock, cuts: [Range<Double>]) -> LayoutBlock? {
+        TimelineCut.span(begin: b.begin, end: b.end, cuts: cuts)
+            .map { var n = b; n.begin = $0.begin; n.end = $0.end; return n }
+    }
+    private func collapse(_ b: TextBlock, cuts: [Range<Double>]) -> TextBlock? {
+        TimelineCut.span(begin: b.begin, end: b.end, cuts: cuts)
+            .map { var n = b; n.begin = $0.begin; n.end = $0.end; return n }
+    }
+    private func collapse(_ b: ShapeBlock, cuts: [Range<Double>]) -> ShapeBlock? {
+        TimelineCut.span(begin: b.begin, end: b.end, cuts: cuts)
+            .map { var n = b; n.begin = $0.begin; n.end = $0.end; return n }
+    }
+    private func collapse(_ b: ZoomBlock, cuts: [Range<Double>]) -> ZoomBlock? {
+        TimelineCut.span(begin: b.begin, end: b.end, cuts: cuts)
+            .map { var n = b; n.begin = $0.begin; n.end = $0.end; return n }
+    }
+
+    /// Collapse a subtitle track: resolve the cues onto the (original) timeline
+    /// first (apply the track offset + clip), collapse each across the cuts, and
+    /// return a track carrying the collapsed cues with a zero offset. Cues wholly
+    /// inside a cut are dropped.
+    private func collapseSubtitles(_ track: SubtitleTrack?, cuts: [Range<Double>],
+                                   originalDuration: Double) -> SubtitleTrack? {
+        guard let track else { return nil }
+        let effective = SubtitleTimeline.effective(track.cues, offset: track.offset,
+                                                   duration: originalDuration)
+        let collapsed = effective.compactMap { cue -> SubtitleCue? in
+            TimelineCut.span(begin: cue.begin, end: cue.end, cuts: cuts)
+                .map { SubtitleCue(id: cue.id, begin: $0.begin, end: $0.end, text: cue.text) }
+        }
+        guard !collapsed.isEmpty else { return nil }
+        return SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
+                             cues: collapsed, offset: 0)
     }
 
     /// Stop a running export: cancels the session (Exporter removes the partial
