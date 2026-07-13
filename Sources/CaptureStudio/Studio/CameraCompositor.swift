@@ -702,9 +702,17 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         // offset, so `magnify` adds no translation and there is no snap when the zoom
         // starts/ends — the "position jump in the first/last second" (#31), which the
         // old code caused by holding the full clamp/midpoint offset even at weight 0.
-        // Continuous everywhere (magnify cut-off and the cover threshold); when the
-        // clamp doesn't bind, `hold == centre`, so this reduces to the plain
+        // When the clamp doesn't bind, `hold == centre`, so this reduces to the plain
         // weight-eased recenter — no double-weighting.
+        //
+        // Tradeoff: this is CONTINUOUS everywhere (the magnify cut-off and the cover
+        // threshold) and keeps content that covers the region covered — but for
+        // content smaller than the region at 1× that only becomes coverable partway
+        // through a high-zoom ramp, the interpolated target can sit inside the cover
+        // band edge for a few frames, briefly revealing background. Hard-clamping to
+        // restore full coverage there would reintroduce a mid-ramp position SNAP (the
+        // exact #31 symptom), so continuity is chosen deliberately — a brief edge gap
+        // in a rare letterbox-plus-high-zoom case is far less noticeable than a jump.
         return CGPoint(x: focus.x + (hold.x - focus.x) * weight,
                        y: focus.y + (hold.y - focus.y) * weight)
     }
