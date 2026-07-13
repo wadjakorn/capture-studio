@@ -106,6 +106,11 @@ final class StudioModel: ObservableObject {
     // `cameraHomeLayout`. Non-overlapping. Persisted to edit.json.
     @Published private(set) var layoutBlocks: [LayoutBlock] = []
     @Published var selectedLayoutBlockID: UUID?
+    /// Split-&-cut master-timeline segments (a partition of `[0, duration]`).
+    /// Empty = uncut (one implicit visible segment); non-empty once the user splits.
+    /// A `hidden` segment is cut from playback/export non-destructively (like the
+    /// live trim markers) and can be restored or reset. Persisted to edit.json.
+    @Published private(set) var segments: [TimelineSegment] = []
     /// Set while a text block is being dragged on the canvas, so the compositor
     /// suppresses its baked copy and the smooth SwiftUI overlay drives motion
     /// (no per-tick recomposite). Cleared on drop.
@@ -553,6 +558,10 @@ final class StudioModel: ObservableObject {
             }
             zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
             layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
+            // Empty stays empty (uncut); a stored partition is renormalized onto
+            // the current duration (which may have changed since it was saved).
+            segments = edit.segments.isEmpty ? []
+                : TimelineSegments.normalized(edit.segments, duration: duration)
             frameEnabled = edit.frameEnabled
             let frame = FrameMath.clamped(centerX: edit.frameCenterX,
                                           centerY: edit.frameCenterY,
@@ -569,7 +578,11 @@ final class StudioModel: ObservableObject {
                 forInterval: CMTime(value: 1, timescale: 30),
                 queue: .main
             ) { [weak self] time in
-                Task { @MainActor in self?.currentTime = time.seconds }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.currentTime = time.seconds
+                    self.skipHiddenDuringPlayback()
+                }
             }
             observerCleanup = { player.removeTimeObserver(token) }
             loadState = .ready
@@ -1188,6 +1201,103 @@ final class StudioModel: ObservableObject {
         let res = ZoomTimeline.split(zoomBlocks, atTime: t)
         guard let id = res.id else { return }
         setZoomBlocks(res.blocks, select: id)
+    }
+
+    // MARK: - Split & cut (master timeline; persisted to edit.json)
+
+    /// The active partition of `[0, duration]`. When `segments` is empty (uncut)
+    /// this is the single implicit visible segment, so callers never special-case
+    /// the empty state.
+    var effectiveSegments: [TimelineSegment] {
+        segments.isEmpty ? TimelineSegments.full(duration: duration) : segments
+    }
+
+    /// Any cut in effect (a hidden segment). Drives whether playback/export differ
+    /// from the raw timeline.
+    var hasCutSegments: Bool { segments.contains { $0.hidden } }
+
+    /// True once the timeline has been split (there is something to reset).
+    var canResetSegments: Bool { !segments.isEmpty }
+
+    /// Whether a split at the playhead is allowed — it must land strictly inside a
+    /// segment with at least `splitMinWidth` on each side. Drives the Split control.
+    var canSplitAtPlayhead: Bool {
+        !isExporting && TimelineSegments.canSplit(effectiveSegments, at: currentTime)
+    }
+
+    /// Split the segment under the playhead into two touching segments. The first
+    /// split materializes the implicit full segment. No-op near a boundary.
+    func splitAtPlayhead() {
+        guard !isExporting else { return }
+        let t = min(max(currentTime, 0), duration)
+        let res = TimelineSegments.split(effectiveSegments, at: t)
+        guard res.id != nil else { return }
+        setSegments(res.segments)
+    }
+
+    /// The segment currently under the playhead, if the timeline has been split.
+    var segmentAtPlayhead: TimelineSegment? {
+        guard !segments.isEmpty else { return nil }
+        return effectiveSegments.first { $0.start <= currentTime && currentTime < $0.end }
+    }
+
+    /// Whether the segment under the playhead can be cut (if visible) or restored
+    /// (if hidden). Drives the transport's cut/restore toggle.
+    var canToggleCutAtPlayhead: Bool {
+        guard !isExporting, let seg = segmentAtPlayhead else { return false }
+        return seg.hidden || TimelineSegments.visibleCount(effectiveSegments) > 1
+    }
+
+    /// Cut (hide) or restore the segment under the playhead — the inverse of its
+    /// current state. No-op away from a split, or when it would hide the last
+    /// visible segment.
+    func toggleCutAtPlayhead() {
+        guard let seg = segmentAtPlayhead else { return }
+        if seg.hidden { restoreSegment(seg.id) } else { hideSegment(seg.id) }
+    }
+
+    /// Hide (cut) a segment from playback/export — non-destructive, restorable.
+    /// Refused for the last visible segment (there must be something to play).
+    func hideSegment(_ id: UUID) {
+        guard !isExporting else { return }
+        let updated = TimelineSegments.setHidden(effectiveSegments, id: id, true)
+        guard updated != segments else { return }
+        setSegments(updated)
+        // If the playhead now sits inside the freshly-hidden range, hop past it.
+        if let r = TimelineSegments.hiddenRange(containing: currentTime, in: updated) {
+            seek(to: r.upperBound)
+        }
+    }
+
+    /// Restore a previously hidden segment.
+    func restoreSegment(_ id: UUID) {
+        guard !isExporting else { return }
+        setSegments(TimelineSegments.setHidden(effectiveSegments, id: id, false))
+    }
+
+    /// Clear all splits and cuts back to a single uncut timeline (mirrors
+    /// `resetTrim`). No-op when already uncut.
+    func resetSegments() {
+        guard !isExporting, !segments.isEmpty else { return }
+        segments = []
+        saveEdit()
+    }
+
+    /// Store a new segment partition and persist. Split & cut don't change the
+    /// composition (single time domain), so no player-item refresh is needed — the
+    /// preview honors cuts by skipping hidden ranges during playback.
+    private func setSegments(_ list: [TimelineSegment]) {
+        segments = list
+        saveEdit()
+    }
+
+    /// During playback, hop over a hidden range the moment the playhead enters it,
+    /// so cut sections are skipped in the preview (export removal is separate).
+    private func skipHiddenDuringPlayback() {
+        guard isPlaying, !segments.isEmpty,
+              let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments)
+        else { return }
+        seek(to: r.upperBound)
     }
 
     /// Set the selected manual block's target focus (normalized 0…1 of source),
@@ -2527,6 +2637,9 @@ final class StudioModel: ObservableObject {
         duration = newDuration
         trimIn = 0
         trimOut = newDuration
+        // A committed trim rewrites the timeline; the old split partition no longer
+        // maps onto it, so clear splits/cuts (mirrors resetting the markers).
+        segments = []
         // Drop selections that pointed at now-removed blocks.
         if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
         if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
@@ -2594,7 +2707,8 @@ final class StudioModel: ObservableObject {
             frameCenterX: frameCenterX,
             frameCenterY: frameCenterY,
             frameWidth: frameWidth,
-            frameHeight: frameHeight
+            frameHeight: frameHeight,
+            segments: segments
         )
     }
 
