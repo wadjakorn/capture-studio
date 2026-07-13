@@ -15,7 +15,7 @@ struct StudioTransportBar: View {
             Divider().frame(height: 16)
             splitControls
             Divider().frame(height: 16)
-            Text("1×").font(.caption.monospacedDigit()).comingSoon()
+            zoomControls
             Spacer()
             Text("\(visibleTimelineCount) timelines visible")
                 .font(.caption)
@@ -80,6 +80,29 @@ struct StudioTransportBar: View {
     /// True when the playhead sits on an already-hidden segment (so the toggle
     /// restores rather than cuts).
     private var cutIsRestore: Bool { model.segmentAtPlayhead?.hidden == true }
+
+    /// Horizontal timeline zoom: a log-scaled slider (most travel over the
+    /// common low zoom levels), a readout, and Fit-to-window.
+    @ViewBuilder private var zoomControls: some View {
+        Image(systemName: "minus.magnifyingglass")
+            .font(.caption).foregroundStyle(.secondary)
+        Slider(value: Binding(
+            get: { TimelineScale.zoomSliderPosition(model.timelineZoom) },
+            set: { model.setTimelineZoom(TimelineScale.zoomForSlider($0)) }),
+               in: 0...1)
+            .frame(width: 90)
+            .controlSize(.mini)
+            .help("Zoom the timeline")
+        Text(String(format: "%.1f×", model.timelineZoom))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .frame(width: 34, alignment: .leading)
+        Button { model.fitTimeline() } label: {
+            Image(systemName: "arrow.left.and.right.square")
+        }
+        .disabled(!model.isTimelineZoomed)
+        .help("Fit entire timeline to window")
+    }
 
     /// How many timeline lanes the bottom bar would currently show — a rough
     /// stand-in until the real timeline zone lands.

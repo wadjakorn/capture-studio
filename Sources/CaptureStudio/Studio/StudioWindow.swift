@@ -1,9 +1,12 @@
 import SwiftUI
 import AVFoundation
+import AppKit
 
 struct StudioView: View {
     @StateObject private var model: StudioModel
     @State private var activeTab: RailTab = .frame
+    @State private var timelineScroll = ScrollPosition(edge: .leading)
+    @State private var timelineScrollX: CGFloat = 0
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -175,46 +178,156 @@ struct StudioView: View {
 
     // MARK: - Timeline
 
-    /// Stacked timeline lanes: the main display scrubber plus each track lane,
-    /// gated by its own `model.shows*` condition. Lanes share a fixed leading
-    /// icon gutter so every track starts at the same x — keeping the playheads
-    /// vertically aligned.
+    private let gutterIconWidth: CGFloat = 20
+    private let gutterSpacing: CGFloat = 6
+    private let laneSpacing: CGFloat = 8
+
+    /// Stacked timeline lanes. A fixed leading icon gutter, then one shared
+    /// horizontal ScrollView holding every track framed to the same
+    /// `contentWidth` (= viewport × timelineZoom), so the lanes stay aligned and
+    /// scroll together. At zoom 1 the content is exactly the viewport (classic
+    /// fit-to-window); higher zoom widens it and it scrolls.
     @ViewBuilder private var timelineStack: some View {
-        VStack(spacing: 8) {
-            laneRow("display") { timeline }
-            if model.showsLayoutTimeline {
-                laneRow("rectangle.on.rectangle") { LayoutTimelineLane(model: model) }
-            }
-            if model.showsCameraTimeline {
-                laneRow("video.fill") { CameraTimelineLane(model: model) }
-            }
-            if !model.textBlocks.isEmpty {
-                laneRow("textformat") { TextTimelineLane(model: model) }
-            }
-            if model.showsShapeTimeline {
-                laneRow("square.on.circle") { ShapeTimelineLane(model: model) }
-            }
-            if model.showsZoomTimeline {
-                laneRow("plus.magnifyingglass") { ZoomTimelineLane(model: model) }
-            }
-            if model.showsSubtitleTimeline {
-                laneRow("captions.bubble") { SubtitleTimelineLane(model: model) }
+        GeometryReader { geo in
+            let viewport = max(0, geo.size.width - gutterIconWidth - gutterSpacing)
+            let contentWidth = TimelineScale.contentWidth(viewport: viewport, zoom: model.timelineZoom)
+            HStack(alignment: .top, spacing: gutterSpacing) {
+                gutterColumn
+                ScrollView(.horizontal, showsIndicators: true) {
+                    VStack(spacing: laneSpacing) {
+                        ForEach(visibleLanes, id: \.self) { lane in
+                            laneTrack(lane, contentWidth: contentWidth)
+                                .frame(width: contentWidth, height: laneHeight(lane), alignment: .leading)
+                        }
+                    }
+                }
+                .scrollPosition($timelineScroll)
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, x in
+                    timelineScrollX = x
+                }
+                .overlay {
+                    // Ctrl + scroll zooms at the pointer; other scrolls pass
+                    // through to the ScrollView for normal panning.
+                    ScrollWheelZoomCatcher { localX, delta in
+                        ctrlZoom(atLocalX: localX, delta: delta,
+                                 viewport: viewport, contentWidth: contentWidth)
+                    }
+                }
+                .onChange(of: model.currentTime) { _, _ in
+                    revealPlayhead(viewport: viewport, contentWidth: contentWidth)
+                }
+                .onChange(of: model.timelineZoom) { _, _ in
+                    revealPlayhead(viewport: viewport, contentWidth: contentWidth)
+                }
             }
         }
+        .frame(height: timelineTotalHeight)
         .padding(12)
         .background(.bar)
     }
 
-    /// One timeline lane: a fixed-width leading icon gutter + the track. Shared
-    /// by the main scrubber and the camera lane so their time axes line up.
-    private func laneRow<Track: View>(_ systemImage: String,
-                                      @ViewBuilder track: () -> Track) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 20)
-            track()
+    /// The fixed icon gutter, one icon per visible lane at that lane's height so
+    /// the icons line up with their tracks.
+    private var gutterColumn: some View {
+        VStack(spacing: laneSpacing) {
+            ForEach(visibleLanes, id: \.self) { lane in
+                Image(systemName: laneIcon(lane))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: gutterIconWidth, height: laneHeight(lane))
+            }
+        }
+    }
+
+    private enum Lane: Hashable { case display, layout, camera, text, shape, zoom, subtitle }
+
+    /// The lanes to show, in stacking order, gated by the same `shows*`
+    /// conditions the old per-row layout used.
+    private var visibleLanes: [Lane] {
+        var out: [Lane] = [.display]
+        if model.showsLayoutTimeline { out.append(.layout) }
+        if model.showsCameraTimeline { out.append(.camera) }
+        if !model.textBlocks.isEmpty { out.append(.text) }
+        if model.showsShapeTimeline { out.append(.shape) }
+        if model.showsZoomTimeline { out.append(.zoom) }
+        if model.showsSubtitleTimeline { out.append(.subtitle) }
+        return out
+    }
+
+    private func laneIcon(_ lane: Lane) -> String {
+        switch lane {
+        case .display: return "display"
+        case .layout: return "rectangle.on.rectangle"
+        case .camera: return "video.fill"
+        case .text: return "textformat"
+        case .shape: return "square.on.circle"
+        case .zoom: return "plus.magnifyingglass"
+        case .subtitle: return "captions.bubble"
+        }
+    }
+
+    /// Each lane's height — fixed for the scrubber/block lanes, packed-row height
+    /// for the dynamic (overlap) lanes. Shared with `gutterColumn` so icons and
+    /// tracks stay aligned (uses the same packing the lane bodies use).
+    private func laneHeight(_ lane: Lane) -> CGFloat {
+        switch lane {
+        case .display: return TimelineLaneMetrics.scrubberHeight
+        case .layout, .camera, .zoom: return TimelineLaneMetrics.blockLaneHeight
+        case .text:
+            return TimelineLaneMetrics.packedHeight(rowCount: TextTimeline.subRows(model.textBlocks).count)
+        case .shape:
+            return TimelineLaneMetrics.packedHeight(rowCount: ShapeTimeline.subRows(model.shapeBlocks).count)
+        case .subtitle:
+            return TimelineLaneMetrics.packedHeight(rowCount: SubtitleTimeline.subRows(model.effectiveSubtitleCues).count)
+        }
+    }
+
+    @ViewBuilder private func laneTrack(_ lane: Lane, contentWidth: CGFloat) -> some View {
+        switch lane {
+        case .display: timeline
+        case .layout: LayoutTimelineLane(model: model)
+        case .camera: CameraTimelineLane(model: model)
+        case .text: TextTimelineLane(model: model)
+        case .shape: ShapeTimelineLane(model: model)
+        case .zoom: ZoomTimelineLane(model: model)
+        case .subtitle: SubtitleTimelineLane(model: model)
+        }
+    }
+
+    /// Height of the stacked lanes (sum of visible lane heights + spacing). The
+    /// surrounding `.padding(12)` adds the chrome, so this must NOT include it.
+    private var timelineTotalHeight: CGFloat {
+        let lanes = visibleLanes
+        let heights = lanes.map(laneHeight).reduce(0, +)
+        let spacing = CGFloat(max(0, lanes.count - 1)) * laneSpacing
+        return heights + spacing
+    }
+
+    /// Zoom anchored at the pointer (from a Ctrl+scroll): the time under the
+    /// pointer stays put as the content grows/shrinks.
+    private func ctrlZoom(atLocalX localX: CGFloat, delta: CGFloat,
+                          viewport: CGFloat, contentWidth: CGFloat) {
+        guard model.duration > 0, viewport > 0 else { return }
+        let pps = TimelineScale.pixelsPerSecond(contentWidth: contentWidth, duration: model.duration)
+        guard pps > 0 else { return }
+        let anchorTime = Double((timelineScrollX + localX) / pps)
+        model.zoomTimeline(by: 1 + Double(delta) * 0.01)
+        let newContent = TimelineScale.contentWidth(viewport: viewport, zoom: model.timelineZoom)
+        let x = TimelineScale.scrollX(keepingTime: anchorTime, atViewportX: localX,
+                                      viewport: viewport, contentWidth: newContent,
+                                      duration: model.duration)
+        timelineScroll.scrollTo(x: x)
+    }
+
+    /// Keep the playhead on screen while zoomed (no-op at fit or when already
+    /// visible).
+    private func revealPlayhead(viewport: CGFloat, contentWidth: CGFloat) {
+        guard model.isTimelineZoomed, viewport > 0, contentWidth > viewport else { return }
+        if let x = TimelineScale.scrollToReveal(time: model.currentTime,
+                                                currentScrollX: timelineScrollX,
+                                                viewport: viewport, contentWidth: contentWidth,
+                                                duration: model.duration) {
+            timelineScroll.scrollTo(x: x)
         }
     }
 
@@ -270,5 +383,48 @@ struct StudioView: View {
     private func fraction(_ seconds: Double) -> CGFloat {
         guard model.duration > 0 else { return 0 }
         return CGFloat(min(max(0, seconds / model.duration), 1))
+    }
+}
+
+/// A transparent overlay that reports Ctrl+scroll gestures (for zoom-at-pointer)
+/// while letting every other mouse/scroll event fall through to the ScrollView
+/// underneath. `hitTest` returns nil so clicks/drags (scrub, block edits) pass
+/// through; a local scroll-wheel monitor intercepts ONLY Ctrl+scroll within the
+/// view's bounds and consumes it, leaving plain scroll/pan to the ScrollView.
+private struct ScrollWheelZoomCatcher: NSViewRepresentable {
+    /// (pointer x within the view, dominant scroll delta).
+    let onCtrlScroll: (CGFloat, CGFloat) -> Void
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView(onCtrlScroll: onCtrlScroll) }
+    func updateNSView(_ view: CatcherView, context: Context) { view.onCtrlScroll = onCtrlScroll }
+
+    final class CatcherView: NSView {
+        var onCtrlScroll: (CGFloat, CGFloat) -> Void
+        private var monitor: Any?
+
+        init(onCtrlScroll: @escaping (CGFloat, CGFloat) -> Void) {
+            self.onCtrlScroll = onCtrlScroll
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { return nil }
+
+        // Pass all pointer hits through to the ScrollView below.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard monitor == nil, window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let window = self.window, event.window === window,
+                      event.modifierFlags.contains(.control) else { return event }
+                let p = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(p) else { return event }
+                let delta = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : event.scrollingDeltaY
+                if delta != 0 { self.onCtrlScroll(p.x, delta) }
+                return nil   // consume Ctrl+scroll so the ScrollView doesn't pan
+            }
+        }
+
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
     }
 }
