@@ -206,18 +206,18 @@ struct StudioView: View {
                     timelineScrollX = x
                 }
                 .overlay {
-                    // Ctrl + scroll zooms at the pointer; other scrolls pass
-                    // through to the ScrollView for normal panning.
-                    ScrollWheelZoomCatcher { localX, delta in
-                        ctrlZoom(atLocalX: localX, delta: delta,
-                                 viewport: viewport, contentWidth: contentWidth)
+                    // Ctrl + scroll zooms; the zoom recenters on the playhead (see
+                    // the timelineZoom onChange). Other scrolls pass through to the
+                    // ScrollView for normal panning.
+                    ScrollWheelZoomCatcher { _, delta in
+                        model.zoomTimeline(by: 1 + Double(delta) * 0.01)
                     }
                 }
                 .onChange(of: model.currentTime) { _, _ in
                     revealPlayhead(viewport: viewport, contentWidth: contentWidth)
                 }
                 .onChange(of: model.timelineZoom) { _, _ in
-                    revealPlayhead(viewport: viewport, contentWidth: contentWidth)
+                    centerPlayhead(viewport: viewport)
                 }
             }
         }
@@ -303,18 +303,16 @@ struct StudioView: View {
         return heights + spacing
     }
 
-    /// Zoom anchored at the pointer (from a Ctrl+scroll): the time under the
-    /// pointer stays put as the content grows/shrinks.
-    private func ctrlZoom(atLocalX localX: CGFloat, delta: CGFloat,
-                          viewport: CGFloat, contentWidth: CGFloat) {
-        guard model.duration > 0, viewport > 0 else { return }
-        let pps = TimelineScale.pixelsPerSecond(contentWidth: contentWidth, duration: model.duration)
-        guard pps > 0 else { return }
-        let anchorTime = Double((timelineScrollX + localX) / pps)
-        model.zoomTimeline(by: 1 + Double(delta) * 0.01)
-        let newContent = TimelineScale.contentWidth(viewport: viewport, zoom: model.timelineZoom)
-        let x = TimelineScale.scrollX(keepingTime: anchorTime, atViewportX: localX,
-                                      viewport: viewport, contentWidth: newContent,
+    /// Scroll so the playhead time sits at the centre of the viewport at the current
+    /// zoom (clamped to the scrollable range). Called whenever the zoom changes —
+    /// from the slider, the Fit button, or Ctrl+scroll — so every zoom pivots around
+    /// the playhead. At fit (zoom 1) the content equals the viewport, so this
+    /// clamps to 0 and shows the whole timeline.
+    private func centerPlayhead(viewport: CGFloat) {
+        guard viewport > 0, model.duration > 0 else { return }
+        let contentWidth = TimelineScale.contentWidth(viewport: viewport, zoom: model.timelineZoom)
+        let x = TimelineScale.scrollX(keepingTime: model.currentTime, atViewportX: viewport / 2,
+                                      viewport: viewport, contentWidth: contentWidth,
                                       duration: model.duration)
         timelineScroll.scrollTo(x: x)
     }
