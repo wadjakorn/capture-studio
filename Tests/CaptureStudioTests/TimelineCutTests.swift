@@ -49,6 +49,25 @@ import Foundation
         #expect(TimelineCut.point(8, cuts: cuts) == 6)
     }
 
+    @Test func unmapInvertsMap() {
+        // Collapsed → timeline. A collapsed time on a cut resolves to the cut end.
+        #expect(TimelineCut.unmap(2, cuts: cuts) == 2)     // before the cut: unchanged
+        #expect(TimelineCut.unmap(6, cuts: cuts) == 8)     // after: shifted right by 2
+        #expect(TimelineCut.unmap(4, cuts: cuts) == 6)     // on the cut → cut end
+        // Round-trips for visible times.
+        for t in [0.0, 1.5, 4.0, 7.9, 10.0] where !TimelineCut.isCut(t, cuts: cuts) {
+            #expect(abs(TimelineCut.unmap(TimelineCut.map(t, cuts: cuts), cuts: cuts) - t) < 1e-9)
+        }
+    }
+
+    @Test func unmapWithTwoCuts() {
+        let two = [4.0 ..< 6.0, 8.0 ..< 9.0]
+        // collapsed: [0,4] visible, then [6,8] (collapsed 4..6), then [9,end] (collapsed 6..).
+        #expect(TimelineCut.unmap(3, cuts: two) == 3)
+        #expect(TimelineCut.unmap(5, cuts: two) == 7)      // in the 2nd visible run
+        #expect(TimelineCut.unmap(6, cuts: two) == 9)      // past both cuts
+    }
+
     @Test func noCutsIsIdentity() {
         #expect(TimelineCut.map(5, cuts: []) == 5)
         #expect(TimelineCut.span(begin: 2, end: 7, cuts: [])?.end == 7)
