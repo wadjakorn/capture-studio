@@ -1341,9 +1341,14 @@ final class StudioModel: ObservableObject {
         Log.studio.info("SKIPDBG fire t=\(self.currentTime, format: .fixed(precision: 3)) -> target=\(target, format: .fixed(precision: 3)) range=[\(r.lowerBound, format: .fixed(precision: 3)),\(r.upperBound, format: .fixed(precision: 3))) dur=\(self.duration, format: .fixed(precision: 3))")
         currentTime = target
         player.pause()
+        // `toleranceBefore: .zero` keeps the landing at/after the cut end (never
+        // back inside the cut); a generous `toleranceAfter` lets the seek snap to
+        // the next keyframe instead of forcing an exact-frame decode — the exact
+        // decode empties the buffer and `playImmediately` then stalls to refill,
+        // which is the post-skip stutter. Keyframe-aligned = buffer stays warm.
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero,
-                    toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: 600)
+                    toleranceAfter: CMTime(seconds: 0.25, preferredTimescale: 600)
         ) { [weak self] finished in
             Task { @MainActor in
                 guard let self, let player = self.player else { return }
