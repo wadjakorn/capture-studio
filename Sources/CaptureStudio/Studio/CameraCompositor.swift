@@ -675,31 +675,46 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     static func recenterTarget(focus: CGPoint, weight: CGFloat, scale: CGFloat,
                                content: CGRect, region: CGRect, clamp: Bool) -> CGPoint {
         let centre = CGPoint(x: region.midX, y: region.midY)
-        var target = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
-                             y: focus.y + (centre.y - focus.y) * weight)
-        guard clamp else { return target }
-        // Cover constraint per axis: content.min·scale-mapped ≤ region.min and
-        // content.max·scale-mapped ≥ region.max. Solving for the target gives a
-        // [lower, upper] band; if the scaled content is too small to cover the
-        // region the band inverts → fall back to the band midpoint, which centres
-        // the content in the region (best coverage when it can't fully cover).
-        // Using the midpoint rather than the region centre keeps the target
-        // CONTINUOUS across the inversion boundary: as scale falls to the exact
-        // covering scale, lower→upper→midpoint == the clamped band edge, so the
-        // auto zoom-out eases smoothly instead of snapping when the scaled content
-        // shrinks below covering the region (the "weird jump", clamp/overflow-off
-        // only).
-        func bound(_ t: CGFloat, _ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
+        guard clamp else {
+            // Overflow: pan freely to the region centre, eased by the zoom weight.
+            return CGPoint(x: focus.x + (centre.x - focus.x) * weight,
+                           y: focus.y + (centre.y - focus.y) * weight)
+        }
+        // The HOLD target (weight 1): the region centre, clamped so the scaled
+        // content still covers the region. Cover constraint per axis:
+        // content.min·scale-mapped ≤ region.min and content.max·scale-mapped ≥
+        // region.max → a [lower, upper] band; when the scaled content is too small
+        // to cover the region the band inverts → fall back to the band midpoint
+        // (centres the content), which stays continuous across the inversion.
+        func cover(_ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
                    _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
             let lower = rMax - scale * (cMax - f)
             let upper = rMin - scale * (cMin - f)
-            return lower <= upper ? min(max(t, lower), upper) : (lower + upper) / 2
+            let target = min(max(rMin + (rMax - rMin) / 2, lower), upper)  // clamp region centre
+            return lower <= upper ? target : (lower + upper) / 2
         }
-        target.x = bound(target.x, focus.x, content.minX, content.maxX,
-                         region.minX, region.maxX)
-        target.y = bound(target.y, focus.y, content.minY, content.maxY,
-                         region.minY, region.maxY)
-        return target
+        let hold = CGPoint(
+            x: cover(focus.x, content.minX, content.maxX, region.minX, region.maxX),
+            y: cover(focus.y, content.minY, content.maxY, region.minY, region.maxY))
+        // Ease the recenter from the focus (weight 0 = pure in-place zoom, lined up
+        // with the un-zoomed natural placement) to the cover-clamped hold (weight 1),
+        // applying the weight EXACTLY ONCE. At weight 0 there is no `target − focus`
+        // offset, so `magnify` adds no translation and there is no snap when the zoom
+        // starts/ends — the "position jump in the first/last second" (#31), which the
+        // old code caused by holding the full clamp/midpoint offset even at weight 0.
+        // When the clamp doesn't bind, `hold == centre`, so this reduces to the plain
+        // weight-eased recenter — no double-weighting.
+        //
+        // Tradeoff: this is CONTINUOUS everywhere (the magnify cut-off and the cover
+        // threshold) and keeps content that covers the region covered — but for
+        // content smaller than the region at 1× that only becomes coverable partway
+        // through a high-zoom ramp, the interpolated target can sit inside the cover
+        // band edge for a few frames, briefly revealing background. Hard-clamping to
+        // restore full coverage there would reintroduce a mid-ramp position SNAP (the
+        // exact #31 symptom), so continuity is chosen deliberately — a brief edge gap
+        // in a rare letterbox-plus-high-zoom case is far less noticeable than a jump.
+        return CGPoint(x: focus.x + (hold.x - focus.x) * weight,
+                       y: focus.y + (hold.y - focus.y) * weight)
     }
 
     /// Magnify an already-placed canvas-space image by `scale`, mapping the
