@@ -22,6 +22,18 @@ enum TimelineCut {
         t - hiddenBefore(t, cuts: cuts)
     }
 
+    /// Inverse of `map`: a collapsed (player) time → the timeline time. A collapsed
+    /// time that lands exactly on a removed cut resolves to the cut's END (the next
+    /// visible instant), so as playback crosses a cut the timeline playhead hops
+    /// over it. Used to drive the timeline playhead from the collapsed player clock.
+    static func unmap(_ c: Double, cuts: [Range<Double>]) -> Double {
+        var t = c
+        for cut in cuts.sorted(by: { $0.lowerBound < $1.lowerBound }) where t >= cut.lowerBound - 1e-9 {
+            t += cut.upperBound - cut.lowerBound
+        }
+        return t
+    }
+
     /// Collapsed duration of a `duration`-long timeline with `cuts` removed.
     static func remainingDuration(_ duration: Double, cuts: [Range<Double>]) -> Double {
         map(duration, cuts: cuts)

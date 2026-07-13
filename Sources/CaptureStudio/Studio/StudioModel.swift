@@ -466,6 +466,15 @@ final class StudioModel: ObservableObject {
     private var playerItem: AVPlayerItem?
 
     private var composition: AVMutableComposition?
+    /// The composition the player item actually plays: the full `composition` when
+    /// there are no cuts, else a COLLAPSED copy with the hidden ranges removed so
+    /// playback runs continuously (no seek-to-skip). The player therefore runs on
+    /// COLLAPSED time; the model maps at the boundary (`seek` maps timeline→collapsed,
+    /// the time observer maps collapsed→timeline) so the whole UI stays in timeline
+    /// time. `previewCuts` are the cuts baked into it (to detect when a rebuild is
+    /// needed). Rebuilt on load and whenever the cut set changes.
+    private var previewComposition: AVMutableComposition?
+    private var previewCuts: [Range<Double>] = []
     /// Removes the periodic time observer; nonisolated so deinit can call it.
     nonisolated(unsafe) private var observerCleanup: (() -> Void)?
 
@@ -592,8 +601,9 @@ final class StudioModel: ObservableObject {
             frameCenterY = frame.centerY
             frameWidth = frame.width
             frameHeight = frame.height
-            applyVideoComposition()
-            applyAudioMix()
+            // Build the preview item: full composition, or a collapsed copy when the
+            // loaded edit already has cuts (applies the video composition + audio).
+            rebuildPreview()
 
             let token = player.addPeriodicTimeObserver(
                 forInterval: CMTime(value: 1, timescale: 30),
@@ -601,8 +611,10 @@ final class StudioModel: ObservableObject {
             ) { [weak self] time in
                 Task { @MainActor in
                     guard let self else { return }
-                    self.currentTime = time.seconds
-                    self.skipHiddenDuringPlayback()
+                    // The player runs on collapsed time when cuts are active; map it
+                    // back to the timeline so the playhead hops over the cut regions.
+                    self.currentTime = self.previewCuts.isEmpty ? time.seconds
+                        : TimelineCut.unmap(time.seconds, cuts: self.previewCuts)
                 }
             }
             observerCleanup = { player.removeTimeObserver(token) }
@@ -850,7 +862,59 @@ final class StudioModel: ObservableObject {
     /// Rebuilds the video composition (crop + PiP transforms) and applies it
     /// to the player item. Cheap — instructions only, no re-encode.
     func applyVideoComposition() {
-        playerItem?.videoComposition = buildVideoComposition()
+        if previewCuts.isEmpty {
+            playerItem?.videoComposition = buildVideoComposition()
+        } else if let cutComp = previewComposition {
+            // Cuts active: build the overlays against the collapsed composition
+            // (blocks / cursor rebased onto collapsed time).
+            playerItem?.videoComposition = withCollapsedTimeline(cuts: previewCuts,
+                                                                 cutComposition: cutComp) {
+                self.buildVideoComposition()
+            }
+        }
+    }
+
+    /// Rebuild the preview player item so it plays the full composition (no cuts) or
+    /// a collapsed copy with the hidden ranges removed (cuts) — the seamless,
+    /// seek-free way to skip cuts. Preserves the timeline position and play state.
+    /// Called on load and whenever the cut set changes.
+    private func rebuildPreview() {
+        guard let composition, let player else { return }
+        let cuts = TimelineSegments.cutRanges(segments)
+        let wasPlaying = isPlaying
+        let timelinePos = min(max(0, currentTime), duration)
+
+        let comp: AVMutableComposition
+        let vc: AVMutableVideoComposition?
+        if cuts.isEmpty {
+            comp = composition
+            vc = buildVideoComposition()
+        } else {
+            let cutComp = cutComposition(composition, cuts: cuts)
+            vc = withCollapsedTimeline(cuts: cuts, cutComposition: cutComp) {
+                self.buildVideoComposition()
+            }
+            comp = cutComp
+        }
+        previewComposition = comp
+        previewCuts = cuts
+
+        let item = AVPlayerItem(asset: comp)
+        item.videoComposition = vc
+        playerItem = item
+        player.replaceCurrentItem(with: item)
+        applyAudioMix()
+        // Restore the position in the player's (collapsed) time.
+        let playerTime = cuts.isEmpty ? timelinePos : TimelineCut.map(timelinePos, cuts: cuts)
+        player.seek(to: CMTime(seconds: playerTime, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+        if wasPlaying { player.play() }
+    }
+
+    /// Rebuild the preview only when the active cut set actually changed (splitting a
+    /// visible segment, for instance, doesn't change the cuts).
+    private func syncPreviewToCuts() {
+        if TimelineSegments.cutRanges(segments) != previewCuts { rebuildPreview() }
     }
 
     /// Persist camera PiP settings; call at gesture end, not per drag tick.
@@ -1301,24 +1365,17 @@ final class StudioModel: ObservableObject {
     func resetSegments() {
         guard !isExporting, !segments.isEmpty else { return }
         segments = []
+        syncPreviewToCuts()
         saveEdit()
     }
 
-    /// Store a new segment partition and persist. Split & cut don't change the
-    /// composition (single time domain), so no player-item refresh is needed — the
-    /// preview honors cuts by skipping hidden ranges during playback.
+    /// Store a new segment partition and persist. Rebuilds the preview only when the
+    /// cut set changed (a plain split doesn't cut anything), so playback plays the
+    /// collapsed composition — the cuts are skipped seamlessly with no seek.
     private func setSegments(_ list: [TimelineSegment]) {
         segments = list
+        syncPreviewToCuts()
         saveEdit()
-    }
-
-    /// During playback, hop over a hidden range the moment the playhead enters it,
-    /// so cut sections are skipped in the preview (export removal is separate).
-    private func skipHiddenDuringPlayback() {
-        guard isPlaying, !segments.isEmpty,
-              let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments)
-        else { return }
-        seek(to: r.upperBound)
     }
 
     /// Set the selected manual block's target focus (normalized 0…1 of source),
@@ -2286,15 +2343,9 @@ final class StudioModel: ObservableObject {
     /// composition alone keeps the old letterbox when renderSize changes
     /// shape, so swap in a fresh player item at the same position.
     private func refreshPlayerItemForCanvasChange() {
-        guard let composition, let player else { return }
-        let wasPlaying = isPlaying
-        let position = player.currentTime()
-        let item = AVPlayerItem(asset: composition)
-        playerItem = item
-        player.replaceCurrentItem(with: item)
-        applyAudioMix()
-        player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
-        if wasPlaying { player.play() }
+        // A fresh item is needed when the compositor toggles on/off; rebuildPreview
+        // makes the right one (full or collapsed) and preserves position/play state.
+        rebuildPreview()
     }
 
     private func buildVideoComposition(canvasOverride: CGSize? = nil) -> AVMutableVideoComposition? {
@@ -2584,7 +2635,11 @@ final class StudioModel: ObservableObject {
 
     func seek(to seconds: Double) {
         let clamped = min(max(0, seconds), duration)
-        player?.seek(to: CMTime(seconds: clamped, preferredTimescale: 600),
+        // The player runs on collapsed time when cuts are active; map the timeline
+        // position into it (a time inside a cut maps to the cut's collapsed start,
+        // i.e. lands at the next visible frame).
+        let playerTime = previewCuts.isEmpty ? clamped : TimelineCut.map(clamped, cuts: previewCuts)
+        player?.seek(to: CMTime(seconds: playerTime, preferredTimescale: 600),
                      toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = clamped
     }
@@ -2668,13 +2723,10 @@ final class StudioModel: ObservableObject {
         if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
         if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
 
-        // Swap in a fresh player item for the mutated composition, then rebuild
-        // overlays / audio against the new duration.
-        let newItem = AVPlayerItem(asset: composition)
-        playerItem = newItem
-        player?.replaceCurrentItem(with: newItem)
-        applyVideoComposition()
-        applyAudioMix()
+        // Swap in a fresh player item for the mutated composition (segments were
+        // cleared above, so this rebuilds the uncut preview + overlays + audio and
+        // resets `previewCuts`), then park at the new start.
+        rebuildPreview()
         seek(to: 0)
         saveEdit()
         Log.studio.info("applyTrim: window [\(self.committedTrimStart, format: .fixed(precision: 2)), \(self.committedTrimEnd ?? -1, format: .fixed(precision: 2))] newDuration=\(newDuration, format: .fixed(precision: 2))s")
