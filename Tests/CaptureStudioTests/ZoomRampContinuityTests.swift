@@ -104,6 +104,18 @@ import CoreGraphics
         #expect(maxJump < 5, "target jumped \(maxJump)px across the cover threshold")
     }
 
+    @Test func recenterAppliesWeightOnceWhenClampInactive() {
+        // When the cover clamp doesn't bind (focus near the centre), the recenter
+        // must be exactly the requested weight — not weight² — so the pan tracks the
+        // zoom envelope. Focus (520,500) in a full canvas, weight 0.5 → 50% toward
+        // the centre (510), not 25% (515).
+        let full = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let near = CGPoint(x: 520, y: 500)
+        let t = StudioCompositor.recenterTarget(focus: near, weight: 0.5, scale: 1.5,
+                                                content: full, region: full, clamp: true)
+        #expect(abs(t.x - 510) < 0.001, "expected weight-once (510), got \(t.x)")
+    }
+
     @Test func recenterErasesClampOffsetAsWeightFalls() {
         // The clamp offset (target − focus) must scale down with weight so it fades
         // out with the zoom — monotonically, reaching ≈0 at weight 0.
