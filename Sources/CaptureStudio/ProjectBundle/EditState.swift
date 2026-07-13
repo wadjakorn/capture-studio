@@ -789,6 +789,11 @@ struct EditState: Codable, Equatable {
     var frameCenterY: Double = 0.5
     var frameWidth: Double = 0.6
     var frameHeight: Double = 0.6
+    /// Split-&-cut master-timeline segments (partition of `[0, duration]`). Empty =
+    /// no splits, one implicit visible segment. A `hidden` segment is cut from the
+    /// output non-destructively (like the live trim markers): stored here, applied
+    /// at play/export, restorable. Legacy bundles decode as empty = uncut.
+    var segments: [TimelineSegment] = []
 
     init(trimIn: Double = 0, trimOut: Double? = nil,
          committedTrimStart: Double = 0, committedTrimEnd: Double? = nil,
@@ -815,7 +820,7 @@ struct EditState: Codable, Equatable {
          zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = [],
          frameEnabled: Bool = false, frameCenterX: Double = 0.5,
          frameCenterY: Double = 0.5, frameWidth: Double = 0.6,
-         frameHeight: Double = 0.6) {
+         frameHeight: Double = 0.6, segments: [TimelineSegment] = []) {
         self.trimIn = trimIn
         self.trimOut = trimOut
         self.committedTrimStart = committedTrimStart
@@ -858,6 +863,7 @@ struct EditState: Codable, Equatable {
         self.frameCenterY = frameCenterY
         self.frameWidth = frameWidth
         self.frameHeight = frameHeight
+        self.segments = segments
     }
 
     // Custom decode so edit.json files written before these fields existed
@@ -916,6 +922,7 @@ struct EditState: Codable, Equatable {
         frameCenterY = try c.decodeIfPresent(Double.self, forKey: .frameCenterY) ?? 0.5
         frameWidth = try c.decodeIfPresent(Double.self, forKey: .frameWidth) ?? 0.6
         frameHeight = try c.decodeIfPresent(Double.self, forKey: .frameHeight) ?? 0.6
+        segments = try c.decodeIfPresent([TimelineSegment].self, forKey: .segments) ?? []
     }
 }
 

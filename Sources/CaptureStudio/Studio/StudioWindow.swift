@@ -231,6 +231,22 @@ struct StudioView: View {
                         .fill(.tint)
                         .frame(width: max(0, fraction(model.trimOut - model.trimIn) * width), height: 6)
                         .offset(x: fraction(model.trimIn) * width)
+                    // Cut (hidden) segments: greyed over the kept region; split
+                    // boundaries: hairline ticks. Non-destructive — Reset restores.
+                    ForEach(model.segments) { seg in
+                        if seg.hidden {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.black.opacity(0.45))
+                                .frame(width: max(0, fraction(seg.end - seg.start) * width), height: 6)
+                                .offset(x: fraction(seg.start) * width)
+                        }
+                        if seg.start > 0.0001 {
+                            Rectangle()
+                                .fill(.secondary)
+                                .frame(width: 1, height: 10)
+                                .offset(x: fraction(seg.start) * width)
+                        }
+                    }
                     // Playhead.
                     Rectangle()
                         .fill(.primary)
