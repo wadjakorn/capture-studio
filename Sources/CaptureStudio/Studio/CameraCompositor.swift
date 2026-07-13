@@ -335,15 +335,6 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             let targetCanvas = Self.recenterTarget(focus: focusCanvas, weight: zoom.weight,
                                                    scale: zoom.scale, content: content,
                                                    region: region, clamp: !zoom.overflow)
-            // TEMP DIAGNOSTIC (#31 zoom jump): log the per-frame zoom state across a
-            // block's ramp so a real recording shows where the pan actually jumps.
-            // Remove before merge. Composed centre = where the canvas centre lands.
-            if zoom.scale > 1.0001 || zoom.weight > 1e-6 {
-                let cx = layout.canvas.width / 2, cy = layout.canvas.height / 2
-                let ox = targetCanvas.x + zoom.scale * (cx - focusCanvas.x)
-                let oy = targetCanvas.y + zoom.scale * (cy - focusCanvas.y)
-                Log.studio.info("ZOOMDBG t=\(now, format: .fixed(precision: 4)) scale=\(zoom.scale, format: .fixed(precision: 4)) w=\(zoom.weight, format: .fixed(precision: 4)) ovf=\(zoom.overflow) fCanvas=(\(focusCanvas.x, format: .fixed(precision: 1)),\(focusCanvas.y, format: .fixed(precision: 1))) target=(\(targetCanvas.x, format: .fixed(precision: 1)),\(targetCanvas.y, format: .fixed(precision: 1))) outCentre=(\(ox, format: .fixed(precision: 1)),\(oy, format: .fixed(precision: 1)))")
-            }
             func zoomed(_ img: CIImage) -> CIImage {
                 Self.magnify(img, scale: zoom.scale, focusCanvas: focusCanvas,
                              targetCanvas: targetCanvas, canvas: layout.canvas)
@@ -684,31 +675,37 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     static func recenterTarget(focus: CGPoint, weight: CGFloat, scale: CGFloat,
                                content: CGRect, region: CGRect, clamp: Bool) -> CGPoint {
         let centre = CGPoint(x: region.midX, y: region.midY)
-        var target = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
-                             y: focus.y + (centre.y - focus.y) * weight)
-        guard clamp else { return target }
+        let eased = CGPoint(x: focus.x + (centre.x - focus.x) * weight,
+                            y: focus.y + (centre.y - focus.y) * weight)
+        guard clamp else { return eased }
         // Cover constraint per axis: content.min·scale-mapped ≤ region.min and
         // content.max·scale-mapped ≥ region.max. Solving for the target gives a
         // [lower, upper] band; if the scaled content is too small to cover the
         // region the band inverts → fall back to the band midpoint, which centres
         // the content in the region (best coverage when it can't fully cover).
         // Using the midpoint rather than the region centre keeps the target
-        // CONTINUOUS across the inversion boundary: as scale falls to the exact
-        // covering scale, lower→upper→midpoint == the clamped band edge, so the
-        // auto zoom-out eases smoothly instead of snapping when the scaled content
-        // shrinks below covering the region (the "weird jump", clamp/overflow-off
-        // only).
+        // CONTINUOUS across the inversion boundary.
         func bound(_ t: CGFloat, _ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
                    _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
             let lower = rMax - scale * (cMax - f)
             let upper = rMin - scale * (cMin - f)
             return lower <= upper ? min(max(t, lower), upper) : (lower + upper) / 2
         }
-        target.x = bound(target.x, focus.x, content.minX, content.maxX,
-                         region.minX, region.maxX)
-        target.y = bound(target.y, focus.y, content.minY, content.maxY,
-                         region.minY, region.maxY)
-        return target
+        var clamped = eased
+        clamped.x = bound(eased.x, focus.x, content.minX, content.maxX,
+                          region.minX, region.maxX)
+        clamped.y = bound(eased.y, focus.y, content.minY, content.maxY,
+                          region.minY, region.maxY)
+        // Ease the CLAMP out with the zoom: at weight 0 (a block edge) the target is
+        // a pure in-place zoom (== focus), so the magnified frame lines up with the
+        // un-zoomed natural placement and there is no snap when the zoom starts/ends;
+        // at weight 1 (full hold) it is the fully cover-clamped position. Without
+        // this blend the cover clamp (or its midpoint fallback for letterboxed
+        // content that can't cover the region) holds a large `target − focus` offset
+        // even at weight 0, which `magnify` keeps translating until scale crosses its
+        // cut-off — the reported "position jump in the first/last second" (#31).
+        return CGPoint(x: focus.x + (clamped.x - focus.x) * weight,
+                       y: focus.y + (clamped.y - focus.y) * weight)
     }
 
     /// Magnify an already-placed canvas-space image by `scale`, mapping the

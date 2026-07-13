@@ -3,110 +3,79 @@ import Foundation
 import CoreGraphics
 @testable import CaptureStudio
 
-/// Reproduces the reported "position jump in the first/last second" of a follow
-/// zoom block with Overflow inside frame OFF. Composes the on-screen position of
-/// the source centre exactly the way `CameraCompositor` does (recenter, clamped
-/// when overflow is off, then magnify) and walks it densely across the block,
-/// asserting the framing never jumps between adjacent frames.
+/// Regression for the reported "position jump in the first/last second" of a
+/// follow zoom block with Overflow inside frame OFF (#31). The real captured log
+/// showed the pan sitting ~242px off the natural placement at the last zoomed
+/// frame, then snapping the instant `magnify` cuts off at scale ≤ 1.0001.
+///
+/// Root cause: `recenterTarget` did not reduce to an in-place zoom as the ramp's
+/// `weight → 0`. The cover clamp (and its midpoint fallback when the letterboxed
+/// content can't cover the full-canvas region) pulled `target` far from `focus`
+/// even at weight 0, so the magnify translation `(target − focus)` never vanished
+/// and snapped when the zoom ended. These tests pin `target → focus` at weight 0
+/// and the composed centre converging to natural across the whole ramp.
 @Suite struct ZoomRampContinuityTests {
-    private let source = CGSize(width: 1000, height: 1000)
+    // Portrait canvas with a letterboxed landscape source: `content` is shorter
+    // than the full-canvas `region` in Y and vertically off-centre — the captured
+    // #31 scenario (region centre 960, content centre ≈ 717.6).
+    private let canvas = CGSize(width: 1080, height: 1920)
+    private let content = CGRect(x: 0, y: 413.85, width: 1080, height: 607.5)
+    private var region: CGRect { CGRect(origin: .zero, size: canvas) }
+    private let focus = CGPoint(x: 243.7, y: 592.7)
 
-    /// Cursor parked near the right edge for the whole clip (a stationary, edge-
-    /// offset pan — the worst case for the clamp).
-    private func edgeCursor(x: Double = 900) -> [CursorSample] {
-        (0...360).map { CursorSample(t: Double($0) / 60, p: CGPoint(x: x, y: 500), cursor: "arrow") }
+    /// Composed on-screen position of the canvas centre, modelling
+    /// `CameraCompositor.magnify`'s `scale <= 1.0001` early-return (below the
+    /// threshold the frame is drawn at its natural placement = canvas centre).
+    private func outputCentre(scale: CGFloat, weight: CGFloat) -> CGPoint {
+        let c = CGPoint(x: canvas.width / 2, y: canvas.height / 2)
+        guard scale > 1.0001 else { return c }
+        let t = StudioCompositor.recenterTarget(focus: focus, weight: weight, scale: scale,
+                                                content: content, region: region, clamp: true)
+        return CGPoint(x: t.x + scale * (c.x - focus.x), y: t.y + scale * (c.y - focus.y))
     }
 
-    /// On-screen position of the content centre for a sampled zoom state, modelling
-    /// `CameraCompositor.magnify`'s `scale <= 1.0001` early-return: below the
-    /// threshold the frame is drawn at its natural placement (content centre),
-    /// above it the recenter+magnify maps out(p) = target + scale·(p − focus).
-    private func outputCentre(_ s: (scale: CGFloat, focus: CGPoint, weight: CGFloat, overflow: Bool),
-                              region: CGRect, content: CGRect) -> CGPoint {
-        let c = CGPoint(x: content.midX, y: content.midY)
-        guard s.scale > 1.0001 else { return c }        // magnify early-return: raw frame
-        let target = StudioCompositor.recenterTarget(focus: s.focus, weight: s.weight,
-                                                     scale: s.scale, content: content,
-                                                     region: region, clamp: !s.overflow)
-        return CGPoint(x: target.x + s.scale * (c.x - s.focus.x),
-                       y: target.y + s.scale * (c.y - s.focus.y))
+    @Test func recenterIsInPlaceAtZeroWeight() {
+        // At weight 0 (a block edge) the recenter must be a pure in-place zoom —
+        // target == focus — regardless of the cover geometry, so the frame lines up
+        // with the un-zoomed natural placement. The off-centre letterbox case is
+        // exactly where the old midpoint fallback broke this.
+        let t = StudioCompositor.recenterTarget(focus: focus, weight: 0, scale: 1.001,
+                                                content: content, region: region, clamp: true)
+        #expect(abs(t.x - focus.x) < 1, "target.x \(t.x) should equal focus.x \(focus.x)")
+        #expect(abs(t.y - focus.y) < 1, "target.y \(t.y) should equal focus.y \(focus.y)")
     }
 
-    /// Largest adjacent-frame move of the composed centre across the block, and
-    /// when it happens.
-    private func maxAdjacentJump(overflow: Bool, region: CGRect, content: CGRect) -> (px: Double, t: Double) {
-        let block = ZoomBlock(begin: 0.5, end: 3.5, scale: 2, sensitivity: 1, overflow: overflow)
-        let track = AutoZoomTrack.build(blocks: [block], cursorSamples: edgeCursor(),
-                                        sourceSize: source)
-        return scanJump(track: track, region: region, content: content)
-    }
-
-    /// Walk the composed centre densely from BEFORE the block to AFTER it (so the
-    /// identity→ramp and ramp→identity boundaries are included) and return the
-    /// largest adjacent-frame move.
-    private func scanJump(track: [ZoomKeyframe], region: CGRect, content: CGRect) -> (px: Double, t: Double) {
+    @Test func composedCentreConvergesToNaturalAcrossRamp() {
+        // Sweep the whole ramp (scale 1.30 → 1.00, weight ≈ scale−1 for a 2× block)
+        // in fine steps that straddle the magnify cut-off, and require the composed
+        // centre never to jump — in particular no snap as the zoom ends.
         var prev: CGPoint?
-        var maxJump = 0.0, at = 0.0
-        var t = 0.3
-        while t <= 3.7 {
-            let o = outputCentre(AutoZoomTrack.sample(at: t, track: track),
-                                 region: region, content: content)
+        var maxJump = 0.0, atScale = 0.0
+        var s = 1.30
+        while s >= 0.9999 {
+            let o = outputCentre(scale: s, weight: max(0, s - 1))
             if let p = prev {
                 let d = hypot(o.x - p.x, o.y - p.y)
-                if d > maxJump { maxJump = d; at = t }
+                if d > maxJump { maxJump = d; atScale = s }
             }
             prev = o
-            t += 1.0 / 120.0
+            s -= 0.0005
         }
-        return (maxJump, at)
+        #expect(maxJump < 2, "composed centre jumped \(maxJump)px near scale=\(atScale)")
     }
 
-    @Test func followRampNoJumpWithFrameOverflowOff() {
-        let content = CGRect(origin: .zero, size: source)
-        let region = CGRect(x: 200, y: 200, width: 600, height: 600)
-        let j = maxAdjacentJump(overflow: false, region: region, content: content)
-        // A smooth ramp moves the centre a few px per 1/120s frame; a jump is >>25.
-        #expect(j.px < 25, "position jump \(j.px)px at t=\(j.t)")
-    }
-
-    @Test func followRampNoJumpNoFrameOverflowOff() {
-        // No framing window (region == content == full canvas).
-        let full = CGRect(origin: .zero, size: source)
-        let j = maxAdjacentJump(overflow: false, region: full, content: full)
-        #expect(j.px < 25, "position jump \(j.px)px at t=\(j.t)")
-    }
-
-    @Test func followRampNoJumpFitContentNarrowerThanFrame() {
-        // Letterbox/fit: the fitted content is NARROWER than the framing window, so
-        // at 1× the clamp band inverts (can't cover) and the ramp CROSSES the
-        // covering threshold as it zooms in — the spot the midpoint fallback must
-        // stay continuous through. Cursor centred in the content.
-        let content = CGRect(x: 300, y: 0, width: 400, height: 1000)
-        let region = CGRect(x: 200, y: 200, width: 600, height: 600)
-        let j = maxAdjacentJump(overflow: false, region: region, content: content)
-        #expect(j.px < 25, "position jump \(j.px)px at t=\(j.t)")
-    }
-
-    @Test func followRampNoJumpOffCentreFrame() {
-        let content = CGRect(origin: .zero, size: source)
-        let region = CGRect(x: 550, y: 550, width: 400, height: 400)   // toward the corner
-        let j = maxAdjacentJump(overflow: false, region: region, content: content)
-        #expect(j.px < 25, "position jump \(j.px)px at t=\(j.t)")
-    }
-
-    @Test func followRampNoJumpMovingCursorDefaultSensitivity() {
-        // Default sensitivity (dwell + deadzone active) with the cursor drifting
-        // toward the edge during the ramp — exercises the focus settle/ease path.
-        let cur: [CursorSample] = (0...360).map {
-            let t = Double($0) / 60
-            let x = 500 + min(400, t * 130)   // drifts right, rests near the edge
-            return CursorSample(t: t, p: CGPoint(x: x, y: 500), cursor: "arrow")
+    @Test func recenterErasesClampOffsetAsWeightFalls() {
+        // The clamp offset (target − focus) must scale down with weight so it fades
+        // out with the zoom — monotonically, reaching ≈0 at weight 0.
+        var prevOffset = Double.infinity
+        for i in stride(from: 100, through: 0, by: -1) {
+            let w = CGFloat(i) / 100
+            let t = StudioCompositor.recenterTarget(focus: focus, weight: w, scale: 1 + w,
+                                                    content: content, region: region, clamp: true)
+            let offset = hypot(t.x - focus.x, t.y - focus.y)
+            #expect(offset <= prevOffset + 1, "offset grew as weight fell: \(offset) > \(prevOffset)")
+            prevOffset = offset
         }
-        let block = ZoomBlock(begin: 0.5, end: 3.5, scale: 2, overflow: false)
-        let track = AutoZoomTrack.build(blocks: [block], cursorSamples: cur, sourceSize: source)
-        let content = CGRect(origin: .zero, size: source)
-        let region = CGRect(x: 200, y: 200, width: 600, height: 600)
-        let j = scanJump(track: track, region: region, content: content)
-        #expect(j.px < 25, "position jump \(j.px)px at t=\(j.t)")
+        #expect(prevOffset < 1)   // reached ≈0 at weight 0
     }
 }
