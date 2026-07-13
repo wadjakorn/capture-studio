@@ -64,22 +64,44 @@ import CoreGraphics
         #expect(maxJump < 2, "composed centre jumped \(maxJump)px near scale=\(atScale)")
     }
 
-    @Test func validCoverBandStaysClampedMidRamp() {
-        // When the scaled content CAN cover the region, contained mode must keep the
-        // full cover clamp even mid-ramp (weight 0.5) — easing must not pull the
-        // target off a valid band and reveal background. Content 250…750 in region
-        // 0…1000 at 2× exactly covers; focus at the content edge → target pinned to
-        // keep the region covered, not eased inward.
-        let content2 = CGRect(x: 250, y: 0, width: 500, height: 1000)
-        let region2 = CGRect(x: 0, y: 0, width: 1000, height: 1000)
-        let edge = CGPoint(x: 750, y: 500)
-        let t = StudioCompositor.recenterTarget(focus: edge, weight: 0.5, scale: 2,
-                                                content: content2, region: region2, clamp: true)
-        // Scaled content must still cover the region on x.
-        let left = t.x + 2 * (content2.minX - edge.x)
-        let right = t.x + 2 * (content2.maxX - edge.x)
-        #expect(left <= region2.minX + 0.001, "left edge \(left) uncovers region")
-        #expect(right >= region2.maxX - 0.001, "right edge \(right) uncovers region")
+    @Test func coverPreservedForContentCoveringRegionMidRamp() {
+        // The common case: content covers the region (content == region == canvas).
+        // Contained mode must keep the region covered at every point of the ramp —
+        // the recenter easing must not open a background gap here. Cursor at the
+        // edge, sampled across the ramp.
+        let full = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let edge = CGPoint(x: 900, y: 500)
+        for i in 0...20 {
+            let w = CGFloat(i) / 20
+            let s = 1 + w                      // 2× block: scale = 1 + weight
+            let t = StudioCompositor.recenterTarget(focus: edge, weight: w, scale: s,
+                                                    content: full, region: full, clamp: true)
+            let left = t.x + s * (full.minX - edge.x)
+            let right = t.x + s * (full.maxX - edge.x)
+            #expect(left <= full.minX + 0.01, "left \(left) uncovers at weight \(w)")
+            #expect(right >= full.maxX - 0.01, "right \(right) uncovers at weight \(w)")
+        }
+    }
+
+    @Test func targetContinuousAcrossCoverThreshold() {
+        // Sub-region content (500 in 1000) with a 3× block: the cover band flips
+        // inverted→valid as scale crosses 2× at weight 0.5. The target must stay
+        // continuous through that flip — no snap mid-ramp (codex regression).
+        let c = CGRect(x: 250, y: 0, width: 500, height: 1000)
+        let r = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+        let f = CGPoint(x: 750, y: 500)
+        var prev: CGFloat?
+        var maxJump: CGFloat = 0
+        for i in stride(from: 0, through: 200, by: 1) {
+            let w = CGFloat(i) / 200
+            let s = 1 + 2 * w                  // 3× block: scale = 1 + 2·weight
+            let t = StudioCompositor.recenterTarget(focus: f, weight: w, scale: s,
+                                                    content: c, region: r, clamp: true)
+            if let p = prev { maxJump = max(maxJump, abs(t.x - p)) }
+            prev = t.x
+        }
+        // Adjacent step is ~1px of smooth motion; a threshold snap would be >>5.
+        #expect(maxJump < 5, "target jumped \(maxJump)px across the cover threshold")
     }
 
     @Test func recenterErasesClampOffsetAsWeightFalls() {
