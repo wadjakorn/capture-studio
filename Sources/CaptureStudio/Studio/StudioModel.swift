@@ -2717,6 +2717,15 @@ final class StudioModel: ObservableObject {
     func export(preset: ExportPreset, to destination: URL) {
         guard let composition else { return }
         if case .exporting = exportState { return }
+        // Cuts are honored in the preview (playback skips hidden ranges) but not
+        // yet baked into the exported file — that lands with the export-collapse
+        // follow-up. Until then, refuse to export a state whose output wouldn't
+        // match the cuts, rather than silently shipping the cut content.
+        if hasCutSegments {
+            exportState = .failed("Export doesn’t remove cut segments yet. "
+                + "Restore the cuts or Reset the timeline before exporting.")
+            return
+        }
         exportState = .exporting(0)
         let range = CMTimeRange(
             start: CMTime(seconds: trimIn, preferredTimescale: 600),
