@@ -3,6 +3,20 @@ import ScreenCaptureKit
 import AVFoundation
 import AppKit
 
+/// What the preview's area controls do for this recording. Full Display and Area
+/// mode both reach `arm()` with `region == nil` when no area is saved, so the mode
+/// has to be carried explicitly — inferring it from the region is what let a
+/// Full-Display preview demand an area selection.
+enum AreaSelection {
+    /// Full Display: the HUD offers no Select Area toggle, and no region is needed.
+    case unavailable
+    /// Area mode with an area already saved: Select Area is offered, Record is live.
+    case optional
+    /// Area mode with no area yet: Record stays blocked until one is chosen, so it
+    /// can never silently fall through to capturing the whole display.
+    case required
+}
+
 /// Orchestrates a recording: owns the bundle, all recorders, and the
 /// state machine. Screen track is mandatory; camera/mic/events degrade
 /// independently — a partial bundle beats a lost recording.
@@ -51,11 +65,12 @@ final class RecordingSession: ObservableObject {
     private var previewHUD: PreviewHUD?
     /// System-audio choice stashed for the deferred screen-recorder build.
     private var armedSystemAudio = false
-    /// True when armed with no area chosen yet (Area mode, first use): recording
-    /// is blocked until the user picks an area, so it can't silently fall through
-    /// to a full-display capture. A deliberately-chosen full-display area (region
-    /// clamps to nil but the display is saved) does NOT set this — it's recordable.
-    private var armedRequireAreaSelection = false
+    /// Capture mode this session armed in — drives both the HUD's Select Area
+    /// toggle and the Record gate. `.required` (Area mode, first use) blocks
+    /// recording until an area is picked. A deliberately-chosen full-display area
+    /// (region clamps to nil but the display is saved) is `.optional`, not
+    /// `.required` — it's recordable as-is.
+    private var armedAreaSelection: AreaSelection = .unavailable
     private let eventTracker = EventTracker()
     private var displayInfo: DisplayInfo?
     /// Region being recorded (display-local points), stashed at arm time so the
@@ -88,11 +103,11 @@ final class RecordingSession: ObservableObject {
              systemAudio: Bool = false,
              region: CGRect? = nil,
              previewControls: Bool = false,
-             requireAreaSelection: Bool = false) async {
+             areaSelection: AreaSelection = .unavailable) async {
         guard state == .idle || isFailed else { return }
         state = .arming
         warnings = []
-        Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio) region=\(region != nil) controls=\(previewControls) requireArea=\(requireAreaSelection)")
+        Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio) region=\(region != nil) controls=\(previewControls) area=\(String(describing: areaSelection), privacy: .public)")
 
         do {
             let (items, scDisplays) = try await DeviceDiscovery.displays()
@@ -181,19 +196,27 @@ final class RecordingSession: ObservableObject {
             self.armedRegion = region
             self.armedDisplayID = displayID
             self.armedSystemAudio = systemAudio
-            self.armedRequireAreaSelection = requireAreaSelection
+            self.armedAreaSelection = areaSelection
             // Block Record until the user picks an area (Area mode, first use).
-            self.canBeginArmed = !requireAreaSelection
+            self.refreshCanBeginArmed()
 
-            // Persistent preview HUD (passive default). Its toggle live-swaps
-            // into the modal area selector. App-owned → excluded from capture.
+            // Persistent preview HUD (passive default). Carries Record — the tray
+            // popover closes as soon as this panel takes key, so the HUD is the
+            // only way to start a recording once the preview is up. Its Select Area
+            // toggle live-swaps into the modal area selector, and only exists in
+            // Area mode. App-owned → excluded from capture.
             if previewControls {
                 let hud = PreviewHUD(
                     onDisplay: displayID,
+                    offersAreaSelection: areaSelection != .unavailable,
+                    canRecord: canBeginArmed,
                     onToggleDragMode: { [weak self] on in
                         Task { @MainActor in
                             if on { self?.enterDragMode() } else { self?.exitDragMode() }
                         }
+                    },
+                    onRecord: { [weak self] in
+                        Task { await self?.startCountdownThenBegin() }
                     },
                     onCancel: { [weak self] in
                         Task { @MainActor in await self?.cancelCountdownOrArming() }
@@ -212,6 +235,31 @@ final class RecordingSession: ObservableObject {
     }
 
     // MARK: - Live drag mode (passive preview ⇄ modal area selection)
+
+    /// Whether Record may fire. A region is only ever required in `.required` —
+    /// Full Display captures the whole screen and an already-saved area is
+    /// recordable as-is, so an empty live selection must not block either.
+    nonisolated static func canBegin(areaSelection: AreaSelection, region: CGRect?) -> Bool {
+        areaSelection != .required || region != nil
+    }
+
+    /// The display an armed session targets after a live selection change. The
+    /// overlay reports no display until a valid region exists; adopting that nil
+    /// would erase the display the session armed on, leaving
+    /// `buildDeferredScreenRecorder()` nothing to rebuild from. Only a selection
+    /// that names a display may move the target.
+    nonisolated static func adoptedDisplay(current: CGDirectDisplayID?,
+                                           reported: CGDirectDisplayID?) -> CGDirectDisplayID? {
+        reported ?? current
+    }
+
+    /// Applies `canBegin` to the live state and mirrors it onto the HUD's Record
+    /// button. Every path that changes the armed region routes through here, so the
+    /// rule has one definition and the HUD can't disagree with the tray.
+    private func refreshCanBeginArmed() {
+        canBeginArmed = Self.canBegin(areaSelection: armedAreaSelection, region: armedRegion)
+        previewHUD?.setCanRecord(canBeginArmed)
+    }
 
     /// Toggle ON: swap the passive preview for the modal `AreaSelectionOverlay`,
     /// seeded with the current region. The eager screen recorder is dropped —
@@ -233,9 +281,9 @@ final class RecordingSession: ObservableObject {
         overlay.onChange = { [weak self] region, did, valid in
             guard let self else { return }
             self.armedRegion = region
-            self.armedDisplayID = did
+            self.armedDisplayID = Self.adoptedDisplay(current: self.armedDisplayID, reported: did)
             self.armedAreaSize = valid ? region?.size : nil
-            self.canBeginArmed = valid
+            self.refreshCanBeginArmed()
         }
         // Esc / right-click in the overlay exits drag mode back to passive.
         overlay.onCancel = { [weak self] in
@@ -246,8 +294,7 @@ final class RecordingSession: ObservableObject {
         }
         areaOverlay = overlay
         armedAreaSize = nil
-        // A seeded region is immediately valid; otherwise wait for a drag.
-        canBeginArmed = armedRegion != nil
+        refreshCanBeginArmed()
         previewHUD?.setDragMode(true)
         overlay.present(initialRegion: armedRegion, initialDisplayID: armedDisplayID)
         Log.recorder.info("drag mode: on")
@@ -271,9 +318,7 @@ final class RecordingSession: ObservableObject {
             outline?.show()
             regionOutline = outline
         }
-        // If a selection was required, a chosen region satisfies it; otherwise
-        // recording was always allowed (Full-Display, or an area already existed).
-        canBeginArmed = !armedRequireAreaSelection || armedRegion != nil
+        refreshCanBeginArmed()
         Log.recorder.info("drag mode: off region=\(self.armedRegion != nil)")
     }
 
@@ -399,12 +444,15 @@ final class RecordingSession: ObservableObject {
         // display. A saved area (region, or a full-display area) records as usual.
         if (state == .idle || isFailed), area, region == nil,
            AppSettings.captureRegionDisplayID == nil { return }
+        // The guard above already rejected `.required`, so a hotkey start is
+        // either Full Display or Area mode with an area saved.
         await toggle(displayID: displayID,
                      cameraID: AppSettings.lastCameraID,
                      micID: AppSettings.lastMicID,
                      systemAudio: AppSettings.recordSystemAudio,
                      region: region,
-                     activateForPrompts: true)
+                     activateForPrompts: true,
+                     areaSelection: area ? .optional : .unavailable)
     }
 
     /// One action shared by the popup's primary button and the global hotkey.
@@ -420,7 +468,8 @@ final class RecordingSession: ObservableObject {
     /// hotkey leaves it false to keep its one-press screen-only record).
     func toggle(displayID: CGDirectDisplayID?, cameraID: String?, micID: String?,
                 systemAudio: Bool, region: CGRect? = nil, activateForPrompts: Bool,
-                previewFirst: Bool = false, requireAreaSelection: Bool = false) async {
+                previewFirst: Bool = false,
+                areaSelection: AreaSelection = .unavailable) async {
         switch state {
         case .recording:
             await stop()
@@ -433,7 +482,7 @@ final class RecordingSession: ObservableObject {
                                 systemAudio: systemAudio, region: region,
                                 activateForPrompts: activateForPrompts,
                                 previewFirst: previewFirst,
-                                requireAreaSelection: requireAreaSelection)
+                                areaSelection: areaSelection)
         case .arming, .preparing, .finishing:
             return
         }
@@ -442,7 +491,7 @@ final class RecordingSession: ObservableObject {
     private func startFromIdle(displayID: CGDirectDisplayID?, cameraID: String?,
                                micID: String?, systemAudio: Bool, region: CGRect?,
                                activateForPrompts: Bool, previewFirst: Bool,
-                               requireAreaSelection: Bool = false) async {
+                               areaSelection: AreaSelection = .unavailable) async {
         // Can't usefully prompt for screen recording from a hotkey — no-op.
         guard Permissions.screenRecordingGranted() else { return }
         guard let displayID else { return }
@@ -462,7 +511,7 @@ final class RecordingSession: ObservableObject {
         await arm(displayID: displayID, cameraID: camera, micID: mic,
                   systemAudio: systemAudio, region: region,
                   previewControls: willPreview,
-                  requireAreaSelection: requireAreaSelection)
+                  areaSelection: areaSelection)
 
         // Screen-only normally records directly. Camera (or `previewFirst`, the
         // GUI button) stays armed with its preview, awaiting the Record button /
@@ -534,7 +583,7 @@ final class RecordingSession: ObservableObject {
         canBeginArmed = true
         armedAreaSize = nil
         armedSystemAudio = false
-        armedRequireAreaSelection = false
+        armedAreaSelection = .unavailable
         eventTracker.cancel()
         await cameraRecorder?.discard()
         await micRecorder?.discard()
@@ -627,7 +676,7 @@ final class RecordingSession: ObservableObject {
         areaOverlay = nil
         canBeginArmed = true
         armedAreaSize = nil
-        armedRequireAreaSelection = false
+        armedAreaSelection = .unavailable
         self.bundle = nil
         self.screenRecorder = nil
         self.cameraRecorder = nil
