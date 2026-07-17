@@ -286,10 +286,12 @@ struct RecorderMenuView: View {
                 let useDisplay = captureAreaEnabled
                     ? (savedDisplay ?? selectedDisplayID)
                     : selectedDisplayID
-                // Require a selection only when Area mode has NO saved area at all
-                // (a full-display area keeps its display id, so it's recordable).
-                let requireAreaSelection = captureAreaEnabled
-                    && savedRegion == nil && savedDisplay == nil
+                // Full Display never selects an area. Area mode requires one only
+                // when nothing is saved at all (a full-display area keeps its
+                // display id, so it's recordable as-is).
+                let areaSelection: AreaSelection = !captureAreaEnabled
+                    ? .unavailable
+                    : (savedRegion == nil && savedDisplay == nil ? .required : .optional)
                 Task {
                     await session.toggle(displayID: useDisplay,
                                          cameraID: selectedCameraID,
@@ -298,7 +300,7 @@ struct RecorderMenuView: View {
                                          region: region,
                                          activateForPrompts: false,
                                          previewFirst: true,
-                                         requireAreaSelection: requireAreaSelection)
+                                         areaSelection: areaSelection)
                 }
             } label: {
                 // Area mode opens the live selection overlay; full-display just

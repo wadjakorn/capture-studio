@@ -1,12 +1,17 @@
 import AppKit
 import SwiftUI
 
-/// Persistent suggestion bar shown during passive preview (armed, before the
-/// countdown). Advises the user what they can do and carries the drag-mode
-/// toggle plus a Cancel affordance:
-/// - passive (step 1): "interact freely / Select Area / Esc to cancel".
-/// - drag mode (step 2): compact "Done Selecting" toggle; the AreaSelector's own
-///   control bar (aspect + size) shows below it.
+/// Persistent control bar shown during passive preview (armed, before the
+/// countdown). It carries **Record** — the tray popover closes the moment this
+/// panel takes key, so once the preview is up the HUD is the user's only way to
+/// start the recording. Alongside it:
+/// - passive (step 1): what you can do, plus Select Area (Area mode only) and Cancel.
+/// - drag mode (step 2): "Done Selecting" toggles back to passive; the
+///   AreaSelector's own control bar (aspect + size) shows below it.
+///
+/// Select Area is offered only in Area mode. Full Display captures the whole
+/// screen, so showing it there made an optional detour look like a required step
+/// — and left Record nowhere to be found.
 ///
 /// App-owned → excluded from screen.mp4. A non-activating panel that CAN become
 /// key, so ESC cancels the preview without the user first re-focusing the tray.
@@ -18,10 +23,15 @@ final class PreviewHUD {
     private let model: PreviewHUDModel
     private let screen: NSScreen
 
-    /// `onToggleDragMode(true/false)` on the drag toggle; `onCancel` on Esc /
-    /// the Cancel button (passive only).
+    /// `onToggleDragMode(true/false)` on the drag toggle; `onRecord` on Record;
+    /// `onCancel` on Esc / the Cancel button (passive only). `offersAreaSelection`
+    /// shows the Select Area toggle (Area mode); `canRecord` is the initial Record
+    /// gate, kept live afterwards via `setCanRecord`.
     init(onDisplay displayID: CGDirectDisplayID?,
+         offersAreaSelection: Bool,
+         canRecord: Bool,
          onToggleDragMode: @escaping (Bool) -> Void,
+         onRecord: @escaping () -> Void,
          onCancel: @escaping () -> Void) {
         screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
@@ -29,7 +39,10 @@ final class PreviewHUD {
         } ?? NSScreen.main ?? NSScreen.screens.first!
 
         model = PreviewHUDModel()
+        model.offersAreaSelection = offersAreaSelection
+        model.canRecord = canRecord
         model.onToggle = onToggleDragMode
+        model.onRecord = onRecord
         model.onCancel = onCancel
 
         let host = NSHostingView(rootView: PreviewHUDView(model: model))
@@ -60,6 +73,12 @@ final class PreviewHUD {
 
     func close() {
         panel.orderOut(nil)
+    }
+
+    /// Mirror the session's Record gate onto the button, so a blocked start is
+    /// visibly blocked rather than a click that silently does nothing.
+    func setCanRecord(_ on: Bool) {
+        model.canRecord = on
     }
 
     /// Reflect a drag-mode change from outside the HUD (Esc in the overlay,
@@ -98,8 +117,13 @@ private final class KeyableHUDPanel: NSPanel {
 @MainActor
 final class PreviewHUDModel: ObservableObject {
     @Published var dragMode = false
+    /// Area mode: the Select Area toggle is shown. Full Display: it is not.
+    @Published var offersAreaSelection = false
+    /// Mirrors `RecordingSession.canBeginArmed`.
+    @Published var canRecord = true
     /// Fired only by the user tapping the toggle; external `setDragMode` does not.
     var onToggle: (Bool) -> Void = { _ in }
+    var onRecord: () -> Void = {}
     var onCancel: () -> Void = {}
 }
 
@@ -112,7 +136,7 @@ private struct PreviewHUDView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Previewing — interact with anything on screen")
                         .font(.callout.weight(.medium))
-                    Text("Move or resize the camera · Select Area to change what's captured · Esc to cancel")
+                    Text(passiveHint)
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.65))
                 }
@@ -123,7 +147,9 @@ private struct PreviewHUDView: View {
                     .fixedSize()
             }
 
-            toggleButton
+            if model.offersAreaSelection { toggleButton }
+
+            recordButton
 
             if !model.dragMode {
                 Button { model.onCancel() } label: {
@@ -143,6 +169,12 @@ private struct PreviewHUDView: View {
         .fixedSize()
     }
 
+    private var passiveHint: String {
+        model.offersAreaSelection
+            ? "Move or resize the camera · Select Area to change what's captured · Esc to cancel"
+            : "Move or resize the camera · Record when you're ready · Esc to cancel"
+    }
+
     private var toggleButton: some View {
         Button {
             let next = !model.dragMode
@@ -160,5 +192,24 @@ private struct PreviewHUDView: View {
                 : Color.white.opacity(0.12)))
         }
         .buttonStyle(.plain)
+    }
+
+    /// The primary action, live in every stage. Dimmed and inert while the
+    /// session blocks recording (Area mode with no area picked yet), so it never
+    /// swallows a click without explanation.
+    private var recordButton: some View {
+        Button { model.onRecord() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "record.circle")
+                Text("Record").fixedSize()
+            }
+            .font(.callout.weight(.semibold))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(Capsule().fill(Color.red.opacity(model.canRecord ? 0.95 : 0.35)))
+            .opacity(model.canRecord ? 1 : 0.5)
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canRecord)
+        .help(model.canRecord ? "Start recording" : "Select an area to record")
     }
 }
