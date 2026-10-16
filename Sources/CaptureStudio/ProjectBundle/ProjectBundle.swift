@@ -14,6 +14,9 @@ struct ProjectBundle {
     var systemAudioURL: URL { url.appendingPathComponent("system.m4a") }
     var eventsURL: URL { url.appendingPathComponent("events.jsonl") }
     var editURL: URL { url.appendingPathComponent("edit.json") }
+    /// Dashboard preview frame. Derived cache, regenerated on demand; its name
+    /// must not start with `background.` (see `deleteBackgroundImages`).
+    var thumbnailURL: URL { url.appendingPathComponent("thumbnail.jpg") }
 
     /// A bundle is valid once meta.json exists (it is written last).
     var isFinalized: Bool { FileManager.default.fileExists(atPath: metaURL.path) }

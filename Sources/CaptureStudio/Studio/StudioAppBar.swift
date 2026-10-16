@@ -31,6 +31,11 @@ struct StudioAppBar: View {
                 Text("1×").font(.caption.monospacedDigit()).comingSoon()
             }
 
+            Button { DashboardLauncher.show() } label: {
+                Image(systemName: "square.grid.2x2")
+            }
+            .help("Projects")
+
             Button { model.revealMastersInFinder() } label: {
                 Image(systemName: "folder")
             }

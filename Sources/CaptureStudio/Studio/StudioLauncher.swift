@@ -62,6 +62,63 @@ enum StudioLauncher {
         return NSApp.orderedWindows.first(where: { w in visible.contains(where: { $0 === w }) }) ?? visible.first
     }
 
+    /// True when any Studio window is open and not minimized, regardless of
+    /// Space or occlusion. Used for Dock reopen: a Studio window covered by
+    /// another app or on another Space still counts, because AppKit brings it
+    /// forward on the Dock click (unlike `hasVisibleStudioWindow`, which is
+    /// about what the user can see right now).
+    static var hasOpenStudioWindow: Bool {
+        controllers.contains { ($0.window?.isVisible ?? false) && $0.window?.isMiniaturized == false }
+    }
+
+    /// True when at least one Studio window is minimized to the Dock — a Dock
+    /// click should bring it back rather than open the Dashboard.
+    static var hasMiniaturizedStudioWindow: Bool {
+        controllers.contains { $0.window?.isMiniaturized == true }
+    }
+
+    /// Restores the most recently opened minimized Studio window (controllers
+    /// are kept in open order). No-op when none is minimized.
+    static func restoreMostRecentMiniaturized() {
+        guard let window = controllers.reversed().compactMap(\.window).first(where: \.isMiniaturized)
+        else { return }
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Whether a Studio window currently holds this bundle.
+    static func isOpen(_ url: URL) -> Bool { controller(for: url) != nil }
+
+    /// Whether a Studio window identifier (the standardized path it was opened
+    /// with) names this bundle. Both sides go through `ProjectLibrary.identity`
+    /// so symlinked spellings match — used by `isOpen` AND re-focus, so they
+    /// can never disagree.
+    nonisolated static func windowIdentifier(_ raw: String, matches url: URL) -> Bool {
+        ProjectLibrary.identity(of: URL(fileURLWithPath: raw)) == ProjectLibrary.identity(of: url)
+    }
+
+    private static func controller(for url: URL) -> NSWindowController? {
+        controllers.first {
+            guard let raw = $0.window?.identifier?.rawValue else { return false }
+            return windowIdentifier(raw, matches: url)
+        }
+    }
+
+    /// Shared "Open…" flow (menu popup, Dashboard): pick a .capturestudio package.
+    static func promptAndOpen() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = ProjectBundle.defaultRecordingsDirectory()
+        panel.allowedContentTypes = [.package]
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url,
+              url.pathExtension == ProjectBundle.pathExtension else { return }
+        open(bundleURL: url)
+    }
+
     static func open(bundleURL: URL, placement: StudioWindowPlacement = .front) {
         Log.studio.info("StudioLauncher.open: \(bundleURL.lastPathComponent, privacy: .public)")
         // Every entry point (Open…, Finder/Dock, Recent, toast, auto-open) funnels
@@ -74,11 +131,11 @@ enum StudioLauncher {
             showRefusal(eligibility)
             return
         }
-        // Window identity = standardized path, so lookups can't be fooled by
-        // trailing slashes or `..` segments.
+        // Window identifier = standardized path; lookups compare resolved
+        // identities, so trailing slashes, `..` or symlinks can't fool them.
         let windowID = bundleURL.standardizedFileURL.path
         // Re-focus an already-open window for the same bundle.
-        if let existing = controllers.first(where: { $0.window?.identifier?.rawValue == windowID }) {
+        if let existing = controller(for: bundleURL) {
             RecentProjectsStore.shared.noteOpened(bundleURL)
             // Behind-current must not steal focus from the window being edited.
             guard placement == .front else { return }

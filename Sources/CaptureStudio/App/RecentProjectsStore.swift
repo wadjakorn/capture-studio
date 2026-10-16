@@ -61,23 +61,23 @@ final class RecentProjectsStore: ObservableObject {
 
     /// Swaps a moved/renamed project in place, keeping list positions.
     func replace(_ old: URL, with new: URL) {
-        let oldKey = old.standardizedFileURL.path
+        let oldKey = ProjectLibrary.identity(of: old)
         func swap(_ list: [URL]) -> [URL] {
             var seen: Set<String> = []
-            return list.map { $0.standardizedFileURL.path == oldKey ? new : $0 }
-                .filter { seen.insert($0.standardizedFileURL.path).inserted }
+            return list.map { ProjectLibrary.identity(of: $0) == oldKey ? new : $0 }
+                .filter { seen.insert(ProjectLibrary.identity(of: $0)).inserted }
         }
         recent = swap(recent)
         externalProjects = swap(externalProjects)
-        if lastRecorded?.standardizedFileURL.path == oldKey { lastRecorded = new }
+        if let last = lastRecorded, ProjectLibrary.identity(of: last) == oldKey { lastRecorded = new }
         persist()
     }
 
     func remove(_ url: URL) {
-        let key = url.standardizedFileURL.path
-        recent.removeAll { $0.standardizedFileURL.path == key }
-        externalProjects.removeAll { $0.standardizedFileURL.path == key }
-        if lastRecorded?.standardizedFileURL.path == key { lastRecorded = nil }
+        let key = ProjectLibrary.identity(of: url)
+        recent.removeAll { ProjectLibrary.identity(of: $0) == key }
+        externalProjects.removeAll { ProjectLibrary.identity(of: $0) == key }
+        if let last = lastRecorded, ProjectLibrary.identity(of: last) == key { lastRecorded = nil }
         persist()
     }
 

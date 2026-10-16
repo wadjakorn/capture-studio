@@ -6,6 +6,7 @@ import os
 enum Log {
     private static let subsystem = "dev.wadjakorn.capture-studio"
 
+    static let app = Logger(subsystem: subsystem, category: "app")
     static let recorder = Logger(subsystem: subsystem, category: "recorder")
     static let studio = Logger(subsystem: subsystem, category: "studio")
 }
