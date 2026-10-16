@@ -655,6 +655,7 @@ final class RecordingSession: ObservableObject {
             try bundle.writeMeta(meta)
             Log.recorder.info("stop OK: \(bundle.url.lastPathComponent, privacy: .public) tracks=\(tracks.count) warnings=\(self.warnings.count)")
             lastBundleURL = bundle.url
+            RecentProjectsStore.shared.noteRecorded(bundle.url)
             state = .idle
             StudioLauncher.open(bundleURL: bundle.url)
             if let streamError {
