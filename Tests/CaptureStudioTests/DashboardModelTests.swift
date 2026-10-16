@@ -134,4 +134,43 @@ import Testing
         #expect(recents.externalProjects.isEmpty)
         #expect(FileManager.default.fileExists(atPath: outside.path))
     }
+
+    @Test func duplicateExternalRegistersCopy() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let ext = try makeDir(); defer { try? FileManager.default.removeItem(at: ext) }
+        let outside = try makeProject("Out", in: ext)
+        let (model, recents) = makeModel(dir: dir)
+        recents.noteOpened(outside)
+        await model.reloadAndWait()
+        let o = try #require(model.projects.first)
+        try await model.duplicate(o)
+        let copy = try #require(model.projects.first { $0.name == "Out copy" })
+        #expect(copy.isExternal)
+    }
+
+    @Test func liveActiveRecordingLocksReadySnapshot() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try makeProject("A", in: dir)
+        var active: URL?
+        let recents = RecentProjectsStore(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                                          recordingsDirectory: dir, noteSystemRecent: { _ in })
+        let model = DashboardModel(directory: dir, recents: recents, isOpen: { _ in false },
+                                   activeRecording: { active })
+        await model.reloadAndWait()
+        let a = try #require(model.projects.first)
+        #expect(a.status == .ready)
+        #expect(!model.isLocked(a))
+        active = url
+        #expect(model.isLocked(a))
+    }
+
+    @Test func renameToSameNameIsNoOp() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try makeProject("A", in: dir)
+        let (model, _) = makeModel(dir: dir)
+        await model.reloadAndWait()
+        let a = try #require(model.projects.first)
+        try model.rename(a, to: " A ")
+        #expect(FileManager.default.fileExists(atPath: url.path))
+    }
 }

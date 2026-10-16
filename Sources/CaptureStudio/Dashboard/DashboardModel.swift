@@ -81,7 +81,10 @@ final class DashboardModel: ObservableObject {
     }
 
     func isLocked(_ project: ProjectSummary) -> Bool {
-        isOpen(project.url) || project.status == .recording
+        // Live check too: the snapshot may predate arming.
+        if let active = activeRecording(),
+           ProjectLibrary.identity(of: active) == project.id { return true }
+        return isOpen(project.url) || project.status == .recording
     }
 
     func open(_ project: ProjectSummary) {
@@ -96,6 +99,7 @@ final class DashboardModel: ObservableObject {
     func rename(_ project: ProjectSummary, to newName: String) throws {
         guard !isLocked(project) else { throw DashboardError.locked }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == project.name { return }
         let parent = project.url.deletingLastPathComponent()
         // Exclude the project itself so a case-only rename isn't a "duplicate".
         let existing = siblingNames(in: parent, excluding: project.url)
@@ -122,6 +126,9 @@ final class DashboardModel: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             try FileManager.default.copyItem(at: source, to: destination)
         }.value
+        // External copies sit beside their source, outside the scanned dir;
+        // register them or they'd never show up.
+        if project.isExternal { recents.noteOpened(destination) }
         await reloadAndWait()
     }
 

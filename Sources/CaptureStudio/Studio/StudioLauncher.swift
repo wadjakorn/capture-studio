@@ -65,8 +65,12 @@ enum StudioLauncher {
     /// Whether a Studio window currently holds this bundle (window identity is
     /// the standardized path).
     static func isOpen(_ url: URL) -> Bool {
-        let id = url.standardizedFileURL.path
-        return controllers.contains { $0.window?.identifier?.rawValue == id }
+        // Same resolved identity as ProjectLibrary so symlink spellings match.
+        let id = ProjectLibrary.identity(of: url)
+        return controllers.contains {
+            guard let raw = $0.window?.identifier?.rawValue else { return false }
+            return ProjectLibrary.identity(of: URL(fileURLWithPath: raw)) == id
+        }
     }
 
     static func open(bundleURL: URL, placement: StudioWindowPlacement = .front) {
