@@ -53,7 +53,7 @@ struct DashboardView: View {
 
     private var toolbar: some View {
         HStack(spacing: 10) {
-            // D5 adds the "Open Recorder" button here (leading edge).
+            OpenRecorderButton()
             HStack(spacing: 4) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search", text: $model.query)
@@ -100,6 +100,11 @@ struct DashboardView: View {
                 Image(systemName: "film.stack").font(.system(size: 36)).foregroundStyle(.tertiary)
                 Text(model.query.isEmpty ? "No recordings yet" : "No matches")
                     .font(.title3).foregroundStyle(.secondary)
+                if model.query.isEmpty {
+                    OpenRecorderButton()
+                        .controlSize(.large)
+                        .padding(.top, 6)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
@@ -327,5 +332,24 @@ private struct ProjectCard: View {
     private static func format(_ t: TimeInterval) -> String {
         let total = Int(t.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Primary call to action: close the Dashboard and open the recorder popup.
+private struct OpenRecorderButton: View {
+    var body: some View {
+        Button {
+            DashboardLauncher.openRecorder()
+        } label: {
+            Label {
+                Text("Open Recorder").fontWeight(.semibold)
+            } icon: {
+                Image(systemName: "record.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.red, .white)
+            }
+        }
+        .buttonStyle(.bordered)
+        .help("Close this window and open the recorder")
     }
 }

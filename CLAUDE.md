@@ -1,6 +1,7 @@
 # Capture Studio — project guide
 
-macOS menu-bar-only screen recorder + lightweight editor. Open-source Screen Studio
+macOS screen recorder + lightweight editor that launches to the Dashboard; closing
+it leaves the menu-bar item. Open-source Screen Studio
 alternative. SwiftUI, Swift 6 toolchain, single SPM package.
 
 ## Build / test / run
@@ -9,13 +10,14 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
   swift-testing `0.12.0` (exact) and KeyboardShortcuts `1.10.0` (exact). Later
   versions need the `#Preview` macro plugin / Testing interop libs CLT lacks. Do
   not bump these.
-- `swift build` / `swift test` (currently 109 tests — keep them green).
+- `swift build` / `swift test` (keep them green).
 - `scripts/build-app.sh [debug|release]` → packages `dist/CaptureStudio.app`.
   Signs with the local `Capture Studio Dev` cert if present (keeps TCC grants
   across rebuilds), else ad-hoc.
 - After building, relaunch: `pkill -x CaptureStudio; open dist/CaptureStudio.app`.
 - Bundle id: `dev.wadjakorn.capture-studio` (stable; TCC + KeyboardShortcuts
-  persistence key off it). Target: macOS 15+. `LSUIElement` (no Dock icon).
+  persistence key off it). Target: macOS 15+. `LSUIElement` (Dock icon only while a
+  Dashboard/Studio window is open — `DockPresence`).
 
 ## Layout
 
@@ -32,6 +34,10 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
   - Camera timeline: `CameraBlock` visibility segments edited via `CameraTimeline` +
     `CameraTimelineLane`.
   - Canvas inspection: `CanvasEventCatcher` handles pan/zoom and click/Esc deselect.
+- `Sources/CaptureStudio/Dashboard/` — project library window (first page at
+  launch): `ProjectLibrary` (pure scan/sort/filter/group/validate), `ThumbnailStore`,
+  `DashboardModel` (state + file ops), `DashboardView` (grid UI), `DashboardLauncher`
+  (singleton window, Open Recorder → `TrayPopupOpener`).
 - `Sources/CaptureStudio/ProjectBundle/` — on-disk `.capturestudio` format:
   `Meta`, `EditState`, `Events`, `ProjectBundle`.
 - `Tests/CaptureStudioTests/` — swift-testing; pure helpers (crop math, event

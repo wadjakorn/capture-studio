@@ -14,6 +14,22 @@ enum DashboardLauncher {
         return window.isVisible && !window.isMiniaturized
     }
 
+    /// Closes the window as if the user clicked its close button, so the
+    /// willClose cleanup (Dock presence, capture registration) runs.
+    static func close() {
+        controller?.window?.performClose(nil)
+    }
+
+    /// "Open Recorder": close the Dashboard, then open the menu-bar popup on
+    /// the next main-queue turn so the close (and any activation-policy flip)
+    /// settles first. Exact timing is pending Mac spike S0.3.
+    static func openRecorder() {
+        close()
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { _ = TrayPopupOpener.open() }
+        }
+    }
+
     static func show() {
         if let window = controller?.window {
             if window.isMiniaturized { window.deminiaturize(nil) }

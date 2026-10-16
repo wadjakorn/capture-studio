@@ -62,6 +62,22 @@ enum StudioLauncher {
         return NSApp.orderedWindows.first(where: { w in visible.contains(where: { $0 === w }) }) ?? visible.first
     }
 
+    /// True when at least one Studio window is minimized to the Dock — a Dock
+    /// click should bring it back rather than open the Dashboard.
+    static var hasMiniaturizedStudioWindow: Bool {
+        controllers.contains { $0.window?.isMiniaturized == true }
+    }
+
+    /// Restores the most recently opened minimized Studio window (controllers
+    /// are kept in open order). No-op when none is minimized.
+    static func restoreMostRecentMiniaturized() {
+        guard let window = controllers.reversed().compactMap(\.window).first(where: \.isMiniaturized)
+        else { return }
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     /// Whether a Studio window currently holds this bundle (window identity is
     /// the standardized path).
     static func isOpen(_ url: URL) -> Bool {
