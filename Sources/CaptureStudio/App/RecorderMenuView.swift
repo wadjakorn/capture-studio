@@ -85,9 +85,13 @@ struct RecorderMenuView: View {
         // so they run off-main and only the result lands in @State.
         .task(id: ProjectsKey(recent: recents.recent, last: recents.lastRecorded)) {
             let recent = recents.recent, last = recents.lastRecorded
-            projectRows = await Task.detached(priority: .userInitiated) {
+            let rows = await Task.detached(priority: .userInitiated) {
                 ProjectMenuRows.load(recent: recent, last: last)
             }.value
+            // A superseded task's detached load still finishes; don't let it
+            // overwrite rows from the newer one.
+            guard !Task.isCancelled else { return }
+            projectRows = rows
         }
         .onChange(of: selectedDisplayID) { _, id in AppSettings.lastDisplayID = id }
         .onChange(of: selectedCameraID) { _, id in AppSettings.lastCameraID = id }
