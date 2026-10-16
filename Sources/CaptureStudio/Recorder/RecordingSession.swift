@@ -785,8 +785,12 @@ final class RecordingSession: ObservableObject {
             lastBundleURL = bundle.url
             RecentProjectsStore.shared.noteRecorded(bundle.url)
             state = .idle
-            switch PostRecordingAction.decide(openStudioAfterRecording: AppSettings.openStudioAfterRecording) {
+            switch PostRecordingAction.decide(
+                openStudioAfterRecording: AppSettings.openStudioAfterRecording,
+                studioWindowVisible: StudioLauncher.hasVisibleStudioWindow
+            ) {
             case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
+            case .openStudioBehind: StudioLauncher.open(bundleURL: bundle.url, placement: .behindCurrent)
             case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
             }
             if let streamError {
