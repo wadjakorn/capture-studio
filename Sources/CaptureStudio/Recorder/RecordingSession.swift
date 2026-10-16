@@ -65,7 +65,35 @@ final class RecordingSession: ObservableObject {
     /// There is only ever one.
     static weak var shared: RecordingSession?
 
-    init() { Self.shared = self }
+    init() {
+        Self.shared = self
+        CaptureContentWindows.shared.onChange = { [weak self] in
+            self?.requestFilterRefresh()
+        }
+    }
+
+    /// Serializes `ScreenRecorder.refreshFilter()` passes; see `RefreshCoalescer`.
+    private var filterRefresh = RefreshCoalescer()
+
+    /// Re-applies the content-window allowlist to the live stream. Only while
+    /// recording: before that the stream doesn't exist (start() builds its
+    /// filter fresh), after it the stream is being finalized.
+    private func requestFilterRefresh() {
+        guard isRecording, filterRefresh.request() else { return }
+        Task { @MainActor [weak self] in
+            var again = true
+            while again {
+                guard let self else { return }
+                // Re-read each pass: a rerun may outlive the recording that
+                // queued it, and must not touch a later session's recorder
+                // outside `.recording`.
+                if self.isRecording, let recorder = self.screenRecorder {
+                    await recorder.refreshFilter()
+                }
+                again = self.filterRefresh.finish()
+            }
+        }
+    }
 
     private var bundle: ProjectBundle?
     /// URL of the bundle this session created, set the moment the directory
@@ -499,6 +527,9 @@ final class RecordingSession: ObservableObject {
         _ = displayInfo  // retained for stop(); already stored
         _ = bundle
         state = .recording(startedAt: Date())
+        // Content windows that opened/closed during `.preparing` changed after
+        // start() built its filter and their notifications were ignored then.
+        requestFilterRefresh()
         Log.recorder.info("recording: \(bundle.url.lastPathComponent, privacy: .public)")
     }
 

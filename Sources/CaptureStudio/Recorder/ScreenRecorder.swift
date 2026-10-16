@@ -58,7 +58,14 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     /// nil = whole display.
     private let region: CGRect?
 
+    /// Live stream. Guarded by `streamLock`: this class isn't actor-isolated,
+    /// so `start`/`stop` and a concurrent `refreshFilter` each run on the
+    /// cooperative pool and may interleave at their awaits.
     private var stream: SCStream?
+    /// Set as `stop()` begins, so an in-flight `refreshFilter` bails instead of
+    /// pushing a filter into a stream that is being torn down.
+    private var isStopping = false
+    private let streamLock = NSLock()
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var audioWriter: AVAssetWriter?
@@ -144,23 +151,23 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 8
         if audioWriter != nil {
             config.capturesAudio = true
-            config.excludesCurrentProcessAudio = true
+            // Studio playback during a recording is content and belongs in
+            // system.m4a. The app makes no other sound (alert beeps will be
+            // captured too — accepted).
+            config.excludesCurrentProcessAudio = false
             config.sampleRate = 48_000
             config.channelCount = 2
         } else {
             config.capturesAudio = false
         }
 
-        // Exclude our own app from the capture so the live camera-preview panel
-        // (and the menu-bar popup, etc.) never bleed into screen.mp4.
+        // Allowlist: our app is excluded, only registered content windows
+        // (Studio, Dashboard) are excepted — recording chrome never appears.
         let filter: SCContentFilter
-        if let me = try? await SCShareableContent.current.applications.first(where: {
-            $0.processID == NSRunningApplication.current.processIdentifier
-        }) {
-            filter = SCContentFilter(display: display, excludingApplications: [me],
-                                     exceptingWindows: [])
-        } else {
-            filter = SCContentFilter(display: display, excludingWindows: [])
+        do {
+            filter = try await makeFilter(display: display).filter
+        } catch {
+            throw ScreenRecorderError.streamFailed("could not list shareable content: \(error.localizedDescription)")
         }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
@@ -168,7 +175,73 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         }
         try await stream.startCapture()
-        self.stream = stream
+        streamLock.withLock { self.stream = stream }
+    }
+
+    /// Builds the capture filter from a fresh `SCShareableContent` and the live
+    /// content-window registry. `missingVisible` = a content window that should
+    /// be captured isn't listed by SCK yet (caller may retry once).
+    private func makeFilter(display: SCDisplay) async throws -> (filter: SCContentFilter, missingVisible: Bool) {
+        // All windows (not on-screen only): the app lookup must not depend on
+        // having an on-screen window, and the fail-closed fallback must also
+        // exclude our off-screen windows. `available` is narrowed to on-screen
+        // below, matching an `onScreenWindowsOnly: true` query.
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let registered = await MainActor.run { CaptureContentWindows.shared.snapshot }
+
+        let pid = NSRunningApplication.current.processIdentifier
+        let ownWindows = content.windows.filter { $0.owningApplication?.processID == pid }
+        let available = Set(ownWindows.filter(\.isOnScreen).map(\.windowID))
+        let excepted = Set(CaptureFilterPolicy.exceptedWindowIDs(content: registered, available: available))
+        let missing = CaptureFilterPolicy.hasUnlistedVisibleWindow(content: registered, available: available)
+        // Prefer the fresh SCDisplay; fall back to the one passed in.
+        let display = content.displays.first { $0.displayID == display.displayID } ?? display
+
+        let filter: SCContentFilter
+        if let me = content.applications.first(where: { $0.processID == pid }) {
+            filter = SCContentFilter(display: display, excludingApplications: [me],
+                                     exceptingWindows: ownWindows.filter { excepted.contains($0.windowID) })
+        } else {
+            // Fail closed: SCK doesn't list our app, so drop every window we own
+            // (content included). Never `excludingWindows: []` — that would
+            // capture all recording chrome.
+            Log.recorder.error("own app missing from shareable content; excluding \(ownWindows.count) own windows")
+            filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+        }
+        return (filter, missing)
+    }
+
+    /// Re-applies the allowlist to the running stream after content windows
+    /// opened/closed/moved Space/minimized. No-op unless capturing. Errors are
+    /// logged only — a failed refresh keeps the previous filter and must never
+    /// end the recording, so it doesn't reach `onStreamError`. Retries once
+    /// after ~150 ms when SCK hasn't listed a just-shown window yet.
+    func refreshFilter() async {
+        for attempt in 0..<2 {
+            guard let stream = activeStream() else { return }
+            let result: (filter: SCContentFilter, missingVisible: Bool)
+            do {
+                result = try await makeFilter(display: display)
+            } catch {
+                Log.recorder.error("filter refresh: shareable content failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            // stop() may have begun (or finished) while we awaited.
+            guard activeStream() === stream else { return }
+            do {
+                try await stream.updateContentFilter(result.filter)
+            } catch {
+                Log.recorder.error("filter refresh: update failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard attempt == 0, result.missingVisible else { return }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+    }
+
+    /// The stream, or nil once stopping has begun.
+    private func activeStream() -> SCStream? {
+        streamLock.withLock { isStopping ? nil : stream }
     }
 
     private func setUpSystemAudioWriter(outputURL: URL) throws {
@@ -198,11 +271,15 @@ final class ScreenRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Stops capture and finalizes screen.mp4 (+ system.m4a). Video finalizes
     /// first and its failure throws; system audio is best-effort.
     func stop() async throws -> StopResult {
+        let stream = streamLock.withLock { () -> SCStream? in
+            isStopping = true
+            return self.stream
+        }
         if let stream {
             // Stream may already be dead (display sleep) — finalize regardless.
             try? await stream.stopCapture()
         }
-        stream = nil
+        streamLock.withLock { self.stream = nil }
 
         guard let writer, let input else {
             throw ScreenRecorderError.writerSetupFailed("stop() before start()")

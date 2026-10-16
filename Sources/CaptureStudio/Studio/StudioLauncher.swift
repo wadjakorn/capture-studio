@@ -72,11 +72,15 @@ enum StudioLauncher {
             NSApp.setActivationPolicy(.regular)
         }
         controllers.append(controller)
+        // Studio is content: let it into the recording (everything else the
+        // app shows stays excluded).
+        CaptureContentWindows.shared.register(window)
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
             Task { @MainActor in
+                CaptureContentWindows.shared.unregister(window)
                 controllers.removeAll { $0.window === window }
                 // Last Studio window closed: revert to menu-bar-only.
                 if controllers.isEmpty {

@@ -47,8 +47,11 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
 - **Region-relative DisplayInfo:** area capture writes shifted origin/point-size
   into `meta.json` so all Studio coordinate transforms work unchanged.
   `DisplayInfo` schema never changes — only the values.
-- **Own-app windows excluded from capture:** camera preview + region outline
-  panels are app-owned, so they show on screen but never appear in `screen.mp4`.
+- **Recording chrome never captured:** the app is excluded wholesale and only
+  registered content windows (Studio, Dashboard) are excepted via
+  `CaptureContentWindows`. Fail-closed allowlist: new chrome (panels, HUDs,
+  toasts) needs nothing to stay out; a new *content* window must call
+  `CaptureContentWindows.shared.register`/`unregister` to appear in `screen.mp4`.
 - **Preview/Record split:** `RecordingSession.arm()` warms sources (no writers);
   `beginRecording()` flips writers on. States: idle/arming/armed/preparing/
   recording/finishing/failed.
