@@ -21,8 +21,12 @@ enum DashboardLauncher {
     }
 
     /// "Open Recorder": close the Dashboard, then open the menu-bar popup on
-    /// the next main-queue turn so the close (and any activation-policy flip)
-    /// settles first. Exact timing is pending Mac spike S0.3.
+    /// the next main-queue turn. Ordering dependency: `performClose` fires
+    /// willClose synchronously → our observer enqueues a main-actor Task that
+    /// releases DockPresence (possibly flipping to `.accessory`) → this
+    /// main-async block clicks the status item. Both hops ride the main queue
+    /// in enqueue order, so the click lands after the policy flip. Whether the
+    /// click must wait for `.accessory` at all is pending Mac spike S0.3.
     static func openRecorder() {
         close()
         DispatchQueue.main.async {

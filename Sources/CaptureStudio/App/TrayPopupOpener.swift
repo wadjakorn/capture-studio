@@ -15,12 +15,26 @@ enum TrayPopupOpener {
     /// treat that as best-effort — the user can still click the menu-bar icon.
     @discardableResult
     static func open() -> Bool {
+        // performClick toggles: if the popup is already up, a click would close
+        // it. Best-effort detection by SwiftUI's private window class name
+        // (unverified, S0.3); if the name differs this just never matches and
+        // we click as before.
+        if isPopupOpen() {
+            Log.app.info("TrayPopupOpener: popup already open; not clicking")
+            return true
+        }
         guard let button = statusItemButton() else {
             Log.app.error("TrayPopupOpener: NSStatusBarButton not found; popup not opened")
             return false
         }
         button.performClick(nil)
         return true
+    }
+
+    private static func isPopupOpen() -> Bool {
+        NSApp.windows.contains {
+            $0.isVisible && String(describing: type(of: $0)).contains("MenuBarExtraWindow")
+        }
     }
 
     private static func statusItemButton() -> NSButton? {

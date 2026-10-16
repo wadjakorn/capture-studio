@@ -62,6 +62,15 @@ enum StudioLauncher {
         return NSApp.orderedWindows.first(where: { w in visible.contains(where: { $0 === w }) }) ?? visible.first
     }
 
+    /// True when any Studio window is open and not minimized, regardless of
+    /// Space or occlusion. Used for Dock reopen: a Studio window covered by
+    /// another app or on another Space still counts, because AppKit brings it
+    /// forward on the Dock click (unlike `hasVisibleStudioWindow`, which is
+    /// about what the user can see right now).
+    static var hasOpenStudioWindow: Bool {
+        controllers.contains { ($0.window?.isVisible ?? false) && $0.window?.isMiniaturized == false }
+    }
+
     /// True when at least one Studio window is minimized to the Dock — a Dock
     /// click should bring it back rather than open the Dashboard.
     static var hasMiniaturizedStudioWindow: Bool {

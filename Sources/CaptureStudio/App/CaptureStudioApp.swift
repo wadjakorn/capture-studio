@@ -54,10 +54,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Dock click. Acts on our own window bookkeeping, then always returns
     /// false: returning true would let AppKit run the untitled-file path and
     /// stack a Dashboard on top of a Studio window we just restored.
+    ///
+    /// "Visible" here means open and not minimized, ignoring Space and
+    /// occlusion: clicking the Dock to get back to a covered (or other-Space)
+    /// Studio/Dashboard window is the common case, and AppKit already brings
+    /// those forward. `hasVisibleStudioWindow` is stricter and would pop a
+    /// Dashboard next to them.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
             let action = ReopenAction.decide(
-                hasVisibleAppWindow: StudioLauncher.hasVisibleStudioWindow || DashboardLauncher.isVisible,
+                hasVisibleAppWindow: StudioLauncher.hasOpenStudioWindow || DashboardLauncher.isVisible,
                 hasMiniaturizedStudio: StudioLauncher.hasMiniaturizedStudioWindow)
             Log.app.info("Reopen: \(String(describing: action), privacy: .public)")
             switch action {
