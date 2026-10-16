@@ -73,6 +73,20 @@ enum StudioLauncher {
         }
     }
 
+    /// Shared "Open…" flow (menu popup, Dashboard): pick a .capturestudio package.
+    static func promptAndOpen() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = ProjectBundle.defaultRecordingsDirectory()
+        panel.allowedContentTypes = [.package]
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url,
+              url.pathExtension == ProjectBundle.pathExtension else { return }
+        open(bundleURL: url)
+    }
+
     static func open(bundleURL: URL, placement: StudioWindowPlacement = .front) {
         Log.studio.info("StudioLauncher.open: \(bundleURL.lastPathComponent, privacy: .public)")
         // Every entry point (Open…, Finder/Dock, Recent, toast, auto-open) funnels

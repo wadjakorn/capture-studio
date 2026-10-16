@@ -64,9 +64,9 @@ struct RecorderMenuView: View {
                 }
                 Spacer()
                 Button {
-                    NSWorkspace.shared.open(ProjectBundle.defaultRecordingsDirectory())
+                    DashboardLauncher.show()
                 } label: {
-                    Label("Folder", systemImage: "folder")
+                    Label("Projects", systemImage: "square.grid.2x2")
                 }
                 Spacer()
                 Button {
@@ -596,18 +596,7 @@ struct RecorderMenuView: View {
         return " · \(name)"
     }
 
-    private func openRecordingPanel() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = ProjectBundle.defaultRecordingsDirectory()
-        panel.allowedContentTypes = [.package]
-        NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url,
-              url.pathExtension == ProjectBundle.pathExtension else { return }
-        StudioLauncher.open(bundleURL: url)
-    }
+    private func openRecordingPanel() { StudioLauncher.promptAndOpen() }
 
     private func refreshDevices() async {
         guard permissionGranted else { return }
