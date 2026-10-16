@@ -43,6 +43,55 @@ import Testing
         #expect(model.visible.isEmpty)
     }
 
+    @Test func liveRenameIssueExcludesSelfAndCatchesDuplicates() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try makeProject("Demo", in: dir)
+        _ = try makeProject("Other", in: dir)
+        let (model, _) = makeModel(dir: dir)
+        await model.reloadAndWait()
+        let demo = try #require(model.projects.first { $0.name == "Demo" })
+        let siblings = model.renameSiblings(for: demo)
+        #expect(siblings == ["Other"])
+
+        func issue(_ text: String) -> String? {
+            DashboardModel.renameIssue(text, currentName: demo.name, siblings: siblings)
+        }
+        // Empty / unchanged: no message (the button just stays disabled).
+        #expect(issue("") == nil)
+        #expect(issue("  Demo ") == nil)
+        // Case-only change of itself is fine; a sibling in any case is not.
+        #expect(issue("demo") == nil)
+        #expect(issue("OTHER") == DashboardError.rename(.duplicate).errorDescription)
+        #expect(issue("a/b") == DashboardError.rename(.invalidCharacters).errorDescription)
+        #expect(issue("Fresh") == nil)
+    }
+
+    @Test func lockReasonNamesTheBlockerPerAction() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try makeProject("A", in: dir)
+        let (open, _) = makeModel(dir: dir, locked: { _ in true })
+        await open.reloadAndWait()
+        let a = try #require(open.projects.first)
+        #expect(open.lockReason(a, for: .rename) == .openInStudio)
+        #expect(open.lockReason(a, for: .trash) == .openInStudio)
+        // Open in Studio is safe to copy.
+        #expect(open.lockReason(a, for: .duplicate) == nil)
+
+        let (live, _) = makeModel(dir: dir, active: url)
+        await live.reloadAndWait()
+        let b = try #require(live.projects.first)
+        #expect(live.lockReason(b, for: .duplicate) == .recording)
+
+        let (free, _) = makeModel(dir: dir)
+        await free.reloadAndWait()
+        #expect(free.lockReason(try #require(free.projects.first), for: .rename) == nil)
+
+        #expect(ProjectLockReason.openInStudio.message(projectName: "X", action: .rename)
+                == "“X” is open in Studio. Close its Studio window to rename it.")
+        #expect(ProjectLockReason.duplicating.message(projectName: "X", action: .trash)
+                == "“X” is being duplicated. Try again when it finishes.")
+    }
+
     @Test func renameMovesAndUpdatesRecents() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let url = try makeProject("A", in: dir)

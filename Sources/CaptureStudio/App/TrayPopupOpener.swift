@@ -1,6 +1,6 @@
 import AppKit
 
-/// Opens the MenuBarExtra popup programmatically. SwiftUI has no API for this,
+/// Opens (and closes) the MenuBarExtra popup programmatically. SwiftUI has no API for this,
 /// so we click the status item's button. This is the ONLY file that knows the
 /// private AppKit hierarchy (`NSStatusBarWindow` → `NSStatusBarButton`); keep
 /// it that way.
@@ -38,8 +38,27 @@ enum TrayPopupOpener {
         return true
     }
 
-    private static func isPopupOpen() -> Bool {
-        NSApp.windows.contains {
+    /// Collapses the popup if it is open — used by popup actions that hand
+    /// off to something else on screen (Stop, Record, Preview, Cancel). Toggles
+    /// it through the status button so SwiftUI's own open/closed state stays
+    /// in sync; only if that button can't be found is the window ordered out
+    /// directly. No-op when the popup isn't open (e.g. hotkey path).
+    static func closePopup() {
+        guard let popup = popupWindow() else { return }
+        if let button = statusItemButton() {
+            button.performClick(nil)
+        } else {
+            Log.app.error("TrayPopupOpener: NSStatusBarButton not found; ordering popup out")
+            popup.orderOut(nil)
+        }
+    }
+
+    private static func isPopupOpen() -> Bool { popupWindow() != nil }
+
+    /// The visible MenuBarExtra `.window` popup, matched by SwiftUI's private
+    /// window class name.
+    private static func popupWindow() -> NSWindow? {
+        NSApp.windows.first {
             $0.isVisible && String(describing: type(of: $0)).contains("MenuBarExtraWindow")
         }
     }

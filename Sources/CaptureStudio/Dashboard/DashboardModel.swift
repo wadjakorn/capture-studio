@@ -24,6 +24,45 @@ enum DashboardError: LocalizedError, Equatable {
     }
 }
 
+/// File operations the Dashboard can refuse while a project is in use.
+enum ProjectAction: Equatable {
+    case rename, trash, duplicate
+
+    var verbPhrase: String {
+        switch self {
+        case .rename: return "rename it"
+        case .trash: return "move it to the Trash"
+        case .duplicate: return "duplicate it"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .rename: return "Rename"
+        case .trash: return "Move to Trash"
+        case .duplicate: return "Duplicate"
+        }
+    }
+}
+
+/// Why a project is temporarily locked. Order of precedence matches
+/// `DashboardModel.lockReason`: the copy, then the recording, then Studio.
+enum ProjectLockReason: Equatable {
+    case duplicating, recording, openInStudio
+
+    /// User-facing explanation naming the project and what to do about it.
+    func message(projectName name: String, action: ProjectAction) -> String {
+        switch self {
+        case .duplicating:
+            return "“\(name)” is being duplicated. Try again when it finishes."
+        case .recording:
+            return "“\(name)” is being recorded. Stop the recording to \(action.verbPhrase)."
+        case .openInStudio:
+            return "“\(name)” is open in Studio. Close its Studio window to \(action.verbPhrase)."
+        }
+    }
+}
+
 @MainActor
 final class DashboardModel: ObservableObject {
     @Published var query = ""
@@ -99,6 +138,33 @@ final class DashboardModel: ObservableObject {
         // Live check too: the snapshot may predate arming.
         if isRecordingLive(project) { return true }
         return isOpen(project.url) || project.status == .recording
+    }
+
+    /// Why `action` can't run on this project right now, or nil if it can.
+    /// Duplicate only cares about the copy and the live recording — a
+    /// project merely open in Studio is safe to copy.
+    func lockReason(_ project: ProjectSummary, for action: ProjectAction) -> ProjectLockReason? {
+        if busy.contains(project.id) { return .duplicating }
+        if isRecordingLive(project) || project.status == .recording { return .recording }
+        if action != .duplicate, isOpen(project.url) { return .openInStudio }
+        return nil
+    }
+
+    /// Names of the other projects beside this one, for live rename checks.
+    func renameSiblings(for project: ProjectSummary) -> Set<String> {
+        siblingNames(in: project.url.deletingLastPathComponent(), excluding: project.url)
+    }
+
+    /// Live rename feedback: the message to show under the field, or nil.
+    /// Empty or unchanged input shows nothing (the button just stays off).
+    /// Same rules as `rename`, which excludes the project itself so a
+    /// case-only change isn't flagged as a duplicate.
+    nonisolated static func renameIssue(_ proposed: String, currentName: String,
+                                        siblings: Set<String>) -> String? {
+        let trimmed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == currentName { return nil }
+        return ProjectLibrary.validateRename(trimmed, existing: siblings)
+            .map { DashboardError.rename($0).errorDescription ?? "" }
     }
 
     /// Busy is reported apart so the error names the real reason (the copy),

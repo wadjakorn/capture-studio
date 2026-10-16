@@ -33,6 +33,50 @@ enum StudioOpenEligibility: Equatable {
     }
 }
 
+/// Remembers when each app window (Studio, Dashboard) last became key, so a
+/// Dock-click restore can bring the most recently used one to the front.
+/// Minimized windows drop out of `NSApp.orderedWindows`, so stacking order
+/// alone can't tell.
+@MainActor
+enum WindowRecency {
+    private static var counter: UInt64 = 0
+    private static var stamps: [ObjectIdentifier: UInt64] = [:]
+
+    private static var observers: [ObjectIdentifier: [NSObjectProtocol]] = [:]
+
+    static func track(_ window: NSWindow) {
+        let id = ObjectIdentifier(window)
+        guard observers[id] == nil else { return }
+        if window.isKeyWindow { bump(id) }
+        let center = NotificationCenter.default
+        observers[id] = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window,
+                               queue: .main) { _ in
+                MainActor.assumeIsolated { bump(id) }
+            },
+            center.addObserver(forName: NSWindow.willCloseNotification, object: window,
+                               queue: .main) { _ in
+                MainActor.assumeIsolated { forget(id) }
+            },
+        ]
+    }
+
+    private static func forget(_ id: ObjectIdentifier) {
+        stamps[id] = nil
+        for token in observers.removeValue(forKey: id) ?? [] {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// 0 for a window that has never been key.
+    static func lastUsed(_ window: NSWindow) -> UInt64 { stamps[ObjectIdentifier(window)] ?? 0 }
+
+    private static func bump(_ id: ObjectIdentifier) {
+        counter += 1
+        stamps[id] = counter
+    }
+}
+
 enum StudioWindowPlacement {
     /// Key and frontmost, activating the app.
     case front
@@ -77,13 +121,17 @@ enum StudioLauncher {
         controllers.contains { $0.window?.isMiniaturized == true }
     }
 
-    /// Restores the most recently opened minimized Studio window (controllers
-    /// are kept in open order). No-op when none is minimized.
-    static func restoreMostRecentMiniaturized() {
-        guard let window = controllers.reversed().compactMap(\.window).first(where: \.isMiniaturized)
-        else { return }
-        window.deminiaturize(nil)
-        window.makeKeyAndOrderFront(nil)
+    /// Dock click: restores every minimized Studio window plus the Dashboard
+    /// if it is minimized too. Least recently used come back first so the
+    /// most recently used ends up frontmost and key. No-op when none is
+    /// minimized.
+    static func restoreMiniaturizedWindows() {
+        var minimized = controllers.compactMap(\.window).filter(\.isMiniaturized)
+        if let dashboard = DashboardLauncher.miniaturizedWindow { minimized.insert(dashboard, at: 0) }
+        let ordered = ReopenAction.restoreOrder(minimized, lastUsed: WindowRecency.lastUsed)
+        guard let mostRecent = ordered.last else { return }
+        for window in ordered { window.deminiaturize(nil) }
+        mostRecent.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -163,6 +211,7 @@ enum StudioLauncher {
         // Studio is content: let it into the recording (everything else the
         // app shows stays excluded).
         CaptureContentWindows.shared.register(window)
+        WindowRecency.track(window)
 
         NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
