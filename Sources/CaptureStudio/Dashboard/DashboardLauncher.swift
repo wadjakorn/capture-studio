@@ -40,9 +40,11 @@ enum DashboardLauncher {
         // Dashboard is content, like Studio: it may appear in the recording.
         CaptureContentWindows.shared.register(window)
 
-        NotificationCenter.default.addObserver(
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
+            if let token { NotificationCenter.default.removeObserver(token) }
             Task { @MainActor in
                 CaptureContentWindows.shared.unregister(window)
                 if controller?.window === window { controller = nil }

@@ -169,6 +169,7 @@ struct DashboardView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 280)
                 .onSubmit { commitRename(project) }
+                .onChange(of: renameText) { _, _ in renameError = nil }
             if let renameError {
                 Text(renameError).font(.caption).foregroundStyle(.red)
             }
@@ -274,8 +275,14 @@ private struct ProjectCard: View {
         }
         // Lazy per cell: only visible cells run this. Ready projects only —
         // others have no media to read.
-        .task(id: project.id) {
-            guard project.status == .ready else { return }
+        // Keyed on status too: a card that flips to .ready on reload (recording
+        // finished) must load its media; leaving .ready drops stale values.
+        .task(id: "\(project.id)|\(String(describing: project.status))") {
+            guard project.status == .ready else {
+                thumbnail = nil
+                duration = nil
+                return
+            }
             thumbnail = await ThumbnailStore.shared.image(bundleURL: project.url)
             duration = await ThumbnailStore.shared.duration(bundleURL: project.url)
         }
