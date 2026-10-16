@@ -162,3 +162,25 @@ import Foundation
         #expect(groups.map(\.title) == ["Today"])
     }
 }
+
+/// Studio window re-focus must use the same resolved identity as `isOpen`,
+/// or a symlinked spelling of an open bundle opens a second window for it.
+@Suite struct StudioWindowIdentityTests {
+    @Test func symlinkedSpellingMatchesOpenWindow() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let real = tmp.appendingPathComponent("A.capturestudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = tmp.appendingPathComponent("Link.capturestudio")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        // Window identifier is the standardized path of whatever spelling opened it.
+        let windowID = real.standardizedFileURL.path
+        #expect(StudioLauncher.windowIdentifier(windowID, matches: link))
+        #expect(StudioLauncher.windowIdentifier(link.standardizedFileURL.path, matches: real))
+        #expect(StudioLauncher.windowIdentifier(windowID + "/", matches: real))
+        #expect(!StudioLauncher.windowIdentifier(windowID, matches: tmp.appendingPathComponent("B.capturestudio")))
+    }
+}

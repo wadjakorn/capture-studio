@@ -11,8 +11,15 @@ import AppKit
 /// own `NSStatusItem` + `NSPopover`, which we can open directly.
 @MainActor
 enum TrayPopupOpener {
+    /// Whether `open()` can succeed right now: the popup is already up or the
+    /// status bar button can be located. Lets callers keep their own window
+    /// on screen instead of leaving the user with nothing.
+    static func canOpen() -> Bool {
+        isPopupOpen() || statusItemButton() != nil
+    }
+
     /// Returns false (and logs) when the status button can't be found; callers
-    /// treat that as best-effort — the user can still click the menu-bar icon.
+    /// should check `canOpen()` first when failing would strand the user.
     @discardableResult
     static func open() -> Bool {
         // performClick toggles: if the popup is already up, a click would close

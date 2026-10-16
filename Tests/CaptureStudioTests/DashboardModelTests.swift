@@ -75,14 +75,120 @@ import Testing
         #expect(throws: DashboardError.self) { try free.rename(a, to: " ") }
     }
 
+    /// Case-only renames go through a temporary sibling (case-insensitive APFS
+    /// can refuse a direct move as "file exists"); the end state must be the
+    /// new casing with no temp leftover and recents following along.
     @Test func caseOnlyRenameAllowed() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         _ = try makeProject("alpha", in: dir)
-        let (model, _) = makeModel(dir: dir)
+        let (model, recents) = makeModel(dir: dir)
         await model.reloadAndWait()
-        try model.rename(try #require(model.projects.first), to: "Alpha")
+        let project = try #require(model.projects.first)
+        recents.noteOpened(project.url)
+        try model.rename(project, to: "Alpha")
+        // contentsOfDirectory(atPath:) includes dot-files, so a stranded
+        // `.alpha-<uuid>.capturestudio` temp would show up here.
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(names == ["Alpha.capturestudio"])
+        #expect(recents.recent.map(\.lastPathComponent) == ["Alpha.capturestudio"])
+    }
+
+    @Test func caseOnlyRenameUsesTemporarySibling() {
+        let parent = URL(fileURLWithPath: "/tmp/x", isDirectory: true)
+        let from = parent.appendingPathComponent("demo.capturestudio")
+        let to = parent.appendingPathComponent("Demo.capturestudio")
+        #expect(DashboardModel.isCaseOnlyRename(from: from, to: to))
+        #expect(!DashboardModel.isCaseOnlyRename(from: from, to: parent.appendingPathComponent("Other.capturestudio")))
+        #expect(!DashboardModel.isCaseOnlyRename(from: from, to: from))
+        let temp = DashboardModel.temporarySibling(for: to)
+        #expect(temp.deletingLastPathComponent() == parent)
+        #expect(temp.lastPathComponent.hasPrefix(".Demo-"))
+        #expect(temp.pathExtension == "capturestudio")
+    }
+
+    /// A copy that dies half-way must not leave a partial "A copy" behind
+    /// (it would show up as a broken project). The injected copier creates
+    /// the destination and then fails, deterministically.
+    @Test func failedDuplicateLeavesNoPartialCopy() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try makeProject("A", in: dir)
+        let recents = RecentProjectsStore(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                                          recordingsDirectory: dir, noteSystemRecent: { _ in })
+        let model = DashboardModel(directory: dir, recents: recents, isOpen: { _ in false },
+                                   activeRecording: { nil },
+                                   copyItem: { _, destination in
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            try Data("partial".utf8).write(to: destination.appendingPathComponent("screen.mp4"))
+            throw CocoaError(.fileReadNoPermission)
+        })
+        await model.reloadAndWait()
+        let a = try #require(model.projects.first)
+        await #expect(throws: CocoaError.self) { try await model.duplicate(a) }
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("A copy.capturestudio").path))
+        #expect(model.busy.isEmpty)
+    }
+
+    /// While a project is being duplicated it is locked: rename/trash and a
+    /// second duplicate are refused. The copier probes the model mid-copy by
+    /// hopping to the main queue (idle: the test is suspended in `duplicate`)
+    /// — no second cooperative-pool thread is ever waited on, so this can't
+    /// deadlock however narrow the pool is.
+    @Test func busyProjectIsLocked() async throws {
+        final class Probe: @unchecked Sendable {
+            weak var model: DashboardModel?
+            var project: ProjectSummary?
+            var busy = false, locked = false
+            var renameError: DashboardError?, trashError: DashboardError?, duplicateError: DashboardError?
+        }
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try makeProject("A", in: dir)
+        let probe = Probe()
+        let recents = RecentProjectsStore(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                                          recordingsDirectory: dir, noteSystemRecent: { _ in })
+        let model = DashboardModel(directory: dir, recents: recents, isOpen: { _ in false },
+                                   activeRecording: { nil },
+                                   copyItem: { source, destination in
+            let secondDone = DispatchSemaphore(value: 0)
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    guard let model = probe.model, let a = probe.project else {
+                        secondDone.signal(); return
+                    }
+                    probe.busy = model.busy.contains(a.id)
+                    probe.locked = model.isLocked(a)
+                    do { try model.rename(a, to: "B") } catch { probe.renameError = error as? DashboardError }
+                    do { try model.moveToTrash(a) } catch { probe.trashError = error as? DashboardError }
+                    // The busy guard throws before duplicate's first suspension,
+                    // so this main-actor task finishes without the pool.
+                    Task { @MainActor in
+                        do { try await model.duplicate(a) } catch {
+                            probe.duplicateError = error as? DashboardError
+                        }
+                        secondDone.signal()
+                    }
+                }
+            }
+            // Waits on a main-actor task only, never on another pool thread.
+            secondDone.wait()
+            try FileManager.default.copyItem(at: source, to: destination)
+        })
+        await model.reloadAndWait()
+        let a = try #require(model.projects.first)
+        #expect(!model.isLocked(a))
+        probe.model = model
+        probe.project = a
+
+        try await model.duplicate(a)
+
+        #expect(probe.busy)
+        #expect(probe.locked)
+        #expect(probe.renameError == .busy)
+        #expect(probe.trashError == .busy)
+        #expect(probe.duplicateError == .busy)
+        #expect(!model.isLocked(a))
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(model.projects.contains { $0.name == "A copy" })
+        #expect(model.projects.count == 2)
     }
 
     @Test func duplicateCreatesCopyAndRefusesNonReady() async throws {

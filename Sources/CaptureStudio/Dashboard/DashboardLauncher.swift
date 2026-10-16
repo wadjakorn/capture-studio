@@ -21,16 +21,34 @@ enum DashboardLauncher {
     }
 
     /// "Open Recorder": close the Dashboard, then open the menu-bar popup on
-    /// the next main-queue turn. Ordering dependency: `performClose` fires
-    /// willClose synchronously → our observer enqueues a main-actor Task that
+    /// the next main-queue turn. If the status button can't be located the
+    /// Dashboard stays open and the user is told where the recorder lives —
+    /// closing first would leave nothing on screen. Ordering dependency:
+    /// `performClose` fires willClose synchronously → our observer enqueues a main-actor Task that
     /// releases DockPresence (possibly flipping to `.accessory`) → this
     /// main-async block clicks the status item. Both hops ride the main queue
     /// in enqueue order, so the click lands after the policy flip. Whether the
     /// click must wait for `.accessory` at all is pending Mac spike S0.3.
     static func openRecorder() {
+        guard TrayPopupOpener.canOpen() else {
+            showRecorderHint()
+            return
+        }
         close()
         DispatchQueue.main.async {
             MainActor.assumeIsolated { _ = TrayPopupOpener.open() }
+        }
+    }
+
+    private static func showRecorderHint() {
+        let alert = NSAlert()
+        alert.messageText = "Click the Capture Studio icon in the menu bar to open the recorder."
+        alert.addButton(withTitle: "OK")
+        if let window = controller?.window, window.isVisible {
+            alert.beginSheetModal(for: window)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
         }
     }
 

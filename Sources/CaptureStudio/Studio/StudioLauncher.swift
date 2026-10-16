@@ -87,14 +87,21 @@ enum StudioLauncher {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Whether a Studio window currently holds this bundle (window identity is
-    /// the standardized path).
-    static func isOpen(_ url: URL) -> Bool {
-        // Same resolved identity as ProjectLibrary so symlink spellings match.
-        let id = ProjectLibrary.identity(of: url)
-        return controllers.contains {
+    /// Whether a Studio window currently holds this bundle.
+    static func isOpen(_ url: URL) -> Bool { controller(for: url) != nil }
+
+    /// Whether a Studio window identifier (the standardized path it was opened
+    /// with) names this bundle. Both sides go through `ProjectLibrary.identity`
+    /// so symlinked spellings match — used by `isOpen` AND re-focus, so they
+    /// can never disagree.
+    nonisolated static func windowIdentifier(_ raw: String, matches url: URL) -> Bool {
+        ProjectLibrary.identity(of: URL(fileURLWithPath: raw)) == ProjectLibrary.identity(of: url)
+    }
+
+    private static func controller(for url: URL) -> NSWindowController? {
+        controllers.first {
             guard let raw = $0.window?.identifier?.rawValue else { return false }
-            return ProjectLibrary.identity(of: URL(fileURLWithPath: raw)) == id
+            return windowIdentifier(raw, matches: url)
         }
     }
 
@@ -124,11 +131,11 @@ enum StudioLauncher {
             showRefusal(eligibility)
             return
         }
-        // Window identity = standardized path, so lookups can't be fooled by
-        // trailing slashes or `..` segments.
+        // Window identifier = standardized path; lookups compare resolved
+        // identities, so trailing slashes, `..` or symlinks can't fool them.
         let windowID = bundleURL.standardizedFileURL.path
         // Re-focus an already-open window for the same bundle.
-        if let existing = controllers.first(where: { $0.window?.identifier?.rawValue == windowID }) {
+        if let existing = controller(for: bundleURL) {
             RecentProjectsStore.shared.noteOpened(bundleURL)
             // Behind-current must not steal focus from the window being edited.
             guard placement == .front else { return }

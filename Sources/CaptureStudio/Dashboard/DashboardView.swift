@@ -143,7 +143,8 @@ struct DashboardView: View {
     @ViewBuilder
     private func menu(for project: ProjectSummary) -> some View {
         let locked = model.isLocked(project)
-        let lockReason = project.status == .recording ? "Recording" : "Open in Studio"
+        let lockReason = model.busy.contains(project.id) ? "Duplicating"
+            : project.status == .recording ? "Recording" : "Open in Studio"
         Button("Open") { model.open(project) }
             .disabled(project.status != .ready)
         Button("Rename…") {
