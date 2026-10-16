@@ -105,6 +105,7 @@ final class RecordingSession: ObservableObject {
              previewControls: Bool = false,
              areaSelection: AreaSelection = .unavailable) async {
         guard state == .idle || isFailed else { return }
+        RecordingSavedToast.dismiss()
         state = .arming
         warnings = []
         Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio) region=\(region != nil) controls=\(previewControls) area=\(String(describing: areaSelection), privacy: .public)")
@@ -657,7 +658,10 @@ final class RecordingSession: ObservableObject {
             lastBundleURL = bundle.url
             RecentProjectsStore.shared.noteRecorded(bundle.url)
             state = .idle
-            StudioLauncher.open(bundleURL: bundle.url)
+            switch PostRecordingAction.decide(openStudioAfterRecording: AppSettings.openStudioAfterRecording) {
+            case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
+            case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
+            }
             if let streamError {
                 state = .failed("Recording saved, but capture stopped early: \(streamError.localizedDescription)")
             }
