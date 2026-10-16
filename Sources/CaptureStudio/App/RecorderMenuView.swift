@@ -147,6 +147,7 @@ struct RecorderMenuView: View {
                 .padding(.vertical, 6)
 
                 Button {
+                    TrayPopupOpener.closePopup()
                     Task { await session.stop() }
                 } label: {
                     Label("Stop Recording", systemImage: "stop.circle")
@@ -196,6 +197,7 @@ struct RecorderMenuView: View {
 
             HStack {
                 Button {
+                    TrayPopupOpener.closePopup()
                     Task { await session.startCountdownThenBegin() }
                 } label: {
                     Label("Record", systemImage: "record.circle")
@@ -205,6 +207,7 @@ struct RecorderMenuView: View {
                 .disabled(session.counting || !session.canBeginArmed)
 
                 Button("Cancel") {
+                    TrayPopupOpener.closePopup()
                     Task { await session.cancelCountdownOrArming() }
                 }
                 .keyboardShortcut(.escape, modifiers: [])
@@ -327,6 +330,10 @@ struct RecorderMenuView: View {
                 let areaSelection: AreaSelection = !captureAreaEnabled
                     ? .unavailable
                     : (savedRegion == nil && savedDisplay == nil ? .required : .optional)
+                // Get the popup out of the way of the preview / area overlay.
+                // Everything above is already captured, so the view being
+                // torn down by the close doesn't matter.
+                TrayPopupOpener.closePopup()
                 Task {
                     await session.toggle(displayID: useDisplay,
                                          cameraID: selectedCameraID,
