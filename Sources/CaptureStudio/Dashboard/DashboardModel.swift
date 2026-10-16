@@ -87,11 +87,17 @@ final class DashboardModel: ObservableObject {
         return task
     }
 
+    /// True while this project is the live recording, even if the snapshot
+    /// still says `.ready`.
+    func isRecordingLive(_ project: ProjectSummary) -> Bool {
+        guard let active = activeRecording() else { return false }
+        return ProjectLibrary.identity(of: active) == project.id
+    }
+
     func isLocked(_ project: ProjectSummary) -> Bool {
         if busy.contains(project.id) { return true }
         // Live check too: the snapshot may predate arming.
-        if let active = activeRecording(),
-           ProjectLibrary.identity(of: active) == project.id { return true }
+        if isRecordingLive(project) { return true }
         return isOpen(project.url) || project.status == .recording
     }
 
@@ -143,6 +149,8 @@ final class DashboardModel: ObservableObject {
 
     func duplicate(_ project: ProjectSummary) async throws {
         guard project.status == .ready else { throw DashboardError.notReady }
+        // Not isLocked: a project merely open in Studio is safe to copy.
+        guard !isRecordingLive(project) else { throw DashboardError.locked }
         guard !busy.contains(project.id) else { throw DashboardError.busy }
         let parent = project.url.deletingLastPathComponent()
         let name = ProjectLibrary.duplicateName(

@@ -270,6 +270,23 @@ import Testing
         #expect(model.isLocked(a))
     }
 
+    @Test func duplicateRefusedWhileLiveRecording() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let url = try makeProject("A", in: dir)
+        var active: URL?
+        let recents = RecentProjectsStore(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                                          recordingsDirectory: dir, noteSystemRecent: { _ in })
+        let model = DashboardModel(directory: dir, recents: recents, isOpen: { _ in false },
+                                   activeRecording: { active })
+        await model.reloadAndWait()
+        let a = try #require(model.projects.first)
+        #expect(a.status == .ready)
+        active = url
+        await #expect(throws: DashboardError.self) { try await model.duplicate(a) }
+        await model.reloadAndWait()
+        #expect(model.projects.count == 1)
+    }
+
     @Test func renameToSameNameIsNoOp() async throws {
         let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let url = try makeProject("A", in: dir)

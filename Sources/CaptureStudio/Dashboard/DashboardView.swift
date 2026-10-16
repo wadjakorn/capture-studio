@@ -155,7 +155,8 @@ struct DashboardView: View {
         .disabled(locked)
         .help(locked ? lockReason : "")
         Button("Duplicate") { performAsync { try await model.duplicate(project) } }
-            .disabled(project.status != .ready || model.busy.contains(project.id))
+            .disabled(project.status != .ready || model.busy.contains(project.id)
+                       || model.isRecordingLive(project))
         Button("Show in Finder") { model.revealInFinder(project) }
         Divider()
         if project.isExternal {
