@@ -84,10 +84,14 @@ struct RecorderMenuView: View {
         .task { await refreshDevices() }
         // Openability + meta reads touch the disk (possibly a network volume),
         // so they run off-main and only the result lands in @State.
-        .task(id: ProjectsKey(recent: recents.recent, last: recents.lastRecorded)) {
+        // The active recording is part of the key so its row reappears once the
+        // session goes idle (activeBundleURL is state-derived → nil).
+        .task(id: ProjectsKey(recent: recents.recent, last: recents.lastRecorded,
+                              active: session.activeBundleURL)) {
             let recent = recents.recent, last = recents.lastRecorded
+            let active = session.activeBundleURL
             let rows = await Task.detached(priority: .userInitiated) {
-                ProjectMenuRows.load(recent: recent, last: last)
+                ProjectMenuRows.load(recent: recent, last: last, activeRecording: active)
             }.value
             // A superseded task's detached load still finishes; don't let it
             // overwrite rows from the newer one.
@@ -636,9 +640,11 @@ struct RecorderMenuView: View {
 private struct ProjectsKey: Equatable {
     let recent: [String]
     let last: String?
-    init(recent: [URL], last: URL?) {
+    let active: String?
+    init(recent: [URL], last: URL?, active: URL?) {
         self.recent = recent.map { $0.standardizedFileURL.path }
         self.last = last?.standardizedFileURL.path
+        self.active = active?.standardizedFileURL.path
     }
 }
 
@@ -659,10 +665,15 @@ struct ProjectMenuRows: Equatable {
     let recent: [ProjectMenuItem]
     var isEmpty: Bool { last == nil && recent.isEmpty }
 
-    static func load(recent: [URL], last: URL?,
+    /// `activeRecording` (the bundle the session is still writing) is hidden:
+    /// Studio would refuse to open it anyway.
+    static func load(recent: [URL], last: URL?, activeRecording: URL? = nil,
                      isOpenable: (URL) -> Bool = RecentProjects.isOpenable) -> ProjectMenuRows {
-        let lastURL = last.flatMap { isOpenable($0) ? $0 : nil }
-        let recentURLs = RecentProjects.displayable(recent, excluding: lastURL,
+        let activePath = activeRecording?.standardizedFileURL.path
+        let isActive = { (url: URL) in url.standardizedFileURL.path == activePath }
+        let lastURL = last.flatMap { !isActive($0) && isOpenable($0) ? $0 : nil }
+        let recentURLs = RecentProjects.displayable(recent.filter { !isActive($0) },
+                                                    excluding: lastURL,
                                                     limit: recentLimit, isOpenable: isOpenable)
         return ProjectMenuRows(last: lastURL.map(item), recent: recentURLs.map(item))
     }

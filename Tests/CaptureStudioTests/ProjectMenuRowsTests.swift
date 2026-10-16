@@ -23,4 +23,14 @@ import Foundation
         let rows = ProjectMenuRows.load(recent: [url("a")], last: url("a"), isOpenable: { _ in false })
         #expect(rows.isEmpty)
     }
+
+    @Test func activeRecordingIsHidden() {
+        let a = url("a"), b = url("b")
+        // Spelled differently (trailing slash) — compared by standardized path.
+        let active = URL(fileURLWithPath: "/tmp/a.capturestudio/")
+        let rows = ProjectMenuRows.load(recent: [a, b], last: a, activeRecording: active,
+                                        isOpenable: { _ in true })
+        #expect(rows.last == nil)
+        #expect(rows.recent.map(\.title) == ["b"])
+    }
 }

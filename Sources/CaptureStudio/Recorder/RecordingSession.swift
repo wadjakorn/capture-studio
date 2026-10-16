@@ -17,6 +17,28 @@ enum AreaSelection {
     case required
 }
 
+extension RecordingSession.State {
+    /// Whether the session owns an on-disk bundle it is still writing (or about
+    /// to). `.idle`/`.failed` never do: by the time `stop()` flips to `.idle`
+    /// meta.json is written, so the bundle is safe to open.
+    var holdsActiveBundle: Bool {
+        switch self {
+        case .arming, .armed, .preparing, .recording, .finishing: return true
+        case .idle, .failed: return false
+        }
+    }
+
+    /// Whether quitting may delete the session's bundle. Only before writers
+    /// flip on is it empty; `.recording`/`.finishing` hold a real take (finishing
+    /// is mid-finalize, and deleting it would lose the recording).
+    var bundleIsDisposableOnQuit: Bool {
+        switch self {
+        case .arming, .armed, .preparing: return true
+        case .idle, .recording, .finishing, .failed: return false
+        }
+    }
+}
+
 /// Orchestrates a recording: owns the bundle, all recorders, and the
 /// state machine. Screen track is mandatory; camera/mic/events degrade
 /// independently — a partial bundle beats a lost recording.
@@ -53,9 +75,53 @@ final class RecordingSession: ObservableObject {
     /// There is only ever one.
     static weak var shared: RecordingSession?
 
-    init() { Self.shared = self }
+    init() {
+        Self.shared = self
+        CaptureContentWindows.shared.onChange = { [weak self] in
+            self?.requestFilterRefresh()
+        }
+    }
+
+    /// Serializes `ScreenRecorder.refreshFilter()` passes; see `RefreshCoalescer`.
+    private var filterRefresh = RefreshCoalescer()
+
+    /// Re-applies the content-window allowlist to the live stream. Only while
+    /// recording: before that the stream doesn't exist (start() builds its
+    /// filter fresh), after it the stream is being finalized.
+    private func requestFilterRefresh() {
+        guard isRecording, filterRefresh.request() else { return }
+        Task { @MainActor [weak self] in
+            var again = true
+            while again {
+                guard let self else { return }
+                // Re-read each pass: a rerun may outlive the recording that
+                // queued it, and must not touch a later session's recorder
+                // outside `.recording`.
+                if self.isRecording, let recorder = self.screenRecorder {
+                    await recorder.refreshFilter()
+                }
+                again = self.filterRefresh.finish()
+            }
+        }
+    }
 
     private var bundle: ProjectBundle?
+    /// URL of the bundle this session created, set the moment the directory
+    /// exists. Unlike `bundle` (only assigned once arming completes) it covers
+    /// the warm-up window, so teardown can delete it and Studio can refuse it.
+    private var pendingBundleURL: URL?
+    /// Bumped by every `arm()` and `cancelArming()`. An in-flight arm compares
+    /// it after each await: a mismatch means it was cancelled (or superseded)
+    /// while suspended and must abandon its local work. `state == .arming` alone
+    /// isn't enough — cancel's own teardown awaits while state is still `.arming`.
+    private var armGeneration = 0
+
+    /// The bundle Studio must not open: the one this session is still writing.
+    /// Derived from `state`, not `bundle` — `stop()` auto-opens the finished
+    /// recording after `.idle` but before it clears `bundle`.
+    var activeBundleURL: URL? {
+        state.holdsActiveBundle ? pendingBundleURL : nil
+    }
     private var screenRecorder: ScreenRecorder?
     private var cameraRecorder: CameraRecorder?
     private var micRecorder: MicRecorder?
@@ -107,11 +173,15 @@ final class RecordingSession: ObservableObject {
         guard state == .idle || isFailed else { return }
         RecordingSavedToast.dismiss()
         state = .arming
+        armGeneration &+= 1
+        let generation = armGeneration
         warnings = []
         Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio) region=\(region != nil) controls=\(previewControls) area=\(String(describing: areaSelection), privacy: .public)")
 
         do {
             let (items, scDisplays) = try await DeviceDiscovery.displays()
+            // Cancelled while discovering — nothing local exists yet.
+            guard armIsCurrent(generation) else { return }
             guard let item = items.first(where: { $0.id == displayID }),
                   let scDisplay = scDisplays[displayID] else {
                 state = .failed("Selected display is no longer available.")
@@ -126,6 +196,7 @@ final class RecordingSession: ObservableObject {
                 withIntermediateDirectories: true
             )
             let bundle = try ProjectBundle.createNew()
+            pendingBundleURL = bundle.url
 
             // Construct the screen recorder but DO NOT start it yet — the
             // SCStream starts in beginRecording(). System audio rides it.
@@ -156,6 +227,13 @@ final class RecordingSession: ObservableObject {
                 )
                 do {
                     try await recorder.warmUp()
+                    // Cancelled during warm-up: the recorder is still local, so
+                    // cancel's teardown never saw it — discard it here.
+                    guard armIsCurrent(generation) else {
+                        await recorder.discard()
+                        abandonArm(bundle)
+                        return
+                    }
                     cameraRecorder = recorder
                     // Live preview off the recorder's own session — excluded
                     // from screen.mp4 because the whole app is excluded.
@@ -171,15 +249,29 @@ final class RecordingSession: ObservableObject {
                         Log.recorder.error("mic on camera session failed: \(w, privacy: .public)")
                         // Mic couldn't attach to the camera session — try a
                         // standalone session for an unrelated mic device.
-                        if let micDevice { await warmUpStandaloneMic(micDevice, bundle: bundle) }
+                        if let micDevice {
+                            await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+                        }
                     }
                 } catch {
+                    guard armIsCurrent(generation) else {
+                        abandonArm(bundle)
+                        return
+                    }
                     Log.recorder.error("camera warm-up failed: \(error.localizedDescription, privacy: .public)")
                     warnings.append("Camera not recorded: \(error.localizedDescription)")
-                    if let micDevice { await warmUpStandaloneMic(micDevice, bundle: bundle) }
+                    if let micDevice {
+                        await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+                    }
                 }
             } else if let micDevice {
-                await warmUpStandaloneMic(micDevice, bundle: bundle)
+                await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+            }
+            // Covers every mic warm-up above. A camera already handed to
+            // `cameraRecorder` was torn down by the cancel itself.
+            guard armIsCurrent(generation) else {
+                abandonArm(bundle)
+                return
             }
 
             // Outline the captured region so the user sees the bounds during
@@ -229,10 +321,26 @@ final class RecordingSession: ObservableObject {
             state = .armed
             Log.recorder.info("armed: \(bundle.url.lastPathComponent, privacy: .public)")
         } catch {
+            // Cancelled meanwhile → the cancel already tore down; don't clobber
+            // its `.idle` (or a newer arm) with this stale failure.
+            guard armIsCurrent(generation) else { return }
             Log.recorder.error("arm failed: \(error.localizedDescription, privacy: .public)")
             await tearDownArmed()
-            state = .failed(error.localizedDescription)
+            if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
         }
+    }
+
+    /// True while the arm() that took `generation` is still the live one.
+    private func armIsCurrent(_ generation: Int) -> Bool {
+        state == .arming && armGeneration == generation
+    }
+
+    /// A cancelled arm's own cleanup: drop its bundle directory (cancel's
+    /// teardown may already have) without touching state, which the cancel owns.
+    private func abandonArm(_ bundle: ProjectBundle) {
+        Log.recorder.info("arm abandoned (cancelled during warm-up)")
+        try? FileManager.default.removeItem(at: bundle.url)
+        if pendingBundleURL == bundle.url { pendingBundleURL = nil }
     }
 
     // MARK: - Live drag mode (passive preview ⇄ modal area selection)
@@ -324,17 +432,21 @@ final class RecordingSession: ObservableObject {
     }
 
     /// Builds the screen recorder from the final interactive-area selection at
-    /// record time. Returns false (and sets `.failed`) if the display vanished.
+    /// record time. Returns false (tearing the armed session down, then
+    /// `.failed`) if the display vanished, or quietly if a cancel won the race.
     private func buildDeferredScreenRecorder() async -> Bool {
         guard let bundle, let displayID = armedDisplayID else {
-            state = .failed("No area selected.")
+            await failArmed("No area selected.")
             return false
         }
         do {
             let (items, scDisplays) = try await DeviceDiscovery.displays()
+            // Cancelled while discovering: the cancel tore down already, so
+            // building now would resurrect a recorder + outline on an idle session.
+            guard isArmed else { return false }
             guard let item = items.first(where: { $0.id == displayID }),
                   let scDisplay = scDisplays[displayID] else {
-                state = .failed("Selected display is no longer available.")
+                await failArmed("Selected display is no longer available.")
                 return false
             }
             // nil here means the drag covered the whole display → full-display
@@ -370,9 +482,18 @@ final class RecordingSession: ObservableObject {
             return true
         } catch {
             Log.recorder.error("deferred screen recorder build failed: \(error.localizedDescription, privacy: .public)")
-            state = .failed(error.localizedDescription)
+            await failArmed(error.localizedDescription)
             return false
         }
+    }
+
+    /// Fails an armed session without leaking it: warmed camera/mic, preview
+    /// panels and the empty bundle all go before `.failed`. Skips entirely if a
+    /// cancel (or a newer arm) already owns the session.
+    private func failArmed(_ message: String) async {
+        guard isArmed else { return }
+        await tearDownArmed()
+        if isArmed { state = .failed(message) }
     }
 
     /// Flips the warmed sources into recording: starts the screen SCStream
@@ -416,6 +537,9 @@ final class RecordingSession: ObservableObject {
         _ = displayInfo  // retained for stop(); already stored
         _ = bundle
         state = .recording(startedAt: Date())
+        // Content windows that opened/closed during `.preparing` changed after
+        // start() built its filter and their notifications were ignored then.
+        requestFilterRefresh()
         Log.recorder.info("recording: \(bundle.url.lastPathComponent, privacy: .public)")
     }
 
@@ -423,8 +547,13 @@ final class RecordingSession: ObservableObject {
     /// preview, deletes the abandoned bundle. → `.idle`.
     func cancelArming() async {
         guard isArmed || state == .arming else { return }
+        // Invalidate any in-flight arm() before the first await, so it can't
+        // resume and repopulate the session being torn down.
+        armGeneration &+= 1
+        let generation = armGeneration
         await tearDownArmed()
-        state = .idle
+        // A later cancel or arm took over while we awaited → it owns `state`.
+        if armGeneration == generation { state = .idle }
     }
 
     // MARK: - Shared toggle (popup button + global hotkey)
@@ -586,18 +715,26 @@ final class RecordingSession: ObservableObject {
         armedSystemAudio = false
         armedAreaSelection = .unavailable
         eventTracker.cancel()
-        await cameraRecorder?.discard()
-        await micRecorder?.discard()
-        if let url = bundle?.url {
-            try? FileManager.default.removeItem(at: url)
-        }
+        // Detach everything before the first await: a concurrent teardown (cancel
+        // racing a failure path) then finds nothing left, so nothing is discarded
+        // or deleted twice. The bundle is deleted via `pendingBundleURL` because
+        // `bundle` is still nil during warm-up.
+        let camera = cameraRecorder
+        let mic = micRecorder
+        let bundleURL = pendingBundleURL
         bundle = nil
+        pendingBundleURL = nil
         screenRecorder = nil
         cameraRecorder = nil
         micRecorder = nil
         displayInfo = nil
         armedRegion = nil
         armedDisplayID = nil
+        await camera?.discard()
+        await mic?.discard()
+        if let bundleURL {
+            try? FileManager.default.removeItem(at: bundleURL)
+        }
     }
 
     /// Stops all recorders, finalizes files, writes meta.json LAST
@@ -658,8 +795,12 @@ final class RecordingSession: ObservableObject {
             lastBundleURL = bundle.url
             RecentProjectsStore.shared.noteRecorded(bundle.url)
             state = .idle
-            switch PostRecordingAction.decide(openStudioAfterRecording: AppSettings.openStudioAfterRecording) {
+            switch PostRecordingAction.decide(
+                openStudioAfterRecording: AppSettings.openStudioAfterRecording,
+                studioWindowVisible: StudioLauncher.hasVisibleStudioWindow
+            ) {
             case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
+            case .openStudioBehind: StudioLauncher.open(bundleURL: bundle.url, placement: .behindCurrent)
             case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
             }
             if let streamError {
@@ -683,6 +824,7 @@ final class RecordingSession: ObservableObject {
         armedAreaSize = nil
         armedAreaSelection = .unavailable
         self.bundle = nil
+        self.pendingBundleURL = nil
         self.screenRecorder = nil
         self.cameraRecorder = nil
         self.micRecorder = nil
@@ -703,19 +845,27 @@ final class RecordingSession: ObservableObject {
     /// Warms up a mic on its own session (no camera, or camera-hosted mic
     /// failed to attach). Best-effort: failure is a warning. The writer is
     /// created later in `beginRecording()`.
-    private func warmUpStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle) async {
+    /// Only runs inside `arm()`: if that arm is cancelled during warm-up the
+    /// recorder is discarded here instead of being handed to an idle session.
+    private func warmUpStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle,
+                                     generation: Int) async {
         let recorder = MicRecorder(device: device, outputURL: bundle.micURL)
         do {
             try await recorder.warmUp()
+            guard armIsCurrent(generation) else {
+                await recorder.discard()
+                return
+            }
             micRecorder = recorder
         } catch {
+            guard armIsCurrent(generation) else { return }
             Log.recorder.error("mic warm-up failed: \(error.localizedDescription, privacy: .public)")
             warnings.append("Microphone not recorded: \(error.localizedDescription)")
         }
     }
 
     /// Best-effort synchronous teardown for app termination while armed or
-    /// recording: stop sessions and remove an unfinalized bundle.
+    /// recording: stop sessions and remove a bundle that never got writers.
     func tearDownForQuit() {
         previewPanel?.close()
         previewPanel = nil
@@ -725,8 +875,10 @@ final class RecordingSession: ObservableObject {
         previewHUD = nil
         areaOverlay?.dismiss()
         areaOverlay = nil
-        if !isRecording, let url = bundle?.url {
-            // Armed but not yet recording → the bundle is empty; drop it.
+        if state.bundleIsDisposableOnQuit, let url = pendingBundleURL {
+            // Arming/armed/preparing → the bundle is empty; drop it. Never while
+            // finishing: that bundle is a real recording being finalized.
+            // `pendingBundleURL`, not `bundle`: the latter is nil during warm-up.
             try? FileManager.default.removeItem(at: url)
         }
     }
