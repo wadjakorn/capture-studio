@@ -64,11 +64,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             let action = ReopenAction.decide(
                 hasVisibleAppWindow: StudioLauncher.hasOpenStudioWindow || DashboardLauncher.isVisible,
-                hasMiniaturizedStudio: StudioLauncher.hasMiniaturizedStudioWindow)
+                hasMiniaturizedWindow: StudioLauncher.hasMiniaturizedStudioWindow
+                    || DashboardLauncher.miniaturizedWindow != nil)
             Log.app.info("Reopen: \(String(describing: action), privacy: .public)")
             switch action {
             case .none: break
-            case .restoreStudio: StudioLauncher.restoreMostRecentMiniaturized()
+            case .restoreMinimized: StudioLauncher.restoreMiniaturizedWindows()
             case .showDashboard: DashboardLauncher.show()
             }
         }

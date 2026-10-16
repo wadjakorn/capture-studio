@@ -14,6 +14,12 @@ enum DashboardLauncher {
         return window.isVisible && !window.isMiniaturized
     }
 
+    /// The Dashboard window when it is minimized to the Dock, else nil.
+    static var miniaturizedWindow: NSWindow? {
+        guard let window = controller?.window, window.isMiniaturized else { return nil }
+        return window
+    }
+
     /// Closes the window as if the user clicked its close button, so the
     /// willClose cleanup (Dock presence, capture registration) runs.
     static func close() {
@@ -77,6 +83,7 @@ enum DashboardLauncher {
         DockPresence.shared.retain()
         // Dashboard is content, like Studio: it may appear in the recording.
         CaptureContentWindows.shared.register(window)
+        WindowRecency.track(window)
 
         var token: NSObjectProtocol?
         token = NotificationCenter.default.addObserver(
