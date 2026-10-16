@@ -27,6 +27,16 @@ extension RecordingSession.State {
         case .idle, .failed: return false
         }
     }
+
+    /// Whether quitting may delete the session's bundle. Only before writers
+    /// flip on is it empty; `.recording`/`.finishing` hold a real take (finishing
+    /// is mid-finalize, and deleting it would lose the recording).
+    var bundleIsDisposableOnQuit: Bool {
+        switch self {
+        case .arming, .armed, .preparing: return true
+        case .idle, .recording, .finishing, .failed: return false
+        }
+    }
 }
 
 /// Orchestrates a recording: owns the bundle, all recorders, and the
@@ -855,7 +865,7 @@ final class RecordingSession: ObservableObject {
     }
 
     /// Best-effort synchronous teardown for app termination while armed or
-    /// recording: stop sessions and remove an unfinalized bundle.
+    /// recording: stop sessions and remove a bundle that never got writers.
     func tearDownForQuit() {
         previewPanel?.close()
         previewPanel = nil
@@ -865,8 +875,9 @@ final class RecordingSession: ObservableObject {
         previewHUD = nil
         areaOverlay?.dismiss()
         areaOverlay = nil
-        if !isRecording, let url = pendingBundleURL {
-            // Arming/armed, not yet recording → the bundle is empty; drop it.
+        if state.bundleIsDisposableOnQuit, let url = pendingBundleURL {
+            // Arming/armed/preparing → the bundle is empty; drop it. Never while
+            // finishing: that bundle is a real recording being finalized.
             // `pendingBundleURL`, not `bundle`: the latter is nil during warm-up.
             try? FileManager.default.removeItem(at: url)
         }

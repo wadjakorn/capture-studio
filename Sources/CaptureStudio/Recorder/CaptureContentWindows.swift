@@ -16,7 +16,7 @@ struct ContentWindowInfo: Equatable, Sendable {
 /// excluded wholesale and only these IDs are excepted — an allowlist, so any
 /// chrome (popup, HUD, overlays, toast, future panels) stays out by default.
 enum CaptureFilterPolicy {
-    /// IDs of visible, non-minimized, ordered-in content windows plus their
+    /// IDs of ordered-in (covered or not), non-minimized content windows plus their
     /// sheets, limited to what ScreenCaptureKit currently lists (`available` =
     /// on-screen `SCWindow.windowID`s of our pid; an `SCWindow` can only be
     /// excepted if SCK knows about it).
@@ -92,8 +92,10 @@ final class CaptureContentWindows {
 
     private init() {}
 
-    /// Occlusion covers show/close/miniaturize/Space switch/hide-unhide;
-    /// sheets don't change the parent's occlusion, so they're observed apart.
+    /// Occlusion notifications are refresh *triggers* only (they fire on
+    /// show/close/miniaturize/Space switch/hide-unhide) — the snapshot doesn't
+    /// read occlusion. Sheets don't change the parent's occlusion, so they're
+    /// observed apart.
     func register(_ window: NSWindow) {
         let key = ObjectIdentifier(window)
         if let existing = entries[key] {
@@ -120,7 +122,12 @@ final class CaptureContentWindows {
             }
         }
         entries[key] = Entry(window: window, observers: observers)
-        onChange?()
+        // Deferred like the notifications: callers register before ordering
+        // the window in, so it has no window number (-1) yet and an immediate
+        // refresh would leave it out of the video.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.onChange?() }
+        }
     }
 
     func unregister(_ window: NSWindow) {
@@ -129,11 +136,16 @@ final class CaptureContentWindows {
         onChange?()
     }
 
+    /// `isVisible` is "ordered in and not minimized", NOT occlusion: a Studio
+    /// window fully covered by another app must stay excepted, or on Cmd-Tab
+    /// back the video shows what was behind it until a refresh lands.
+    /// Off-Space/hidden windows are dropped by ScreenRecorder's `isOnScreen`
+    /// narrowing of SCK's list instead.
     var snapshot: [ContentWindowInfo] {
         entries.values.compactMap(\.window).map { window in
             ContentWindowInfo(
                 windowNumber: window.windowNumber,
-                isVisible: window.occlusionState.contains(.visible) && !window.isMiniaturized,
+                isVisible: window.isVisible && !window.isMiniaturized,
                 isMiniaturized: window.isMiniaturized,
                 sheetNumbers: window.sheets.map(\.windowNumber)
             )

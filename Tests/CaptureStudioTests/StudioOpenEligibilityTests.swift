@@ -62,4 +62,30 @@ import Foundation
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(StudioOpenEligibility.evaluate(url: bundle.url, activeRecording: nil) == .notFinalized)
     }
+
+    /// Quitting must only discard a bundle that never got writers. `.finishing`
+    /// is a real recording being finalized — deleting it would lose the take.
+    @Test func onlyPreRecordingBundlesAreDisposableOnQuit() {
+        #expect(RecordingSession.State.arming.bundleIsDisposableOnQuit)
+        #expect(RecordingSession.State.armed.bundleIsDisposableOnQuit)
+        #expect(RecordingSession.State.preparing.bundleIsDisposableOnQuit)
+        #expect(!RecordingSession.State.recording(startedAt: .now).bundleIsDisposableOnQuit)
+        #expect(!RecordingSession.State.finishing.bundleIsDisposableOnQuit)
+        #expect(!RecordingSession.State.idle.bundleIsDisposableOnQuit)
+        #expect(!RecordingSession.State.failed("x").bundleIsDisposableOnQuit)
+    }
+
+    @Test func deletedBundleIsMissing() throws {
+        let (bundle, dir) = try makeBundle(finalized: true)
+        try FileManager.default.removeItem(at: dir)
+        #expect(StudioOpenEligibility.evaluate(url: bundle.url, activeRecording: nil) == .missing)
+    }
+
+    @Test func missingWinsOverNotFinalized() {
+        // A path that was never there also lacks meta.json; "can't be found"
+        // is the accurate answer, not "incomplete".
+        let gone = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).capturestudio", isDirectory: true)
+        #expect(StudioOpenEligibility.evaluate(url: gone, activeRecording: nil) == .missing)
+    }
 }

@@ -7,16 +7,26 @@ enum StudioOpenEligibility: Equatable {
     case ok
     /// The session is still writing this bundle (arming through finishing).
     case recordingInProgress
+    /// The bundle directory is gone (moved, renamed, or deleted since it was
+    /// listed/recent).
+    case missing
     /// No meta.json — an aborted or crashed recording that can never load.
     case notFinalized
 
     /// Active-recording is checked first: a bundle mid-recording also lacks
-    /// meta.json, and "in progress" is the more accurate answer. Paths are
-    /// compared standardized so a trailing slash or `..` can't slip past.
+    /// meta.json, and "in progress" is the more accurate answer. Missing comes
+    /// before not-finalized: a vanished bundle also lacks meta.json, but
+    /// "incomplete" would be the wrong explanation. Paths are compared
+    /// standardized so a trailing slash or `..` can't slip past.
     static func evaluate(url: URL, activeRecording: URL?) -> StudioOpenEligibility {
         if let activeRecording,
            activeRecording.standardizedFileURL.path == url.standardizedFileURL.path {
             return .recordingInProgress
+        }
+        var isDirectory: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            || !isDirectory.boolValue {
+            return .missing
         }
         if !ProjectBundle(url: url).isFinalized { return .notFinalized }
         return .ok
@@ -126,6 +136,7 @@ enum StudioLauncher {
         let alert = NSAlert()
         switch eligibility {
         case .recordingInProgress: alert.messageText = "This recording is still in progress."
+        case .missing: alert.messageText = "This project can't be found. It may have been moved or deleted."
         case .notFinalized: alert.messageText = "This recording is incomplete and can't be opened."
         case .ok: return
         }
