@@ -27,6 +27,13 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: "recordSystemAudio") }
     }
 
+    /// Open the Studio window automatically when a recording finishes. OFF shows
+    /// a "Recording saved" toast instead, without stealing focus.
+    static var openStudioAfterRecording: Bool {
+        get { defaults.object(forKey: "openStudioAfterRecording") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "openStudioAfterRecording") }
+    }
+
     /// Countdown length before recording starts; 0 disables it.
     static var countdownSeconds: Int {
         get { defaults.object(forKey: "countdownSeconds") as? Int ?? 3 }
