@@ -13,6 +13,7 @@ struct RecorderMenuView: View {
     @State private var microphones: [AVCaptureDevice] = []
     @State private var selectedMicID: String?
     @State private var systemAudioEnabled = AppSettings.recordSystemAudio
+    @State private var openStudioAfterRecording = AppSettings.openStudioAfterRecording
     @State private var captureAreaEnabled = AppSettings.captureAreaEnabled
     @State private var captureRegion: CGRect? = AppSettings.captureRegion
     @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
@@ -97,6 +98,7 @@ struct RecorderMenuView: View {
         .onChange(of: selectedCameraID) { _, id in AppSettings.lastCameraID = id }
         .onChange(of: selectedMicID) { _, id in AppSettings.lastMicID = id }
         .onChange(of: systemAudioEnabled) { _, on in AppSettings.recordSystemAudio = on }
+        .onChange(of: openStudioAfterRecording) { _, on in AppSettings.openStudioAfterRecording = on }
         .onChange(of: captureAreaEnabled) { _, on in AppSettings.captureAreaEnabled = on }
         .onChange(of: captureRegion) { _, r in AppSettings.captureRegion = r }
         .onChange(of: captureRegionDisplayID) { _, id in AppSettings.captureRegionDisplayID = id }
@@ -284,6 +286,18 @@ struct RecorderMenuView: View {
                 Text("System Audio")
                 Spacer()
                 Toggle("System Audio", isOn: $systemAudioEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "macwindow")
+                    .frame(width: 16)
+                    .foregroundStyle(.secondary)
+                Text("Open Studio after recording")
+                Spacer()
+                Toggle("Open Studio after recording", isOn: $openStudioAfterRecording)
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .labelsHidden()
