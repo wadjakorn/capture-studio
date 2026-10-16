@@ -21,6 +21,9 @@ struct RecorderMenuView: View {
     @State private var showDisplayMenu = false
     @State private var showCameraMenu = false
     @State private var showMicMenu = false
+    @State private var showRecentMenu = false
+    @ObservedObject private var recents = RecentProjectsStore.shared
+    @State private var projectRows = ProjectMenuRows.empty
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -47,6 +50,8 @@ struct RecorderMenuView: View {
                         .foregroundStyle(.orange)
                 }
             }
+
+            projectsSection
 
             Divider()
 
@@ -76,6 +81,18 @@ struct RecorderMenuView: View {
         .padding(14)
         .frame(width: 300)
         .task { await refreshDevices() }
+        // Openability + meta reads touch the disk (possibly a network volume),
+        // so they run off-main and only the result lands in @State.
+        .task(id: ProjectsKey(recent: recents.recent, last: recents.lastRecorded)) {
+            let recent = recents.recent, last = recents.lastRecorded
+            let rows = await Task.detached(priority: .userInitiated) {
+                ProjectMenuRows.load(recent: recent, last: last)
+            }.value
+            // A superseded task's detached load still finishes; don't let it
+            // overwrite rows from the newer one.
+            guard !Task.isCancelled else { return }
+            projectRows = rows
+        }
         .onChange(of: selectedDisplayID) { _, id in AppSettings.lastDisplayID = id }
         .onChange(of: selectedCameraID) { _, id in AppSettings.lastCameraID = id }
         .onChange(of: selectedMicID) { _, id in AppSettings.lastMicID = id }
@@ -363,6 +380,71 @@ struct RecorderMenuView: View {
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder
+    private var projectsSection: some View {
+        if !projectRows.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Projects")
+
+                if let last = projectRows.last {
+                    Button {
+                        StudioLauncher.open(bundleURL: last.url)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "play.rectangle")
+                                .frame(width: 16)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Last recording").font(.callout)
+                                Text(projectSubtitle(last))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if !projectRows.recent.isEmpty {
+                    dropdown("clock.arrow.circlepath", selection: "Recent",
+                             isPresented: $showRecentMenu) {
+                        ForEach(projectRows.recent) { item in
+                            pickRow(projectSubtitle(item), selected: false) {
+                                showRecentMenu = false
+                                StudioLauncher.open(bundleURL: item.url)
+                            }
+                        }
+                        Divider().padding(.vertical, 4)
+                        pickRow("Clear Recents", selected: false) {
+                            showRecentMenu = false
+                            recents.clearRecents()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
+    private func relativeDate(_ item: ProjectMenuItem) -> String? {
+        item.date.map { Self.relativeFormatter.localizedString(for: $0, relativeTo: Date()) }
+    }
+
+    private func projectSubtitle(_ item: ProjectMenuItem) -> String {
+        relativeDate(item).map { "\(item.title) · \($0)" } ?? item.title
+    }
+
     private func sectionHeader(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.caption2.weight(.semibold))
@@ -532,5 +614,48 @@ struct RecorderMenuView: View {
             displays = []
             selectedDisplayID = nil
         }
+    }
+}
+
+/// Equatable trigger for the off-main rows reload (URLs compared by
+/// standardized path, never `==`).
+private struct ProjectsKey: Equatable {
+    let recent: [String]
+    let last: String?
+    init(recent: [URL], last: URL?) {
+        self.recent = recent.map { $0.standardizedFileURL.path }
+        self.last = last?.standardizedFileURL.path
+    }
+}
+
+struct ProjectMenuItem: Identifiable, Equatable {
+    var id: String { url.standardizedFileURL.path }
+    let url: URL
+    let title: String
+    let date: Date?
+}
+
+/// What the popup's Projects section shows. Built off the main thread: it
+/// stats bundles and reads meta.json, either of which can block on a slow volume.
+struct ProjectMenuRows: Equatable {
+    static let empty = ProjectMenuRows(last: nil, recent: [])
+    static let recentLimit = 5
+
+    let last: ProjectMenuItem?
+    let recent: [ProjectMenuItem]
+    var isEmpty: Bool { last == nil && recent.isEmpty }
+
+    static func load(recent: [URL], last: URL?,
+                     isOpenable: (URL) -> Bool = RecentProjects.isOpenable) -> ProjectMenuRows {
+        let lastURL = last.flatMap { isOpenable($0) ? $0 : nil }
+        let recentURLs = RecentProjects.displayable(recent, excluding: lastURL,
+                                                    limit: recentLimit, isOpenable: isOpenable)
+        return ProjectMenuRows(last: lastURL.map(item), recent: recentURLs.map(item))
+    }
+
+    private static func item(_ url: URL) -> ProjectMenuItem {
+        let date = (try? ProjectBundle(url: url).loadMeta().recordedAt)
+            ?? (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return ProjectMenuItem(url: url, title: url.deletingPathExtension().lastPathComponent, date: date)
     }
 }
