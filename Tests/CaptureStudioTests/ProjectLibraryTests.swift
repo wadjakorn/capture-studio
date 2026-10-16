@@ -134,4 +134,31 @@ import Foundation
         #expect(ProjectLibrary.duplicateName(for: "X", existing: ["X", "X copy"]) == "X copy 2")
         #expect(ProjectLibrary.duplicateName(for: "X", existing: ["X copy", "X copy 2"]) == "X copy 3")
     }
+
+    @Test func duplicateNameIsCaseInsensitive() {
+        #expect(ProjectLibrary.duplicateName(for: "X", existing: ["x copy"]) == "X copy 2")
+    }
+
+    @Test func sortTiesBreakById() {
+        let d = Date(timeIntervalSince1970: 100)
+        let a = summary("same", at: d, size: 5), b = summary("same", at: d, size: 5)
+        let c = summary("zz", at: d, size: 5)
+        for sort in [ProjectSort.newest, .oldest, .name, .size] {
+            let one = ProjectLibrary.sorted([c, b, a], by: sort).map(\.id)
+            let two = ProjectLibrary.sorted([a, c, b], by: sort).map(\.id)
+            #expect(one == two)
+        }
+    }
+
+    @Test func activeRecordingFallsBackToCreationDate() throws {
+        let dir = try makeTmp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let active = try makeBundle("live", in: dir, meta: nil)
+        let result = ProjectLibrary.scan(directory: dir, extra: [], activeRecording: active.url)
+        let item = try #require(result.first)
+        let date = try #require(item.recordedAt)
+        #expect(item.status == .recording)
+        let groups = ProjectLibrary.grouped(result, now: date)
+        #expect(groups.map(\.title) == ["Today"])
+    }
 }

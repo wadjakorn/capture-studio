@@ -78,6 +78,12 @@ enum ProjectLibrary {
         } else {
             status = .unreadable
         }
+        if recordedAt == nil {
+            // No meta date: fall back to the folder's own time so a live or
+            // leftover bundle still sorts and groups by when it was created.
+            let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+            recordedAt = values?.creationDate ?? values?.contentModificationDate
+        }
         return ProjectSummary(
             url: url,
             name: url.deletingPathExtension().lastPathComponent,
@@ -106,22 +112,32 @@ enum ProjectLibrary {
     static func sorted(_ items: [ProjectSummary], by sort: ProjectSort) -> [ProjectSummary] {
         switch sort {
         case .newest:
-            return items.sorted { dateOrder($0.recordedAt, $1.recordedAt, newestFirst: true) }
+            return items.sorted { dateOrder($0.recordedAt, $1.recordedAt, newestFirst: true) ?? ($0.id < $1.id) }
         case .oldest:
-            return items.sorted { dateOrder($0.recordedAt, $1.recordedAt, newestFirst: false) }
+            return items.sorted { dateOrder($0.recordedAt, $1.recordedAt, newestFirst: false) ?? ($0.id < $1.id) }
         case .name:
-            return items.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            return items.sorted {
+                switch $0.name.localizedStandardCompare($1.name) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: return $0.id < $1.id
+                }
+            }
         case .size:
-            return items.sorted { $0.byteSize > $1.byteSize }
+            return items.sorted { $0.byteSize != $1.byteSize ? $0.byteSize > $1.byteSize : $0.id < $1.id }
         }
     }
 
-    /// Undated entries always sort last, regardless of direction.
-    private static func dateOrder(_ a: Date?, _ b: Date?, newestFirst: Bool) -> Bool {
+    /// Undated entries always sort last, regardless of direction. Returns nil
+    /// on a tie so the caller can break it by id.
+    private static func dateOrder(_ a: Date?, _ b: Date?, newestFirst: Bool) -> Bool? {
         switch (a, b) {
-        case let (a?, b?): return newestFirst ? a > b : a < b
+        case let (a?, b?):
+            if a == b { return nil }
+            return newestFirst ? a > b : a < b
         case (_?, nil): return true
-        default: return false
+        case (nil, _?): return false
+        case (nil, nil): return nil
         }
     }
 
@@ -166,9 +182,11 @@ enum ProjectLibrary {
     }
 
     static func duplicateName(for name: String, existing: Set<String>) -> String {
+        // APFS is case-insensitive by default, so "x copy" collides with "X copy".
+        let taken = Set(existing.map { $0.lowercased() })
         var candidate = "\(name) copy"
         var n = 2
-        while existing.contains(candidate) {
+        while taken.contains(candidate.lowercased()) {
             candidate = "\(name) copy \(n)"
             n += 1
         }
