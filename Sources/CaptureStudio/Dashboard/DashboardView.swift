@@ -6,6 +6,11 @@ struct DashboardView: View {
     @State private var renaming: ProjectSummary?
     @State private var renameText = ""
     @State private var renameError: String?
+    /// Other project names beside the one being renamed, snapshotted when the
+    /// sheet opens so live validation doesn't hit the disk per keystroke.
+    @State private var renameSiblings: Set<String> = []
+    /// A menu action refused because the project is in use: why, and what to do.
+    @State private var blocked: (title: String, message: String)?
     @State private var trashing: ProjectSummary?
     @State private var errorMessage: String?
     /// Single-click selection (one at a time). Esc / empty-space click clears;
@@ -44,6 +49,12 @@ struct DashboardView: View {
             Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("You can restore it from the Trash.")
+        }
+        .alert(blocked?.title ?? "",
+               isPresented: Binding(get: { blocked != nil }, set: { if !$0 { blocked = nil } })) {
+            Button("OK") {}
+        } message: {
+            Text(blocked?.message ?? "")
         }
         .alert("Couldn't complete that",
                isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
@@ -186,43 +197,72 @@ struct DashboardView: View {
 
     @ViewBuilder
     private func menu(for project: ProjectSummary) -> some View {
-        let locked = model.isLocked(project)
-        let lockReason = model.busy.contains(project.id) ? "Duplicating"
-            : project.status == .recording ? "Recording" : "Open in Studio"
         Button("Open") { model.open(project) }
             .disabled(project.status != .ready)
+        // Rename / Duplicate / Trash stay enabled while the project is merely
+        // in use and explain why on click — a disabled menu item can't say
+        // why (menus don't show .help tooltips).
         Button("Rename…") {
-            renameText = project.name
-            renameError = nil
-            renaming = project
+            attempt(.rename, on: project) {
+                renameText = project.name
+                renameError = nil
+                renameSiblings = model.renameSiblings(for: project)
+                renaming = project
+            }
         }
-        .disabled(locked)
-        .help(locked ? lockReason : "")
-        Button("Duplicate") { performAsync { try await model.duplicate(project) } }
-            .disabled(project.status != .ready || model.busy.contains(project.id)
-                       || model.isRecordingLive(project))
+        // Duplicate can never work on these: say so in the item itself.
+        switch project.status {
+        case .incomplete:
+            Button("Duplicate (incomplete recording)") {}.disabled(true)
+        case .unreadable:
+            Button("Duplicate (needs newer version)") {}.disabled(true)
+        case .ready, .recording:
+            Button("Duplicate") {
+                attempt(.duplicate, on: project) {
+                    performAsync { try await model.duplicate(project) }
+                }
+            }
+        }
         Button("Show in Finder") { model.revealInFinder(project) }
         Divider()
         if project.isExternal {
             Button("Remove from Library") { model.removeFromLibrary(project) }
         }
-        Button("Move to Trash", role: .destructive) { trashing = project }
-            .disabled(locked)
-            .help(locked ? lockReason : "")
+        Button("Move to Trash", role: .destructive) {
+            attempt(.trash, on: project) { trashing = project }
+        }
+    }
+
+    /// Runs `action` unless the project is locked right now (checked at click
+    /// time, not when the menu was built); then explains why instead.
+    private func attempt(_ action: ProjectAction, on project: ProjectSummary, _ run: () -> Void) {
+        if let reason = model.lockReason(project, for: action) {
+            blocked = (title: "Can't \(action.title)",
+                       message: reason.message(projectName: project.name, action: action))
+        } else {
+            run()
+        }
     }
 
     // MARK: - Rename
 
     private func renameSheet(_ project: ProjectSummary) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let issue = DashboardModel.renameIssue(renameText, currentName: project.name,
+                                               siblings: renameSiblings)
+        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canCommit = issue == nil && renameError == nil
+            && !trimmed.isEmpty && trimmed != project.name
+        return VStack(alignment: .leading, spacing: 12) {
             Text("Rename Project").font(.headline)
             TextField("Name", text: $renameText)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 280)
-                .onSubmit { commitRename(project) }
+                .onSubmit { if canCommit { commitRename(project) } }
                 .onChange(of: renameText) { _, _ in renameError = nil }
-            if let renameError {
-                Text(renameError).font(.caption).foregroundStyle(.red)
+            if let message = renameError ?? issue {
+                Text(message).font(.caption).foregroundStyle(.red)
+                    .frame(width: 280, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()
@@ -230,6 +270,7 @@ struct DashboardView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Rename") { commitRename(project) }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!canCommit)
             }
         }
         .padding(20)
