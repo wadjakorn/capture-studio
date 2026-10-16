@@ -791,6 +791,8 @@ final class RecordingSession: ObservableObject {
                 recordedAt: Date()
             )
             try bundle.writeMeta(meta)
+            // Fire-and-forget: warms the Dashboard thumbnail without delaying stop().
+            ThumbnailStore.shared.prefetch(bundleURL: bundle.url)
             Log.recorder.info("stop OK: \(bundle.url.lastPathComponent, privacy: .public) tracks=\(tracks.count) warnings=\(self.warnings.count)")
             lastBundleURL = bundle.url
             RecentProjectsStore.shared.noteRecorded(bundle.url)
