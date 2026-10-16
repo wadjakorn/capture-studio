@@ -62,6 +62,13 @@ enum StudioLauncher {
         return NSApp.orderedWindows.first(where: { w in visible.contains(where: { $0 === w }) }) ?? visible.first
     }
 
+    /// Whether a Studio window currently holds this bundle (window identity is
+    /// the standardized path).
+    static func isOpen(_ url: URL) -> Bool {
+        let id = url.standardizedFileURL.path
+        return controllers.contains { $0.window?.identifier?.rawValue == id }
+    }
+
     static func open(bundleURL: URL, placement: StudioWindowPlacement = .front) {
         Log.studio.info("StudioLauncher.open: \(bundleURL.lastPathComponent, privacy: .public)")
         // Every entry point (Open…, Finder/Dock, Recent, toast, auto-open) funnels

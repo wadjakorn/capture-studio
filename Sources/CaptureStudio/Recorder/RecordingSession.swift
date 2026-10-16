@@ -197,6 +197,7 @@ final class RecordingSession: ObservableObject {
             )
             let bundle = try ProjectBundle.createNew()
             pendingBundleURL = bundle.url
+            NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
 
             // Construct the screen recorder but DO NOT start it yet — the
             // SCStream starts in beginRecording(). System audio rides it.
@@ -734,6 +735,7 @@ final class RecordingSession: ObservableObject {
         await mic?.discard()
         if let bundleURL {
             try? FileManager.default.removeItem(at: bundleURL)
+            NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
         }
     }
 
@@ -833,6 +835,7 @@ final class RecordingSession: ObservableObject {
         self.displayInfo = nil
         self.armedRegion = nil
         self.armedDisplayID = nil
+        NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
     }
 
     func resetFailure() {
