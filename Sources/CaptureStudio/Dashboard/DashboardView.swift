@@ -8,6 +8,10 @@ struct DashboardView: View {
     @State private var renameError: String?
     @State private var trashing: ProjectSummary?
     @State private var errorMessage: String?
+    /// Single-click selection (one at a time). Esc / empty-space click clears;
+    /// Return opens it.
+    @State private var selectedID: String?
+    @FocusState private var searchFocused: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 200, maximum: 280), spacing: 16)]
 
@@ -58,6 +62,7 @@ struct DashboardView: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search", text: $model.query)
                     .textFieldStyle(.plain)
+                    .focused($searchFocused)
                 if !model.query.isEmpty {
                     Button { model.query = "" } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -108,34 +113,73 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                if model.sort == .newest || model.sort == .oldest {
-                    let groups = ProjectLibrary.grouped(items, now: Date())
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(groups, id: \.title) { group in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(group.title.uppercased())
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                grid(group.items)
+            GeometryReader { proxy in
+                ScrollView {
+                    Group {
+                        if model.sort == .newest || model.sort == .oldest {
+                            let groups = ProjectLibrary.grouped(items, now: Date())
+                            VStack(alignment: .leading, spacing: 18) {
+                                ForEach(groups, id: \.title) { group in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(group.title.uppercased())
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        grid(group.items)
+                                    }
+                                }
                             }
+                        } else {
+                            grid(items)
                         }
                     }
                     .padding(16)
-                } else {
-                    grid(items).padding(16)
+                    // Fill the viewport so a click on empty space below short
+                    // content still lands here and clears the selection.
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedID = nil }
                 }
             }
+            .background { selectionKeys(items) }
+        }
+    }
+
+    /// Return opens / Esc clears the selected card. Hidden key-equivalent
+    /// buttons work wherever focus is, unlike onKeyPress; they exist only while
+    /// a card is selected and stand down while the search field is typing.
+    @ViewBuilder
+    private func selectionKeys(_ items: [ProjectSummary]) -> some View {
+        if let selectedID, !searchFocused {
+            let selected = items.first { $0.id == selectedID }
+            Group {
+                Button("") { if let selected { model.open(selected) } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(selected?.status != .ready)
+                Button("") { self.selectedID = nil }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
     }
 
     private func grid(_ items: [ProjectSummary]) -> some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
             ForEach(items) { project in
-                ProjectCard(project: project, busy: model.busy.contains(project.id))
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { model.open(project) }
-                    .contextMenu { menu(for: project) }
+                Button {
+                    // Fires per click; the second click of a double-click
+                    // carries clickCount 2. Selecting immediately (no wait
+                    // for a possible double-click) keeps the click snappy.
+                    selectedID = project.id
+                    if (NSApp.currentEvent?.clickCount ?? 1) >= 2 { model.open(project) }
+                } label: {
+                    ProjectCard(project: project,
+                                busy: model.busy.contains(project.id),
+                                selected: selectedID == project.id)
+                }
+                .buttonStyle(ProjectCardButtonStyle())
+                .contextMenu { menu(for: project) }
             }
         }
     }
@@ -214,7 +258,9 @@ struct DashboardView: View {
 private struct ProjectCard: View {
     let project: ProjectSummary
     let busy: Bool
+    let selected: Bool
 
+    @State private var hovering = false
     @State private var thumbnail: CGImage?
     @State private var duration: TimeInterval?
 
@@ -231,35 +277,23 @@ private struct ProjectCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ZStack {
-                Rectangle().fill(Color.primary.opacity(0.08))
-                if let thumbnail, project.status == .ready {
-                    Image(decorative: thumbnail, scale: 1)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } else {
-                    Image(systemName: placeholderSymbol)
-                        .font(.system(size: 28))
-                        .foregroundStyle(.tertiary)
+            // Fixed 16:9 slot that never sizes from the image: every card has
+            // identical geometry whatever the recording's aspect ratio.
+            Color.clear
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .overlay { thumbnailContent }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(alignment: .bottomTrailing) {
+                    if project.status == .ready, let duration {
+                        Text(Self.format(duration))
+                            .font(.caption2.monospacedDigit())
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Capsule().fill(.black.opacity(0.65)))
+                            .foregroundStyle(.white)
+                            .padding(6)
+                    }
                 }
-                statusOverlay
-                if busy {
-                    Rectangle().fill(.black.opacity(0.35))
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(alignment: .bottomTrailing) {
-                if project.status == .ready, let duration {
-                    Text(Self.format(duration))
-                        .font(.caption2.monospacedDigit())
-                        .padding(.horizontal, 5).padding(.vertical, 2)
-                        .background(Capsule().fill(.black.opacity(0.65)))
-                        .foregroundStyle(.white)
-                        .padding(6)
-                }
-            }
 
             HStack(spacing: 4) {
                 Text(project.name).font(.callout.weight(.medium)).lineLimit(1)
@@ -269,17 +303,35 @@ private struct ProjectCard: View {
                         .help("Includes camera")
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {
                 if let date = project.recordedAt {
                     Text(Self.dateFormatter.localizedString(for: date, relativeTo: Date()))
+                    Text("·")
                 }
-                Text("·")
                 Text(Self.sizeFormatter.string(fromByteCount: project.byteSize))
             }
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(6)
+        .background {
+            RoundedRectangle(cornerRadius: 11)
+                .fill(Color.primary.opacity(hovering || selected ? 0.06 : 0))
+                .shadow(color: .black.opacity(hovering ? 0.12 : 0), radius: 4, y: 1)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(hovering ? 0.12 : 0),
+                              lineWidth: selected ? 2.5 : 1)
+        }
+        // Whole card (thumbnail, text, padding) is the click / hover target.
+        .contentShape(RoundedRectangle(cornerRadius: 11))
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.12), value: selected)
         // Lazy per cell: only visible cells run this. Ready projects only —
         // others have no media to read.
         // Keyed on status too: a card that flips to .ready on reload (recording
@@ -292,6 +344,30 @@ private struct ProjectCard: View {
             }
             thumbnail = await ThumbnailStore.shared.image(bundleURL: project.url)
             duration = await ThumbnailStore.shared.duration(bundleURL: project.url)
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnailContent: some View {
+        ZStack {
+            if let thumbnail, project.status == .ready {
+                // Letterboxed on neutral dark so portrait / area captures
+                // show the whole frame.
+                Color(white: 0.11)
+                Image(decorative: thumbnail, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Color.primary.opacity(0.08)
+                Image(systemName: placeholderSymbol)
+                    .font(.system(size: 28))
+                    .foregroundStyle(.tertiary)
+            }
+            statusOverlay
+            if busy {
+                Color.black.opacity(0.35)
+                ProgressView().controlSize(.small)
+            }
         }
     }
 
@@ -334,6 +410,16 @@ private struct ProjectCard: View {
     private static func format(_ t: TimeInterval) -> String {
         let total = Int(t.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Card press feedback: a brief shrink while the mouse is down. Plain
+/// otherwise — the card draws its own hover/selection chrome.
+private struct ProjectCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }
 }
 
