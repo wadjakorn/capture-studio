@@ -81,6 +81,25 @@ enum AppSettings {
         set { set(newValue.map { Int($0) }, forKey: "captureRegionDisplayID") }
     }
 
+    /// The recorder's main source. Falls back to the legacy `lastDisplayID`
+    /// when unset. Setting a display also writes `lastDisplayID` so legacy
+    /// readers stay in sync.
+    static var lastMainSource: MainSource? {
+        get {
+            if let kind = defaults.string(forKey: "lastMainSourceKind"),
+               let id = defaults.string(forKey: "lastMainSourceID"),
+               let source = MainSource(kind: kind, id: id) {
+                return source
+            }
+            return lastDisplayID.map { .display($0) }
+        }
+        set {
+            set(newValue?.storage.kind, forKey: "lastMainSourceKind")
+            set(newValue?.storage.id, forKey: "lastMainSourceID")
+            if let id = newValue?.displayID { lastDisplayID = id }
+        }
+    }
+
     private static func set(_ value: Any?, forKey key: String) {
         if let value {
             defaults.set(value, forKey: key)
