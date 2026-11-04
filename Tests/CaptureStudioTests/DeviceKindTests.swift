@@ -30,5 +30,5 @@ import Testing
                                 deviceType: "AVCaptureDeviceTypeBuiltInWideAngleCamera") == .builtIn)
 }
 @Test func groupTitles() {
-    #expect(DeviceKind.allCases.map(\.groupTitle) == ["Built-in", "Phone", "External", "Virtual"])
+    #expect(DeviceKind.allCases.map(\.groupTitle) == ["Built-in", "Phone", "External", "Virtual", "Phone (Wi-Fi)"])
 }

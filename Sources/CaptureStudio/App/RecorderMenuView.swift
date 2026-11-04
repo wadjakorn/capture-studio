@@ -25,6 +25,10 @@ struct RecorderMenuView: View {
     @State private var showMicMenu = false
     @State private var showRecentMenu = false
     @ObservedObject private var recents = RecentProjectsStore.shared
+    @ObservedObject private var browser = PhoneBrowser.shared
+    /// Browsed phones with a stored pairing (id → name), for "Forget" actions.
+    /// Cached: each lookup is a keychain read.
+    @State private var pairedPhones: [String: String] = [:]
     @State private var projectRows = ProjectMenuRows.empty
 
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -39,7 +43,7 @@ struct RecorderMenuView: View {
                     .font(.subheadline.weight(.medium))
             }
 
-            if permissionGranted || !cameras.isEmpty {
+            if permissionGranted || !cameras.isEmpty || !browser.phones.isEmpty {
                 recorderView
             } else {
                 permissionView
@@ -103,6 +107,7 @@ struct RecorderMenuView: View {
             guard !Task.isCancelled else { return }
             projectRows = rows
         }
+        .onChange(of: browser.phones) { _, _ in refreshPairedPhones() }
         .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasConnectedNotification)) { _ in
             Task { await refreshDevices() }
         }
@@ -268,26 +273,15 @@ struct RecorderMenuView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                 }
-                if !cameras.isEmpty {
-                    Divider().padding(.vertical, 4)
-                    Text("Cameras")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    let groups = DeviceDiscovery.grouped(cameras)
-                    ForEach(groups, id: \.kind) { group in
-                        if groups.count > 1 {
-                            Text(group.kind.groupTitle)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(group.devices, id: \.uniqueID) { device in
-                            pickRow(device.localizedName,
-                                    selected: mainSource == .camera(uniqueID: device.uniqueID)) {
-                                selectMain(.camera(uniqueID: device.uniqueID))
-                                showDisplayMenu = false
-                            }
-                        }
-                    }
+                Divider().padding(.vertical, 4)
+                Text("Cameras")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                rowGroups(DeviceDiscovery.cameraRows(local: cameras, phones: browser.phones,
+                                                     browsing: browser.isBrowsing),
+                          selectedID: mainSource?.cameraID) { id in
+                    selectMain(.camera(uniqueID: id))
+                    showDisplayMenu = false
                 }
             }
 
@@ -306,27 +300,17 @@ struct RecorderMenuView: View {
             .padding(.top, 6)
 
             HStack(alignment: .top, spacing: 6) {
-                dropdown("video", selection: "Front camera: " + deviceLabel(frontCameras, selectedCameraID),
+                dropdown("video", selection: "Front camera: " + cameraLabel(selectedCameraID),
                          isPresented: $showCameraMenu) {
                     pickRow("None", selected: selectedCameraID == nil) {
                         selectedCameraID = nil
                         AppSettings.lastCameraID = nil
                         showCameraMenu = false
                     }
-                    let groups = DeviceDiscovery.grouped(frontCameras)
-                    ForEach(groups, id: \.kind) { group in
-                        if groups.count > 1 {
-                            Text(group.kind.groupTitle)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        ForEach(group.devices, id: \.uniqueID) { device in
-                            pickRow(device.localizedName, selected: selectedCameraID == device.uniqueID) {
-                                selectedCameraID = device.uniqueID
-                                AppSettings.lastCameraID = device.uniqueID
-                                showCameraMenu = false
-                            }
-                        }
+                    rowGroups(frontCameraRows, selectedID: selectedCameraID) { id in
+                        selectedCameraID = id
+                        AppSettings.lastCameraID = id
+                        showCameraMenu = false
                     }
                 }
                 Button {
@@ -349,27 +333,19 @@ struct RecorderMenuView: View {
                 }
             }
 
-            dropdown("mic", selection: deviceLabel(microphones, selectedMicID),
+            dropdown("mic", selection: micLabel(selectedMicID),
                      isPresented: $showMicMenu) {
                 pickRow("None", selected: selectedMicID == nil) {
                     selectedMicID = nil
                     AppSettings.lastMicID = nil
                     showMicMenu = false
                 }
-                let groups = DeviceDiscovery.grouped(microphones)
-                ForEach(groups, id: \.kind) { group in
-                    if groups.count > 1 {
-                        Text(group.kind.groupTitle)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(group.devices, id: \.uniqueID) { device in
-                        pickRow(device.localizedName, selected: selectedMicID == device.uniqueID) {
-                            selectedMicID = device.uniqueID
-                            AppSettings.lastMicID = device.uniqueID
-                            showMicMenu = false
-                        }
-                    }
+                rowGroups(DeviceDiscovery.micRows(local: microphones, phones: browser.phones,
+                                                  browsing: browser.isBrowsing),
+                          selectedID: selectedMicID) { id in
+                    selectedMicID = id
+                    AppSettings.lastMicID = id
+                    showMicMenu = false
                 }
             }
 
@@ -664,9 +640,96 @@ struct RecorderMenuView: View {
         .buttonStyle(.plain)
     }
 
-    /// Visible label for a device dropdown (camera/mic): selected name or "None".
-    private func deviceLabel(_ devices: [AVCaptureDevice], _ id: String?) -> String {
-        devices.first { $0.uniqueID == id }?.localizedName ?? "None"
+    /// Grouped picker rows. Local rows select through `onSelect`; "Find phones…"
+    /// starts the Bonjour browser (no selection change); disabled rows show
+    /// their hint; paired phones get a "Forget <name>" action.
+    @ViewBuilder
+    private func rowGroups(_ groups: [(kind: DeviceKind, rows: [PickerRow])], selectedID: String?,
+                           onSelect: @escaping (String) -> Void) -> some View {
+        ForEach(groups, id: \.kind) { group in
+            if groups.count > 1 || group.kind == .phoneWiFi {
+                Text(group.kind.groupTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(group.rows) { row in
+                if row.id == PickerRow.findPhonesID {
+                    pickRow(row.name, selected: false) { PhoneBrowser.shared.start() }
+                } else if !row.enabled {
+                    disabledRow(row)
+                } else {
+                    pickRow(row.name, selected: selectedID == row.id) { onSelect(row.id) }
+                }
+            }
+            if group.kind == .phoneWiFi {
+                ForEach(browser.phones.filter { pairedPhones[$0.id] != nil }) { phone in
+                    forgetRow(phone)
+                }
+            }
+        }
+    }
+
+    private func disabledRow(_ row: PickerRow) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(row.name)
+            if let hint = row.hint {
+                Text(hint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .foregroundStyle(.secondary)
+        .padding(.leading, 28)
+        .padding(.trailing, 10)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func forgetRow(_ phone: PhoneDevice) -> some View {
+        Button {
+            PhonePairingStore.shared.forget(phone.id)
+            refreshPairedPhones()
+        } label: {
+            Text("Forget \(phone.name)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 28)
+                .padding(.trailing, 10)
+                .padding(.vertical, 3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func refreshPairedPhones() {
+        var paired: [String: String] = [:]
+        for phone in browser.phones where PhonePairingStore.shared.pairing(for: phone.id) != nil {
+            paired[phone.id] = phone.name
+        }
+        pairedPhones = paired
+    }
+
+    /// Name for a camera id: local device, or browsed Wi-Fi phone.
+    private func cameraName(_ id: String?) -> String? {
+        guard let id else { return nil }
+        if let phoneID = PhoneDeviceID.phoneID(fromCamera: id) { return phoneName(phoneID) }
+        return cameras.first { $0.uniqueID == id }?.localizedName
+    }
+
+    /// A phone not browsed (yet) still shows its id's paired-name fallback.
+    private func phoneName(_ phoneID: String) -> String {
+        browser.device(id: phoneID)?.name ?? pairedPhones[phoneID] ?? "Phone"
+    }
+
+    /// Visible label for the front-camera dropdown: selected name or "None".
+    private func cameraLabel(_ id: String?) -> String { cameraName(id) ?? "None" }
+
+    /// Visible label for the mic dropdown: selected name or "None".
+    private func micLabel(_ id: String?) -> String {
+        guard let id else { return "None" }
+        if let phoneID = PhoneDeviceID.phoneID(fromMic: id) { return phoneName(phoneID) }
+        return microphones.first { $0.uniqueID == id }?.localizedName ?? "None"
     }
 
     private static let cameraMainHelp = "Not available when a camera is the main source"
@@ -676,11 +739,28 @@ struct RecorderMenuView: View {
     /// Area mode is only effective when the main source is a display.
     private var areaMode: Bool { captureAreaEnabled && !cameraIsMain }
 
-    /// Cameras eligible as the front camera (the main camera is excluded).
-    private var frontCameras: [AVCaptureDevice] {
-        guard let main = mainSource else { return cameras }
-        let ids = Set(RecorderSelection.frontCameraIDs(all: cameras.map(\.uniqueID), main: main))
-        return cameras.filter { ids.contains($0.uniqueID) }
+    /// Camera rows eligible as the front camera (the main camera is excluded).
+    private var frontCameraRows: [(kind: DeviceKind, rows: [PickerRow])] {
+        let groups = DeviceDiscovery.cameraRows(local: cameras, phones: browser.phones,
+                                                browsing: browser.isBrowsing)
+        guard let main = mainSource else { return groups }
+        let allIDs = groups.flatMap { $0.rows.map(\.id) }
+        let ids = Set(RecorderSelection.frontCameraIDs(all: allIDs, main: main))
+        return groups.compactMap { group in
+            let rows = group.rows.filter { ids.contains($0.id) }
+            return rows.isEmpty ? nil : (kind: group.kind, rows: rows)
+        }
+    }
+
+    /// Front-camera candidates: local cameras plus any `phone:` id (a stored
+    /// phone may not be browsed yet), minus the main camera.
+    private var frontCameraCandidateIDs: [String] {
+        var all = cameras.map(\.uniqueID) + browser.phones.map { PhoneDeviceID.camera($0.id) }
+        if let id = selectedCameraID, PhoneDeviceID.phoneID(fromCamera: id) != nil, !all.contains(id) {
+            all.append(id)
+        }
+        guard let main = mainSource else { return all }
+        return RecorderSelection.frontCameraIDs(all: all, main: main)
     }
 
     /// Fall back to the first display and persist it so the hotkey path
@@ -702,7 +782,7 @@ struct RecorderMenuView: View {
 
     private func resolveFrontCamera() {
         selectedCameraID = RecorderSelection.resolvedFrontCamera(
-            selectedCameraID, candidates: frontCameras.map(\.uniqueID))
+            selectedCameraID, candidates: frontCameraCandidateIDs)
     }
 
     /// Visible label for the Main dropdown.
@@ -712,7 +792,7 @@ struct RecorderMenuView: View {
             guard let d = displays.first(where: { $0.id == id }) else { return "Main" }
             return "\(d.name) (\(d.pixelWidth)×\(d.pixelHeight))"
         case .camera(let id):
-            return cameras.first { $0.uniqueID == id }?.localizedName ?? "Main"
+            return cameraName(id) ?? "Main"
         case nil:
             return "Main"
         }
@@ -736,7 +816,7 @@ struct RecorderMenuView: View {
     /// " · <display>" suffix shown under the recording timer, when known.
     private var recordingTargetSuffix: String {
         if case .camera(let id) = mainSource {
-            guard let name = cameras.first(where: { $0.uniqueID == id })?.localizedName else { return "" }
+            guard let name = cameraName(id) else { return "" }
             return " · \(name)"
         }
         let id = captureAreaEnabled ? captureRegionDisplayID : mainSource?.displayID
@@ -757,12 +837,16 @@ struct RecorderMenuView: View {
         selectedCameraID = selectedCameraID ?? AppSettings.lastCameraID
         selectedMicID = selectedMicID ?? AppSettings.lastMicID
         mainSource = AppSettings.lastMainSource
-        if let id = selectedCameraID, !cameras.contains(where: { $0.uniqueID == id }) {
+        // Wi-Fi phone picks are kept: Bonjour results arrive asynchronously.
+        if let id = selectedCameraID, PhoneDeviceID.phoneID(fromCamera: id) == nil,
+           !cameras.contains(where: { $0.uniqueID == id }) {
             selectedCameraID = nil
         }
-        if let id = selectedMicID, !microphones.contains(where: { $0.uniqueID == id }) {
+        if let id = selectedMicID, PhoneDeviceID.phoneID(fromMic: id) == nil,
+           !microphones.contains(where: { $0.uniqueID == id }) {
             selectedMicID = nil
         }
+        refreshPairedPhones()
         if permissionGranted {
             do {
                 let (items, _) = try await DeviceDiscovery.displays()
@@ -774,7 +858,8 @@ struct RecorderMenuView: View {
             displays = []
         }
         switch mainSource {
-        case .camera(let id) where !cameras.contains(where: { $0.uniqueID == id }):
+        case .camera(let id) where PhoneDeviceID.phoneID(fromCamera: id) == nil
+                                   && !cameras.contains(where: { $0.uniqueID == id }):
             // Not persisted: the saved camera main returns when replugged.
             mainSource = displays.first.map { .display($0.id) }
         case .display(let id) where permissionGranted && !displays.contains(where: { $0.id == id }):

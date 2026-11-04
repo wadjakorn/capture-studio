@@ -125,6 +125,17 @@ final class RecordingSession: ObservableObject {
     private var screenRecorder: ScreenRecorder?
     private var cameraRecorder: (any CameraSourceRecorder)?
     private var micRecorder: MicRecorder?
+    /// Audio-only Wi-Fi phone connection for a phone mic with no phone video
+    /// (`MicHost.standalonePhone`). Handled beside `micRecorder` everywhere.
+    private var phoneMicRecorder: PhoneStreamRecorder?
+    /// The source whose `warmUp()` is in flight. Teardown discards it so
+    /// Cancel during phone pairing closes the connection immediately.
+    private var pendingRecorder: (any CameraSourceRecorder)?
+    /// Pairing code to confirm on a phone, while one is pairing during arm.
+    @Published private(set) var pairingPrompt: PairingPrompt? {
+        didSet { if pairingPrompt != oldValue { updatePairingPanel() } }
+    }
+    private var pairingPanel: PairingPanel?
     private var previewPanel: CameraPreviewPanel?
     /// Camera-main mode: the camera recording the main video (`main-camera.mp4`).
     /// Mandatory like the screen recorder; nil in display-main mode.
@@ -235,23 +246,33 @@ final class RecordingSession: ObservableObject {
             let micDevice = micID.flatMap { id in
                 DeviceDiscovery.microphones().first { $0.uniqueID == id }
             }
-            let cameraDevice = cameraID.flatMap { id in
-                DeviceDiscovery.cameras().first { $0.uniqueID == id }
+            let plan = RecorderSelection.phonePlan(main: main, cameraID: cameraID, micID: micID)
+            if plan.micHost == .none { warnings.append(RecorderSelection.differentPhonesWarning) }
+            // A Wi-Fi phone camera can't host a local mic (it gets a standalone session).
+            let cameraIsPhone = plan.overlayPhone != nil
+            let phoneAudio = plan.micHost == .overlayRecorder
+            var cameraSource: (any CameraSourceRecorder)?
+            if let cameraID {
+                do {
+                    // Host the mic on the camera's session: a camera's own mic
+                    // can't stream to a rival capture session (it gets no buffers).
+                    cameraSource = try makeCameraSource(
+                        id: cameraID, outputURL: bundle.cameraURL,
+                        micDevice: cameraIsPhone ? nil : micDevice,
+                        micOutputURL: (micDevice != nil || phoneAudio) ? bundle.micURL : nil,
+                        phoneAudio: phoneAudio, facing: "front"
+                    )
+                } catch {
+                    warnings.append(cameraWarning(error, cameraID: cameraID))
+                }
             }
 
-            if let cameraDevice {
-                // Host the mic on the camera's session: a camera's own mic
-                // can't stream to a rival capture session (it gets no buffers).
-                let recorder = CameraRecorder(
-                    device: cameraDevice, outputURL: bundle.cameraURL,
-                    micDevice: micDevice,
-                    micOutputURL: micDevice != nil ? bundle.micURL : nil
-                )
+            if let cameraID, let recorder = cameraSource {
                 recorder.onDeviceLost = { [weak self] msg in
                     Task { @MainActor in self?.warnings.append(msg) }
                 }
                 do {
-                    try await recorder.warmUp()
+                    try await warmUpTracked(recorder)
                     // Cancelled during warm-up: the recorder is still local, so
                     // cancel's teardown never saw it — discard it here.
                     guard armIsCurrent(generation) else {
@@ -273,7 +294,11 @@ final class RecordingSession: ObservableObject {
                         panel.show()
                         previewPanel = panel
                     }
-                    if let w = recorder.micWarning {
+                    if cameraIsPhone {
+                        if let micDevice {
+                            await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+                        }
+                    } else if let w = recorder.micWarning {
                         Log.recorder.error("mic on camera session failed: \(w, privacy: .public)")
                         // Mic couldn't attach to the camera session — try a
                         // standalone session for an unrelated mic device.
@@ -287,13 +312,16 @@ final class RecordingSession: ObservableObject {
                         return
                     }
                     Log.recorder.error("camera warm-up failed: \(error.localizedDescription, privacy: .public)")
-                    warnings.append("Camera not recorded: \(error.localizedDescription)")
+                    warnings.append(cameraWarning(error, cameraID: cameraID))
                     if let micDevice {
                         await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
                     }
                 }
             } else if let micDevice {
                 await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+            }
+            if plan.micHost == .standalonePhone, let micPhone = plan.micPhone, armIsCurrent(generation) {
+                await warmUpPhoneMic(phoneID: micPhone, bundle: bundle, generation: generation)
             }
             // Covers every mic warm-up above. A camera already handed to
             // `cameraRecorder` was torn down by the cancel itself.
@@ -377,6 +405,8 @@ final class RecordingSession: ObservableObject {
             cameraID,
             candidates: RecorderSelection.frontCameraIDs(all: cameraIDs, main: main)
         )
+        let plan = RecorderSelection.phonePlan(main: main, cameraID: overlayID, micID: micID)
+        let mainIsPhone = plan.mainPhone != nil
 
         do {
             try FileManager.default.createDirectory(
@@ -390,12 +420,16 @@ final class RecordingSession: ObservableObject {
             let micDevice = micID.flatMap { id in
                 DeviceDiscovery.microphones().first { $0.uniqueID == id }
             }
+            if plan.micHost == .none { warnings.append(RecorderSelection.differentPhonesWarning) }
             // Host the mic on the MAIN camera's session (same device-contention
             // reasoning as display mode); fallback is a standalone mic session.
-            guard let mainRecorder = makeCameraSource(
+            // A phone main hosts only its own mic.
+            let mainPhoneAudio = plan.micHost == .mainRecorder
+            guard let mainRecorder = try makeCameraSource(
                 id: mainID, outputURL: bundle.mainCameraURL,
-                micDevice: micDevice,
-                micOutputURL: micDevice != nil ? bundle.micURL : nil
+                micDevice: mainIsPhone ? nil : micDevice,
+                micOutputURL: (micDevice != nil || mainPhoneAudio) ? bundle.micURL : nil,
+                phoneAudio: mainPhoneAudio, facing: "back"
             ) else {
                 // Vanished between the availability check and the lookup.
                 await tearDownArmed()
@@ -419,7 +453,7 @@ final class RecordingSession: ObservableObject {
                 }
             }
             do {
-                try await mainRecorder.warmUp()
+                try await warmUpTracked(mainRecorder)
             } catch {
                 // Mandatory source: release the half-opened device, then fail
                 // the whole arm (outer catch tears down and deletes the bundle).
@@ -446,7 +480,11 @@ final class RecordingSession: ObservableObject {
                 mainPanel.show()
                 mainPreviewPanel = mainPanel
             }
-            if let w = mainRecorder.micWarning {
+            if mainIsPhone {
+                if let micDevice {
+                    await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+                }
+            } else if let w = mainRecorder.micWarning {
                 Log.recorder.error("mic \(micDevice?.localizedName ?? "none", privacy: .public) on main camera session failed: \(w, privacy: .public); falling back to a standalone mic session")
                 if let micDevice {
                     await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
@@ -457,16 +495,27 @@ final class RecordingSession: ObservableObject {
                 return
             }
 
-            // Overlay camera: best-effort, no mic (the mic lives on the main
-            // camera or a standalone session).
-            if let overlayID,
-               let recorder = makeCameraSource(id: overlayID, outputURL: bundle.cameraURL,
-                                               micDevice: nil, micOutputURL: nil) {
+            // Overlay camera: best-effort, no local mic (the mic lives on the
+            // main camera or a standalone session); a phone overlay may carry
+            // its own phone mic.
+            let overlayPhoneAudio = plan.micHost == .overlayRecorder
+            var overlaySource: (any CameraSourceRecorder)?
+            if let overlayID {
+                do {
+                    overlaySource = try makeCameraSource(
+                        id: overlayID, outputURL: bundle.cameraURL, micDevice: nil,
+                        micOutputURL: overlayPhoneAudio ? bundle.micURL : nil,
+                        phoneAudio: overlayPhoneAudio, facing: "front")
+                } catch {
+                    warnings.append(cameraWarning(error, cameraID: overlayID))
+                }
+            }
+            if let overlayID, let recorder = overlaySource {
                 recorder.onDeviceLost = { [weak self] msg in
                     Task { @MainActor in self?.warnings.append(msg) }
                 }
                 do {
-                    try await recorder.warmUp()
+                    try await warmUpTracked(recorder)
                     guard armIsCurrent(generation) else {
                         await recorder.discard()
                         abandonArm(bundle)
@@ -491,7 +540,14 @@ final class RecordingSession: ObservableObject {
                         return
                     }
                     Log.recorder.error("overlay camera warm-up failed: \(error.localizedDescription, privacy: .public)")
-                    warnings.append("Camera not recorded: \(error.localizedDescription)")
+                    warnings.append(cameraWarning(error, cameraID: overlayID))
+                }
+            }
+            if plan.micHost == .standalonePhone, let micPhone = plan.micPhone {
+                await warmUpPhoneMic(phoneID: micPhone, bundle: bundle, generation: generation)
+                guard armIsCurrent(generation) else {
+                    abandonArm(bundle)
+                    return
                 }
             }
 
@@ -532,7 +588,10 @@ final class RecordingSession: ObservableObject {
             guard armIsCurrent(generation) else { return }
             Log.recorder.error("arm (camera main) failed: \(error.localizedDescription, privacy: .public)")
             await tearDownArmed()
-            if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
+            if armIsCurrent(generation) {
+                state = .failed(Self.identityChangedMessage(error, phoneID: plan.mainPhone)
+                                ?? error.localizedDescription)
+            }
         }
     }
 
@@ -556,22 +615,94 @@ final class RecordingSession: ObservableObject {
         }
     }
 
-    /// Unique IDs of cameras that can be armed right now. Single source for
-    /// availability checks (Part C appends Wi-Fi phone sources here).
-    private func availableCameraIDs() -> [String] {
+    /// Ids of cameras that can be armed right now: local uniqueIDs plus
+    /// `phone:<id>` for each browsed Wi-Fi phone. Single source for every
+    /// availability / front-camera candidate check.
+    func availableCameraIDs() -> [String] {
         DeviceDiscovery.cameras().map(\.uniqueID)
+            + PhoneBrowser.shared.phones.map { PhoneDeviceID.camera($0.id) }
     }
 
-    /// Builds a camera recorder for a source id, or nil if it vanished. Single
-    /// factory so Part C can branch on non-AVCaptureDevice sources.
+    /// Builds a camera recorder for a source id, or nil if a local camera
+    /// vanished. A `phone:` id yields a `PhoneStreamRecorder` (throws
+    /// `.notReachable` if the phone isn't browsed); it ignores `micDevice` and
+    /// writes `micOutputURL` only when `phoneAudio` (the phone's own mic).
     private func makeCameraSource(id: String, outputURL: URL,
                                   micDevice: AVCaptureDevice?,
-                                  micOutputURL: URL?) -> (any CameraSourceRecorder)? {
+                                  micOutputURL: URL?,
+                                  phoneAudio: Bool = false,
+                                  facing: String = "back") throws -> (any CameraSourceRecorder)? {
+        if let phoneID = PhoneDeviceID.phoneID(fromCamera: id) {
+            guard let device = PhoneBrowser.shared.device(id: phoneID) else {
+                throw PhoneConnectionError.notReachable
+            }
+            return PhoneStreamRecorder(device: device, video: true, audio: phoneAudio, facing: facing,
+                                       outputURL: outputURL,
+                                       micOutputURL: phoneAudio ? micOutputURL : nil,
+                                       pairingStore: .shared,
+                                       onPairingCode: pairingCodeHandler(for: device))
+        }
         guard let device = DeviceDiscovery.cameras().first(where: { $0.uniqueID == id }) else {
             return nil
         }
         return CameraRecorder(device: device, outputURL: outputURL,
                               micDevice: micDevice, micOutputURL: micOutputURL)
+    }
+
+    /// Runs `warmUp()` with the recorder parked in `pendingRecorder`, so a
+    /// cancel mid-warm-up (e.g. while a phone waits for pairing) discards it.
+    private func warmUpTracked(_ recorder: any CameraSourceRecorder) async throws {
+        pendingRecorder = recorder
+        defer { if pendingRecorder === recorder { pendingRecorder = nil } }
+        try await recorder.warmUp()
+    }
+
+    /// Routes a phone's pairing code to `pairingPrompt` (nil clears it).
+    private func pairingCodeHandler(for device: PhoneDevice) -> @Sendable (String?) -> Void {
+        let name = device.name
+        return { [weak self] code in
+            Task { @MainActor in
+                guard let self else { return }
+                if let code {
+                    // A late code after cancel must not resurrect the panel.
+                    guard self.state == .arming else { return }
+                    self.pairingPrompt = PairingPrompt(phoneName: name, code: code)
+                } else {
+                    self.pairingPrompt = nil
+                }
+            }
+        }
+    }
+
+    private func updatePairingPanel() {
+        guard let pairingPrompt else {
+            pairingPanel?.close()
+            pairingPanel = nil
+            return
+        }
+        if let pairingPanel {
+            pairingPanel.update(pairingPrompt)
+        } else {
+            let panel = PairingPanel(prompt: pairingPrompt, onCancel: { [weak self] in
+                Task { @MainActor in await self?.cancelArming() }
+            })
+            panel.show()
+            pairingPanel = panel
+        }
+    }
+
+    /// "<phone> has a new identity…" for an `.identityChanged` warm-up error, else nil.
+    private static func identityChangedMessage(_ error: Error, phoneID: String?) -> String? {
+        guard let phoneID, (error as? PhoneConnectionError) == .identityChanged else { return nil }
+        let name = PhoneBrowser.shared.device(id: phoneID)?.name
+            ?? PhonePairingStore.shared.pairing(for: phoneID)?.name ?? "Phone"
+        return "\(name) has a new identity. Forget it in the picker and pair again."
+    }
+
+    /// Warning for a best-effort camera that failed to build or warm up.
+    private func cameraWarning(_ error: Error, cameraID: String) -> String {
+        Self.identityChangedMessage(error, phoneID: PhoneDeviceID.phoneID(fromCamera: cameraID))
+            ?? "Camera not recorded: \(error.localizedDescription)"
     }
 
     /// True while the arm() that took `generation` is still the live one.
@@ -799,6 +930,13 @@ final class RecordingSession: ObservableObject {
                 warnings.append("Microphone not recorded: \(error.localizedDescription)")
             }
         }
+        if let phoneMicRecorder {
+            do { try phoneMicRecorder.beginWriting() }
+            catch {
+                Log.recorder.error("phone mic beginWriting failed: \(error.localizedDescription, privacy: .public)")
+                warnings.append("Microphone not recorded: \(error.localizedDescription)")
+            }
+        }
 
         // Cursor/click events only make sense against a captured display.
         if !armedMain.isCamera {
@@ -831,6 +969,10 @@ final class RecordingSession: ObservableObject {
     /// AppSettings and toggles. `activateForPrompts` brings the app frontmost so
     /// any camera/mic TCC dialog is visible when triggered while unfocused.
     func toggleFromHotkey() async {
+        // A stored Wi-Fi phone may not be browsed yet (the popup never opened).
+        if state == .idle || isFailed {
+            guard await waitForStoredPhones() else { return }
+        }
         // The main source wins: a stored camera main ignores the Area toggle and
         // the saved region entirely (camera-main has no area).
         let stored = AppSettings.lastMainSource
@@ -871,6 +1013,29 @@ final class RecordingSession: ObservableObject {
                      region: region,
                      activateForPrompts: true,
                      areaSelection: areaSelection)
+    }
+
+    /// Hotkey path: waits ≤3 s per stored Wi-Fi phone for Bonjour to find it.
+    /// A missing phone main fails the start; a missing phone front camera / mic
+    /// is left to arm()'s best-effort warnings.
+    private func waitForStoredPhones() async -> Bool {
+        let browser = PhoneBrowser.shared
+        let timeout = Duration.seconds(3)
+        if let stored = AppSettings.lastMainSource,
+           let phoneID = stored.cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)) {
+            guard await browser.waitForDevice(id: phoneID, timeout: timeout) != nil else {
+                if state == .idle || isFailed {
+                    state = .failed("Phone not found. Open Capture Studio Phone on your device.")
+                }
+                return false
+            }
+        }
+        let others = [AppSettings.lastCameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)),
+                      AppSettings.lastMicID.flatMap(PhoneDeviceID.phoneID(fromMic:))]
+        for phoneID in others.compactMap({ $0 }) {
+            _ = await browser.waitForDevice(id: phoneID, timeout: timeout)
+        }
+        return true
     }
 
     /// One action shared by the popup's primary button and the global hotkey.
@@ -922,15 +1087,19 @@ final class RecordingSession: ObservableObject {
         if main.isCamera || camera != nil || mic != nil, activateForPrompts {
             NSApp.activate(ignoringOtherApps: true)  // TCC dialog frontmost
         }
-        if main.isCamera || camera != nil, await !Permissions.requestCapture(.video) {
+        // Wi-Fi phones need no camera/mic grant — only local devices do.
+        let mainIsLocalCamera = main.cameraID.map { PhoneDeviceID.phoneID(fromCamera: $0) == nil } ?? false
+        let cameraIsLocal = camera.map { PhoneDeviceID.phoneID(fromCamera: $0) == nil } ?? false
+        if mainIsLocalCamera || cameraIsLocal, await !Permissions.requestCapture(.video) {
             // Camera-main without camera access can't record anything.
-            if main.isCamera {
+            if mainIsLocalCamera {
                 state = .failed("Camera access is required to record a camera.")
                 return
             }
             camera = nil
         }
-        if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }
+        if let m = mic, PhoneDeviceID.phoneID(fromMic: m) == nil,
+           await !Permissions.requestCapture(.audio) { mic = nil }
 
         // Show the preview HUD (drag-mode toggle) whenever we'll pause on the
         // preview (camera flow, or the GUI's previewFirst). Screen-only records
@@ -1015,6 +1184,7 @@ final class RecordingSession: ObservableObject {
         armedAreaSize = nil
         armedSystemAudio = false
         armedAreaSelection = .unavailable
+        pairingPrompt = nil
         eventTracker.cancel()
         // Detach everything before the first await: a concurrent teardown (cancel
         // racing a failure path) then finds nothing left, so nothing is discarded
@@ -1023,6 +1193,8 @@ final class RecordingSession: ObservableObject {
         let mainCamera = mainCameraRecorder
         let camera = cameraRecorder
         let mic = micRecorder
+        let phoneMic = phoneMicRecorder
+        let pending = pendingRecorder
         let bundleURL = pendingBundleURL
         bundle = nil
         pendingBundleURL = nil
@@ -1030,13 +1202,19 @@ final class RecordingSession: ObservableObject {
         mainCameraRecorder = nil
         cameraRecorder = nil
         micRecorder = nil
+        phoneMicRecorder = nil
+        pendingRecorder = nil
         displayInfo = nil
         armedRegion = nil
         armedDisplayID = nil
         armedMain = nil
+        // An in-flight warm-up (e.g. awaiting phone pairing): closing it makes
+        // that warmUp() throw; the arm then sees it was cancelled.
+        await pending?.discard()
         await mainCamera?.discard()
         await camera?.discard()
         await mic?.discard()
+        await phoneMic?.discard()
         if let bundleURL {
             try? FileManager.default.removeItem(at: bundleURL)
             NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
@@ -1095,6 +1273,7 @@ final class RecordingSession: ObservableObject {
                 do { tracks.append(try await micRecorder.stop()) }
                 catch { warnings.append("Microphone track lost: \(error.localizedDescription)") }
             }
+            tracks.append(contentsOf: await stopPhoneMic())
 
             do {
                 try eventTracker.stopAndWrite(
@@ -1141,6 +1320,7 @@ final class RecordingSession: ObservableObject {
             Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
             await cameraRecorder?.discard()
             await micRecorder?.discard()
+            await phoneMicRecorder?.discard()
             // Studio needs a main track, so the overlay/mic files alone are not
             // a project: delete the orphaned bundle (partial main-camera.mp4,
             // no meta.json). clearAfterStop() posts .projectLibraryDidChange.
@@ -1173,6 +1353,7 @@ final class RecordingSession: ObservableObject {
                 do { tracks.append(try await micRecorder.stop()) }
                 catch { warnings.append("Microphone track lost: \(error.localizedDescription)") }
             }
+            tracks.append(contentsOf: await stopPhoneMic())
 
             let size = mainRecorder.writtenPixelSize ?? CGSize(width: 1920, height: 1080)
             let meta = ProjectMeta(
@@ -1188,6 +1369,20 @@ final class RecordingSession: ObservableObject {
             Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
             state = .failed(error.localizedDescription)
         }
+    }
+
+    /// Finalizes the standalone phone mic (if any) → its mic track, or a warning.
+    private func stopPhoneMic() async -> [TrackInfo] {
+        guard let phoneMicRecorder else { return [] }
+        do {
+            let result = try await phoneMicRecorder.stop()
+            if let w = phoneMicRecorder.micWarning, !warnings.contains(w) { warnings.append(w) }
+            if let mic = result.mic { return [mic] }
+            warnings.append("Phone microphone produced no audio.")
+        } catch {
+            warnings.append("Microphone track lost: \(error.localizedDescription)")
+        }
+        return []
     }
 
     /// Writes meta.json LAST (its presence marks the bundle valid), then runs the
@@ -1236,6 +1431,9 @@ final class RecordingSession: ObservableObject {
         self.mainCameraRecorder = nil
         self.cameraRecorder = nil
         self.micRecorder = nil
+        self.phoneMicRecorder = nil
+        self.pendingRecorder = nil
+        self.pairingPrompt = nil
         self.displayInfo = nil
         self.armedRegion = nil
         self.armedDisplayID = nil
@@ -1274,6 +1472,36 @@ final class RecordingSession: ObservableObject {
         }
     }
 
+    /// Warms an audio-only phone connection for a phone mic with no phone video
+    /// (`MicHost.standalonePhone`). Best-effort like `warmUpStandaloneMic`.
+    private func warmUpPhoneMic(phoneID: String, bundle: ProjectBundle, generation: Int) async {
+        guard let device = PhoneBrowser.shared.device(id: phoneID) else {
+            warnings.append("Microphone not recorded: \(PhoneConnectionError.notReachable.localizedDescription)")
+            return
+        }
+        let recorder = PhoneStreamRecorder(device: device, video: false, audio: true, facing: "back",
+                                           outputURL: nil, micOutputURL: bundle.micURL,
+                                           pairingStore: .shared,
+                                           onPairingCode: pairingCodeHandler(for: device))
+        recorder.onDeviceLost = { [weak self] msg in
+            Task { @MainActor in self?.warnings.append(msg) }
+        }
+        do {
+            try await warmUpTracked(recorder)
+            guard armIsCurrent(generation) else {
+                await recorder.discard()
+                return
+            }
+            phoneMicRecorder = recorder
+            warnings.append(contentsOf: recorder.warmUpWarnings)
+        } catch {
+            guard armIsCurrent(generation) else { return }
+            Log.recorder.error("phone mic warm-up failed: \(error.localizedDescription, privacy: .public)")
+            warnings.append(Self.identityChangedMessage(error, phoneID: phoneID)
+                            ?? "Microphone not recorded: \(error.localizedDescription)")
+        }
+    }
+
     /// Best-effort synchronous teardown for app termination while armed or
     /// recording: stop sessions and remove a bundle that never got writers.
     func tearDownForQuit() {
@@ -1287,6 +1515,19 @@ final class RecordingSession: ObservableObject {
         previewHUD = nil
         areaOverlay?.dismiss()
         areaOverlay = nil
+        pairingPanel?.close()
+        pairingPanel = nil
+        // Close phone connections that never wrote anything (process exit
+        // closes the sockets anyway; this tells the phone to stop promptly).
+        if state.bundleIsDisposableOnQuit {
+            let pending = pendingRecorder, phoneMic = phoneMicRecorder
+            pendingRecorder = nil
+            phoneMicRecorder = nil
+            Task {
+                await pending?.discard()
+                await phoneMic?.discard()
+            }
+        }
         if state.bundleIsDisposableOnQuit, let url = pendingBundleURL {
             // Arming/armed/preparing → the bundle is empty; drop it. Never while
             // finishing: that bundle is a real recording being finalized.
@@ -1294,6 +1535,12 @@ final class RecordingSession: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
     }
+}
+
+/// A pairing code the user must confirm on the named phone.
+struct PairingPrompt: Equatable {
+    var phoneName: String
+    var code: String
 }
 
 /// Camera-main `stop()`: the main camera source finished without a video track.

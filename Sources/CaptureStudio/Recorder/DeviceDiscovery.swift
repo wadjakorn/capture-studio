@@ -79,8 +79,10 @@ struct DisplayItem: Identifiable, Hashable {
 }
 
 /// Where a capture device comes from, for grouping in the recorder's pickers.
+/// `.phone` is a USB/Continuity phone seen as an AVCaptureDevice; `.phoneWiFi`
+/// is a Capture Studio Phone found over Bonjour (never returned by `classify`).
 enum DeviceKind: String, CaseIterable {
-    case builtIn, phone, external, virtual
+    case builtIn, phone, external, virtual, phoneWiFi
 }
 
 extension DeviceKind {
@@ -110,6 +112,7 @@ extension DeviceKind {
         case .phone: "Phone"
         case .external: "External"
         case .virtual: "Virtual"
+        case .phoneWiFi: "Phone (Wi-Fi)"
         }
     }
 }

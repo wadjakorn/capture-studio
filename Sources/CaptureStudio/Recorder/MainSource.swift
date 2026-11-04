@@ -70,3 +70,49 @@ enum RecorderSelection {
     static func areaAllowed(for main: MainSource) -> Bool { !main.isCamera }
     static func needsScreenPermission(for main: MainSource) -> Bool { !main.isCamera }
 }
+
+/// Where the microphone is recorded when phones are involved.
+enum MicHost: Equatable {
+    /// On the main video's phone connection.
+    case mainRecorder
+    /// On the overlay camera's phone connection.
+    case overlayRecorder
+    /// A phone connection carrying audio only.
+    case standalonePhone
+    /// A local mic (or no mic): the existing local path.
+    case local
+    /// Not recorded: a phone mic from a different phone than the phone video.
+    case none
+}
+
+/// Which phones a selection uses, and who hosts the mic.
+struct PhonePlan: Equatable {
+    var mainPhone: String?
+    var overlayPhone: String?
+    var micPhone: String?
+    var micHost: MicHost
+}
+
+extension RecorderSelection {
+    static let differentPhonesWarning = "Use one phone for both video and microphone."
+
+    /// Pure. A phone mic rides on the same phone's video connection (one
+    /// connection per phone); a phone mic with no phone video gets its own
+    /// audio-only connection; a mic from another phone than the video is rejected.
+    static func phonePlan(main: MainSource, cameraID: String?, micID: String?) -> PhonePlan {
+        let mainPhone = main.cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:))
+        let overlayPhone = cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:))
+        let micPhone = micID.flatMap(PhoneDeviceID.phoneID(fromMic:))
+        let host: MicHost
+        if let micPhone {
+            if micPhone == mainPhone { host = .mainRecorder }
+            else if micPhone == overlayPhone { host = .overlayRecorder }
+            else if mainPhone == nil && overlayPhone == nil { host = .standalonePhone }
+            else { host = .none }
+        } else {
+            host = .local
+        }
+        return PhonePlan(mainPhone: mainPhone, overlayPhone: overlayPhone,
+                         micPhone: micPhone, micHost: host)
+    }
+}
