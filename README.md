@@ -9,6 +9,7 @@ A free, open-source macOS screen recorder and simple editor — built as a [Scre
 - **Cursor-free masters** — the cursor is *not* baked into the video; cursor positions, clicks, and scrolls are captured as a separate 60 Hz event stream. The Studio editor reconstructs a synthetic cursor at render time (toggle on/off) plus optional click-feedback rings
 - **Camera** — record any camera as a separate track, shown as a draggable/resizable picture-in-picture overlay; style it with shape (rectangle/circle), corner radius, border color, drop shadow, aspect-ratio preset, feed zoom/pan, and 90° rotation
 - **Microphone** — selectable input device, recorded as a separate track; a camera's own mic is captured on the camera's session so it isn't lost to device contention. Studio mic volume boosts up to 300% for quiet voice
+- **Android phone as camera/mic (Wi-Fi)** — use an Android phone as the main video source, front camera, or microphone over your local network; H.264/AAC over TLS pinned to the phone's identity, paired once with a 6-digit code
 - **System audio** — captures what your Mac is playing (excluding the app itself)
 - **Preview-then-record** — warm up all sources (camera spin-up, etc.) and confirm a live camera preview *before* the countdown, so the counter marks a near-instant start
 - **Global hotkey** — user-configurable shortcut toggles recording from anywhere (off by default); reuses the last device/region selections without opening the popup
@@ -37,6 +38,23 @@ mv CaptureStudio.app /Applications/
 Without the `xattr` step, macOS Gatekeeper will report the downloaded app as damaged.
 
 Launch it — a camera icon appears in your menu bar. Click it to pick a display, toggle camera/mic/system audio, and start recording.
+
+## Use your Android phone as a camera (Wi-Fi)
+
+1. Download `CaptureStudioPhone.apk` from [Releases](../../releases) and sideload it (Android 11 or later).
+2. Open **Capture Studio Phone**, grant camera, microphone, and notifications, and allow unrestricted battery use (Samsung and others put background apps to sleep otherwise).
+3. Keep the phone and the Mac on the same Wi-Fi.
+4. In Capture Studio's menu-bar popup, pick the phone under **Phone (Wi-Fi)** in the **Main**, **Front camera**, or **Microphone** picker. Use **Find phones…** the first time; macOS asks for Local Network access.
+5. On first use the Mac shows a 6-digit code ("Confirm 483 921 on ..."). Check the same code on the phone and tap **Allow**.
+
+The phone streams H.264/AAC over TLS, pinned to the phone's identity. To re-pair, choose **Forget** for the phone in the picker and **Revoke** the Mac under "Paired computers" on the phone.
+
+Tips:
+
+- A phone used as the main video records as `main-camera.mp4`; Studio applies the file's rotation.
+- Pick the same phone for video and mic if you want both from it.
+- If Wi-Fi drops mid-recording, what was captured is saved and the track is marked truncated.
+- "Update required" in the picker means the phone app and Capture Studio use different protocol versions; update the older one.
 
 ## Build from source
 

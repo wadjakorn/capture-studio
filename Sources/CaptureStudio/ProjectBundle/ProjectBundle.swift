@@ -10,6 +10,7 @@ struct ProjectBundle {
     var metaURL: URL { url.appendingPathComponent("meta.json") }
     var screenURL: URL { url.appendingPathComponent("screen.mp4") }
     var cameraURL: URL { url.appendingPathComponent("camera.mp4") }
+    var mainCameraURL: URL { url.appendingPathComponent("main-camera.mp4") }
     var micURL: URL { url.appendingPathComponent("mic.m4a") }
     var systemAudioURL: URL { url.appendingPathComponent("system.m4a") }
     var eventsURL: URL { url.appendingPathComponent("events.jsonl") }
@@ -17,6 +18,8 @@ struct ProjectBundle {
     /// Dashboard preview frame. Derived cache, regenerated on demand; its name
     /// must not start with `background.` (see `deleteBackgroundImages`).
     var thumbnailURL: URL { url.appendingPathComponent("thumbnail.jpg") }
+
+    func url(for track: TrackInfo) -> URL { url.appendingPathComponent(track.filename) }
 
     /// A bundle is valid once meta.json exists (it is written last).
     var isFinalized: Bool { FileManager.default.fileExists(atPath: metaURL.path) }

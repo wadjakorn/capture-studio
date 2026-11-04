@@ -9,7 +9,8 @@ import AVFoundation
 /// A camera's built-in mic (e.g. a USB webcam) cannot stream audio to a rival
 /// AVCaptureSession while this session owns the device — the audio session
 /// gets zero buffers. Hosting the mic here avoids that contention.
-final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
+final class CameraRecorder: NSObject, CameraSourceRecorder,
+                            AVCaptureVideoDataOutputSampleBufferDelegate,
                             AVCaptureAudioDataOutputSampleBufferDelegate {
     enum CameraError: LocalizedError {
         case deviceUnavailable
@@ -25,13 +26,6 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
-    /// Result of a camera recording: the camera track plus, when a mic was
-    /// hosted on this session and produced audio, its track too.
-    struct Result {
-        var camera: TrackInfo
-        var mic: TrackInfo?
-    }
-
     private let device: AVCaptureDevice
     private let outputURL: URL
     private let micDevice: AVCaptureDevice?
@@ -40,7 +34,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// The live capture session, exposed so a preview layer can render the feed
     /// in parallel with the file writer (an independent connection — no extra
     /// device open, so no same-device audio/video contention).
-    var captureSession: AVCaptureSession { session }
+    var previewSurface: PreviewSurface? { .captureSession(session) }
+    /// Local capture reports warm-up problems by throwing or via `micWarning`.
+    var warmUpWarnings: [String] { [] }
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "capturestudio.camera.output")
 
@@ -49,6 +45,28 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
+    /// Mic track truncated (set with `truncated`, or alone on a mic-only loss).
+    /// Accessed on `queue`.
+    private var micTruncated = false
+    /// Fired once, on an arbitrary thread, when the camera or hosted mic
+    /// disconnects or the session hits a runtime error. Recording continues;
+    /// the affected tracks are marked truncated.
+    var onDeviceLost: (@Sendable (String) -> Void)?
+    /// Video-side flag, read/written on `queue`: set when the camera is lost.
+    private var deviceLost = false
+    /// Audio-side flag, read/written on `audioQueue`: set when the mic or camera is lost.
+    private var audioDeviceLost = false
+    /// Guards `onDeviceLost` to fire once; accessed on `queue`.
+    private var deviceLostReported = false
+    /// Fired once, on an arbitrary thread, when the CAMERA itself is lost
+    /// (disconnect or session runtime error) — never for a mic-only loss.
+    /// Lets a caller treat this camera as mandatory (camera-main mode).
+    var onCameraLost: (@Sendable () -> Void)?
+    /// True once the camera has been lost (sticky). Safe from any thread.
+    var isCameraLost: Bool { queue.sync { deviceLost } }
+    /// Pixel size from the settings dictionary actually handed to the writer
+    /// input (never inferred from `activeFormat`). Set in `beginWriting()`.
+    private(set) var writtenPixelSize: CGSize?
     /// Last PTS appended to each track. Adding a mic makes AVCaptureSession
     /// switch its master clock to the audio device clock once at startup, so
     /// video frames straddling the switch are non-monotonic; dropping any
@@ -101,11 +119,25 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             throw CameraError.deviceUnavailable
         }
         session.beginConfiguration()
-        session.sessionPreset = .high
-        guard session.canAddInput(deviceInput), session.canAddOutput(output) else {
+        guard session.canAddInput(deviceInput) else {
+            session.commitConfiguration()
             throw CameraError.deviceUnavailable
         }
         session.addInput(deviceInput)
+        // canSetSessionPreset is only meaningful once the input is attached.
+        // Keep .high when settable. For non-built-in devices (UVC, virtual,
+        // phone) or when .high is rejected, hand-pick a <=1920-edge format.
+        let presetOK = session.canSetSessionPreset(.high)
+        if presetOK { session.sessionPreset = .high }
+        if !presetOK || DeviceDiscovery.kind(of: device) != .builtIn {
+            selectSafeFormat()
+        }
+        guard session.canAddOutput(output) else {
+            session.removeInput(deviceInput)
+            session.commitConfiguration()
+            unlockDeviceIfHeld()
+            throw CameraError.deviceUnavailable
+        }
         session.addOutput(output)
         output.setSampleBufferDelegate(self, queue: queue)
 
@@ -117,21 +149,106 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
         session.commitConfiguration()
 
-        // startRunning blocks; keep it off the main thread.
+        // startRunning blocks; keep it off the main thread. The device config
+        // lock (if held for activeFormat) is released only after startRunning
+        // returns, otherwise the session preset re-applies and overwrites the
+        // chosen format (macOS behavior).
         await withCheckedContinuation { continuation in
             queue.async {
                 self.session.startRunning()
+                self.unlockDeviceIfHeld()
                 continuation.resume()
             }
         }
+
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(deviceWasDisconnected(_:)),
+                           name: AVCaptureDevice.wasDisconnectedNotification, object: nil)
+        center.addObserver(self, selector: #selector(sessionRuntimeError(_:)),
+                           name: AVCaptureSession.runtimeErrorNotification, object: session)
+    }
+
+    @objc private func deviceWasDisconnected(_ note: Notification) {
+        guard let id = (note.object as? AVCaptureDevice)?.uniqueID else { return }
+        if id == device.uniqueID {
+            handleDeviceLost("Camera disconnected.", cameraLost: true)
+        } else if micAttached, id == micDevice?.uniqueID {
+            // Mic only: the camera video keeps recording.
+            handleDeviceLost("Microphone disconnected.", cameraLost: false)
+        }
+    }
+
+    @objc private func sessionRuntimeError(_ note: Notification) {
+        let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        handleDeviceLost("Camera error: \(error?.localizedDescription ?? "unknown")", cameraLost: true)
+    }
+
+    private func handleDeviceLost(_ message: String, cameraLost: Bool) {
+        audioQueue.sync { audioDeviceLost = true }
+        let (firstReport, firstCameraLoss): (Bool, Bool) = queue.sync {
+            micTruncated = true
+            let firstCameraLoss = cameraLost && !deviceLost
+            if cameraLost {
+                deviceLost = true
+                truncated = true
+            }
+            guard !deviceLostReported else { return (false, firstCameraLoss) }
+            deviceLostReported = true
+            return (true, firstCameraLoss)
+        }
+        if firstReport { onDeviceLost?(message) }
+        if firstCameraLoss { onCameraLost?() }
+    }
+
+    /// True while `device.lockForConfiguration()` is held for the format choice.
+    private var holdsDeviceLock = false
+
+    private func unlockDeviceIfHeld() {
+        guard holdsDeviceLock else { return }
+        holdsDeviceLock = false
+        device.unlockForConfiguration()
+    }
+
+    /// Picks the best <=1920-edge format. On success the device configuration
+    /// lock stays held (see `warmUp`); best-effort — on lock failure the device
+    /// keeps its current format.
+    private func selectSafeFormat() {
+        let formats = device.formats
+        let candidates = formats.enumerated().map { index, format -> CameraFormatCandidate in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let fps = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+            return CameraFormatCandidate(width: Int(dims.width), height: Int(dims.height),
+                                         maxFPS: fps, index: index)
+        }
+        guard let pick = CameraFormatChooser.best(candidates) else { return }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            return
+        }
+        holdsDeviceLock = true
+        device.activeFormat = formats[pick.index]
     }
 
     /// Creates the writers and begins accepting samples. Call after `warmUp()`
     /// (session already running, audio clock settled). The next delegate frame
     /// anchors `sessionStartHostTime`.
     func beginWriting() throws {
-        guard let settings = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) else {
-            throw CameraError.writerSetupFailed("no recommended settings")
+        writtenPixelSize = nil
+        let settings: [String: Any]
+        if let recommended = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) {
+            settings = recommended
+        } else {
+            // The output can report no recommended settings regardless of preset.
+            // Assumption: the active format's dimensions are the delivered buffer
+            // dimensions (true when we chose the format ourselves).
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            guard dims.width > 0, dims.height > 0 else {
+                throw CameraError.writerSetupFailed("no recommended settings")
+            }
+            settings = [AVVideoCodecKey: AVVideoCodecType.h264,
+                        AVVideoWidthKey: Int(dims.width),
+                        AVVideoHeightKey: Int(dims.height)]
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
@@ -142,6 +259,10 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         writer.add(input)
         guard writer.startWriting() else {
             throw CameraError.writerSetupFailed(writer.error?.localizedDescription ?? "unknown")
+        }
+        if let w = (settings[AVVideoWidthKey] as? NSNumber)?.intValue,
+           let h = (settings[AVVideoHeightKey] as? NSNumber)?.intValue {
+            writtenPixelSize = CGSize(width: w, height: h)
         }
         // Publish writer/input to the capture queue before accepting buffers.
         queue.sync {
@@ -155,6 +276,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// finalizing anything — for Cancel from the armed state or app teardown.
     /// Never throws, produces no TrackInfo.
     func discard() async {
+        NotificationCenter.default.removeObserver(self)
         session.stopRunning()
         queue.sync { self.writer?.cancelWriting() }
         audioQueue.sync { self.audioWriter?.cancelWriting() }
@@ -210,10 +332,11 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     func markTruncated() {
-        queue.sync { truncated = true }
+        queue.sync { truncated = true; micTruncated = true }
     }
 
-    func stop() async throws -> Result {
+    func stop() async throws -> CameraSourceResult {
+        NotificationCenter.default.removeObserver(self)
         session.stopRunning()
         let (writer, input, startTime): (AVAssetWriter?, AVAssetWriterInput?, Double?) = queue.sync {
             (self.writer, self.input, self.sessionStartHostTime)
@@ -244,7 +367,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             truncated: truncated
         )
         let micTrack = await finishAudio()
-        return Result(camera: cameraTrack, mic: micTrack)
+        return CameraSourceResult(camera: cameraTrack, mic: micTrack)
     }
 
     /// Finalizes the audio writer if it captured samples. Returns the mic
@@ -275,7 +398,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             codec: "aac",
             deviceName: micDevice.localizedName,
             deviceID: micDevice.uniqueID,
-            truncated: truncated
+            truncated: queue.sync { truncated || micTruncated }
         )
     }
 
@@ -291,7 +414,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard let writer, let input, writer.status == .writing else { return }
+        guard !deviceLost, let writer, let input, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
             // When a mic shares this session, wait until audio is flowing so the
@@ -318,7 +441,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
         audioReady = true // master clock is now on the audio device clock
-        guard let writer = audioWriter, let input = audioInput,
+        guard !audioDeviceLost, let writer = audioWriter, let input = audioInput,
               writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if audioStartHostTime == nil {

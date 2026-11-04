@@ -442,6 +442,18 @@ final class StudioModel: ObservableObject {
                       height: (size.height * scale / 2).rounded() * 2)
     }
     private(set) var cameraNaturalSize: CGSize?
+    /// Source tracks' `preferredTransform`s (identity for local captures). The
+    /// custom compositor applies them so a rotated phone track renders upright.
+    private var screenTransform: CGAffineTransform = .identity
+    private var cameraTransform: CGAffineTransform = .identity
+
+    /// Upright size of a track: `naturalSize` through its `preferredTransform`,
+    /// with absolute width/height (a 90° turn swaps them).
+    nonisolated static func orientedSize(_ size: CGSize, transform: CGAffineTransform) -> CGSize {
+        guard !transform.isIdentity else { return size }
+        let r = CGRect(origin: .zero, size: size).applying(transform)
+        return CGSize(width: abs(r.width), height: abs(r.height))
+    }
     var hasCameraTrack: Bool { cameraTrackID != nil }
     var hasMicTrack: Bool { micTrackID != nil }
     var hasSystemAudioTrack: Bool { systemTrackID != nil }
@@ -480,6 +492,10 @@ final class StudioModel: ObservableObject {
             || (clickFeedback && hasClickData)
             || (cropAspect.isFit && canvasBackground != .black)
             || frameEnabled
+            // Layer instructions don't apply a track's preferredTransform; the
+            // compositor does, so a rotated source always takes that path.
+            || !screenTransform.isIdentity
+            || (cameraShown && !cameraTransform.isIdentity)
     }
 
     private var screenTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
@@ -560,6 +576,8 @@ final class StudioModel: ObservableObject {
             self.micTrackID = built.micTrackID
             self.systemTrackID = built.systemTrackID
             self.cameraNaturalSize = built.cameraSize
+            self.screenTransform = built.screenTransform
+            self.cameraTransform = built.cameraTransform
             self.playerItem = item
             self.player = player
             self.duration = built.composition.duration.seconds
@@ -657,15 +675,18 @@ final class StudioModel: ObservableObject {
         let micTrackID: CMPersistentTrackID?
         let systemTrackID: CMPersistentTrackID?
         let cameraSize: CGSize?
+        var screenTransform: CGAffineTransform = .identity
+        var cameraTransform: CGAffineTransform = .identity
     }
 
-    /// screen video at t=0; camera video, mic and system audio inserted at
+    /// Main video (screen, or a camera in camera-main bundles) at t=0; camera video, mic and system audio inserted at
     /// their host-clock offsets. Camera renders as PiP via the video composition.
     private static func makeComposition(bundle: ProjectBundle,
                                         meta: ProjectMeta) async throws -> BuiltComposition {
-        guard let screenInfo = meta.tracks.first(where: { $0.type == .screen }) else {
+        // `screen*` names are kept for the main track, which may be a camera.
+        guard let screenInfo = meta.mainTrack else {
             throw NSError(domain: "CaptureStudio", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "Bundle has no screen track."
+                NSLocalizedDescriptionKey: "Bundle has no main video track."
             ])
         }
         let composition = AVMutableComposition()
@@ -675,8 +696,10 @@ final class StudioModel: ObservableObject {
         var micTrackID: CMPersistentTrackID?
         var systemTrackID: CMPersistentTrackID?
         var cameraSize: CGSize?
+        var screenTransform = CGAffineTransform.identity
+        var cameraTransform = CGAffineTransform.identity
 
-        let screenAsset = AVURLAsset(url: bundle.screenURL)
+        let screenAsset = AVURLAsset(url: bundle.url(for: screenInfo))
         let screenDuration = try await screenAsset.load(.duration)
         if let videoTrack = try await screenAsset.loadTracks(withMediaType: .video).first,
            let compTrack = composition.addMutableTrack(withMediaType: .video,
@@ -685,14 +708,17 @@ final class StudioModel: ObservableObject {
                 CMTimeRange(start: .zero, duration: screenDuration),
                 of: videoTrack, at: .zero
             )
-            renderSize = try await videoTrack.load(.naturalSize)
+            screenTransform = try await videoTrack.load(.preferredTransform)
+            compTrack.preferredTransform = screenTransform
+            renderSize = orientedSize(try await videoTrack.load(.naturalSize),
+                                      transform: screenTransform)
             screenTrackID = compTrack.trackID
         }
 
-        if let cameraInfo = meta.tracks.first(where: { $0.type == .camera }),
-           FileManager.default.fileExists(atPath: bundle.cameraURL.path) {
+        if let cameraInfo = meta.overlayCameraTrack,
+           FileManager.default.fileExists(atPath: bundle.url(for: cameraInfo).path) {
             let offset = cameraInfo.sessionStartHostTime - screenInfo.sessionStartHostTime
-            let cameraAsset = AVURLAsset(url: bundle.cameraURL)
+            let cameraAsset = AVURLAsset(url: bundle.url(for: cameraInfo))
             let cameraDuration = try await cameraAsset.load(.duration)
             if let videoTrack = try await cameraAsset.loadTracks(withMediaType: .video).first,
                let compTrack = composition.addMutableTrack(withMediaType: .video,
@@ -703,7 +729,10 @@ final class StudioModel: ObservableObject {
                     at: CMTime(seconds: max(0, offset), preferredTimescale: 600)
                 )
                 cameraTrackID = compTrack.trackID
-                cameraSize = try await videoTrack.load(.naturalSize)
+                cameraTransform = try await videoTrack.load(.preferredTransform)
+                compTrack.preferredTransform = cameraTransform
+                cameraSize = orientedSize(try await videoTrack.load(.naturalSize),
+                                          transform: cameraTransform)
             }
         }
 
@@ -747,7 +776,9 @@ final class StudioModel: ObservableObject {
             cameraTrackID: cameraTrackID,
             micTrackID: micTrackID,
             systemTrackID: systemTrackID,
-            cameraSize: cameraSize
+            cameraSize: cameraSize,
+            screenTransform: screenTransform,
+            cameraTransform: cameraTransform
         )
     }
 
@@ -1150,6 +1181,8 @@ final class StudioModel: ObservableObject {
 
     /// Add a zoom block at the playhead (scale = nil → uses the global default).
     func addZoomBlock() {
+        // Zoom follows the cursor; bundles without events (camera-main) get none.
+        guard hasCursorData else { return }
         let t = min(max(currentTime, 0), duration)
         let added = ZoomTimeline.add(zoomBlocks, atTime: t,
                                      width: Self.defaultBlockWidth, duration: duration)
@@ -1431,7 +1464,7 @@ final class StudioModel: ObservableObject {
     /// playhead: prefer the exact rendered auto-zoom focus (seamless handoff from
     /// follow), else the cursor, else the source centre.
     private func seedManualFocus(at i: Int) {
-        guard sourceSize.width > 0, sourceSize.height > 0 else { return }
+        guard hasCursorData, sourceSize.width > 0, sourceSize.height > 0 else { return }
         let b = zoomBlocks[i]
         let t = min(max(currentTime, b.begin), b.end)
         let track = AutoZoomTrack.build(blocks: zoomBlocks, cursorSamples: cursorSamples,
@@ -2465,6 +2498,8 @@ final class StudioModel: ObservableObject {
             screenTrackID: screenTrackID,
             cameraTrackID: cameraTrackID
         )
+        layout.screenTransform = screenTransform
+        if cameraTrackID != nil { layout.cameraTransform = cameraTransform }
         // Fit/template placement (canvas px, top-left): the whole source scaled
         // to fit at the current zoom/pan. nil = cover/crop placement.
         if cropAspect.isFit {
@@ -3077,6 +3112,7 @@ final class StudioModel: ObservableObject {
     }
 
     func revealMastersInFinder() {
-        NSWorkspace.shared.activateFileViewerSelecting([bundle.screenURL])
+        let target = meta?.mainTrack.map { bundle.url(for: $0) } ?? bundle.url
+        NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 }

@@ -64,6 +64,37 @@ import Foundation
         #expect(result.allSatisfy { !$0.isExternal })
     }
 
+    @Test func cameraMainBundleIsReadyWithoutOverlayCamera() throws {
+        let dir = try makeTmp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("cam.capturestudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let bundle = ProjectBundle(url: url)
+        try Data().write(to: bundle.mainCameraURL)
+        let m = ProjectMeta(
+            schemaVersion: 2,
+            app: AppInfo(version: "0", macOSVersion: "15.0.0"),
+            display: DisplayInfo.synthetic(width: 1920, height: 1080),
+            tracks: [TrackInfo(type: .camera, filename: "main-camera.mp4", sessionStartHostTime: 1,
+                               nominalFPS: 30, codec: "h264", deviceName: "Phone", deviceID: "p",
+                               role: .main)],
+            recordedAt: Date(), mainSource: "camera")
+        try bundle.writeMeta(m)
+        #expect(!FileManager.default.fileExists(atPath: bundle.screenURL.path))
+
+        let result = ProjectLibrary.scan(directory: dir, extra: [], activeRecording: nil)
+        let s = try #require(result.first)
+        #expect(s.status == .ready && s.isCameraMain && !s.hasCamera)
+    }
+
+    @Test func legacyScreenPlusCameraIsNotCameraMain() throws {
+        let dir = try makeTmp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try makeBundle("a", in: dir, meta: meta(at: Date(), camera: true))
+        let s = try #require(ProjectLibrary.scan(directory: dir, extra: [], activeRecording: nil).first)
+        #expect(s.isCameraMain == false && s.hasCamera)
+    }
+
     @Test func scanMergesExternalRecentsWithoutDuplicates() throws {
         let dir = try makeTmp(), other = try makeTmp()
         defer { try? FileManager.default.removeItem(at: dir); try? FileManager.default.removeItem(at: other) }

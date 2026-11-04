@@ -58,7 +58,8 @@ struct StudioView: View {
             Divider()
             StudioCanvasToolbar(model: model,
                                 maskAction: { model.addShapeBlock(kind: .rectangle) },
-                                zoomAction: { model.addZoomBlock() })
+                                zoomAction: { model.addZoomBlock() },
+                                zoomEnabled: model.hasCursorData)
                 .disabled(model.isExporting)
             Divider()
             HStack(spacing: 0) {
@@ -249,7 +250,8 @@ struct StudioView: View {
         if model.showsCameraTimeline { out.append(.camera) }
         if !model.textBlocks.isEmpty { out.append(.text) }
         if model.showsShapeTimeline { out.append(.shape) }
-        if model.showsZoomTimeline { out.append(.zoom) }
+        // Zoom follows the cursor: no lane for bundles without events (camera-main).
+        if model.showsZoomTimeline && model.hasCursorData { out.append(.zoom) }
         if model.showsSubtitleTimeline { out.append(.subtitle) }
         return out
     }

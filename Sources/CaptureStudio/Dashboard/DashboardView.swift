@@ -343,6 +343,11 @@ private struct ProjectCard: View {
                         .font(.caption2).foregroundStyle(.secondary)
                         .help("Includes camera")
                 }
+                if project.isCameraMain {
+                    Image(systemName: "video.fill")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .help("Camera recording")
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {

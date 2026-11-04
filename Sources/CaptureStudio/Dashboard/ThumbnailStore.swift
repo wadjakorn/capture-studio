@@ -34,7 +34,9 @@ actor ThumbnailStore {
         inFlight[key] = task
         let result = await task.value
         inFlight[key] = nil
-        if result == nil { failed.insert(key) }
+        // An unreadable meta means the bundle may still be mid-write: don't
+        // cache that as a permanent failure, retry on the next request.
+        if result == nil, (try? bundle.loadMeta()) != nil { failed.insert(key) }
         return result
     }
 
@@ -45,7 +47,7 @@ actor ThumbnailStore {
     }
 
     func duration(bundleURL: URL) async -> TimeInterval? {
-        let asset = AVURLAsset(url: ProjectBundle(url: bundleURL).screenURL)
+        let asset = AVURLAsset(url: Self.mainVideoURL(ProjectBundle(url: bundleURL)))
         guard let d = try? await asset.load(.duration), d.isNumeric else { return nil }
         let secs = d.seconds
         return secs.isFinite && secs >= 0 ? secs : nil
@@ -59,9 +61,17 @@ actor ThumbnailStore {
         return CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 
+    /// The bundle's main video (screen or camera-main); `screen.mp4` when the
+    /// meta is unreadable.
+    private static func mainVideoURL(_ bundle: ProjectBundle) -> URL {
+        guard let main = (try? bundle.loadMeta())?.mainTrack else { return bundle.screenURL }
+        return bundle.url(for: main)
+    }
+
     private static func generate(bundle: ProjectBundle) async -> CGImage? {
-        guard FileManager.default.fileExists(atPath: bundle.screenURL.path) else { return nil }
-        let asset = AVURLAsset(url: bundle.screenURL)
+        let videoURL = mainVideoURL(bundle)
+        guard FileManager.default.fileExists(atPath: videoURL.path) else { return nil }
+        let asset = AVURLAsset(url: videoURL)
         guard let duration = try? await asset.load(.duration), duration.isNumeric else { return nil }
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true

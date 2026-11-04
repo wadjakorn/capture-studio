@@ -77,6 +77,45 @@ brew install --cask wadjakorn/capture-studio/capture-studio
 - **Build number** (`CFBundleVersion`) — git commit count, stamped at package
   time in `build-app.sh`. Always increases; never hand-edited.
 
+## Android companion (Capture Studio Phone)
+
+The phone app (`android/`, package `dev.wadjakorn.capturestudio.phone`) is
+released by hand, separately from the macOS CI flow, and attached to the same
+GitHub Release.
+
+1. **One-time keystore.** Create it outside the repo (or anywhere; `*.jks` under
+   `android/` is git-ignored) and back it up. Losing it means phones cannot
+   update in place.
+   ```sh
+   keytool -genkeypair -v -keystore capturestudio-phone.jks \
+     -alias capturestudio-phone -keyalg RSA -keysize 2048 -validity 10000
+   ```
+2. **Export the signing env vars** (never commit the keystore or passwords):
+   ```sh
+   export CS_PHONE_KEYSTORE=/absolute/path/to/capturestudio-phone.jks
+   export CS_PHONE_KEYSTORE_PASSWORD=...
+   export CS_PHONE_KEY_ALIAS=capturestudio-phone
+   export CS_PHONE_KEY_PASSWORD=...
+   ```
+   The release signing config is applied only when all four are set; otherwise
+   `assembleRelease` still works and produces an unsigned APK.
+3. **Build.**
+   ```sh
+   cd android && ./gradlew assembleRelease
+   ```
+   Output: `android/app/build/outputs/apk/release/app-release.apk` (with the env vars unset the file is
+   `app-release-unsigned.apk`; do not publish that one).
+4. **Publish.** Rename it to `CaptureStudioPhone.apk` and attach it to the GitHub
+   Release next to the macOS zip/dmg.
+
+Bump `versionCode` / `versionName` in `android/app/build.gradle.kts` for each
+release. The wire **protocol major (1)** must match between the Mac app and the
+phone app; on a mismatch the Mac picker shows "Update required".
+
+**Build/test.** `cd android && ./gradlew testDebugUnitTest` runs the JVM unit
+tests. Needs Java 17 and the Android SDK 34 (`ANDROID_HOME` or
+`android/local.properties`); Android Studio is not required.
+
 ## Limitations
 
 - **No notarization.** A direct `.dmg` download shows the macOS "unverified

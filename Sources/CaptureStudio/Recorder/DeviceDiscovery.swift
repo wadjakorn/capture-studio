@@ -78,6 +78,69 @@ struct DisplayItem: Identifiable, Hashable {
     }
 }
 
+/// Where a capture device comes from, for grouping in the recorder's pickers.
+/// `.phone` is a USB/Continuity phone seen as an AVCaptureDevice; `.phoneWiFi`
+/// is a Capture Studio Phone found over Bonjour (never returned by `classify`).
+enum DeviceKind: String, CaseIterable {
+    case builtIn, phone, external, virtual, phoneWiFi
+}
+
+extension DeviceKind {
+    private static let builtInNames = ["macbook", "imac", "mac mini", "mac studio", "built-in"]
+    private static let phoneHints = ["samsung", "galaxy", "android", "iriun", "droidcam", "camo",
+                                     "epoccam", "iphone", "ipad", "pixel"]
+    private static let virtualHints = ["virtual", "obs", "snap camera", "mmhmm"]
+
+    /// Pure. `deviceType` is the raw `AVCaptureDevice.DeviceType.rawValue`.
+    static func classify(name: String, manufacturer: String?, modelID: String?,
+                         deviceType: String) -> DeviceKind {
+        if deviceType == AVCaptureDevice.DeviceType.continuityCamera.rawValue { return .phone }
+        if deviceType == AVCaptureDevice.DeviceType.builtInWideAngleCamera.rawValue
+            || deviceType.hasPrefix("AVCaptureDeviceTypeBuiltIn") { return .builtIn }
+        let lowerName = name.lowercased()
+        // Microphones report deviceType `.microphone`, never built-in, so go by name.
+        if builtInNames.contains(where: lowerName.contains) { return .builtIn }
+        let haystack = [name, manufacturer ?? "", modelID ?? ""].joined(separator: " ").lowercased()
+        if phoneHints.contains(where: haystack.contains) { return .phone }
+        if virtualHints.contains(where: haystack.contains) { return .virtual }
+        return .external
+    }
+
+    var groupTitle: String {
+        switch self {
+        case .builtIn: "Built-in"
+        case .phone: "Phone"
+        case .external: "External"
+        case .virtual: "Virtual"
+        case .phoneWiFi: "Phone (Wi-Fi)"
+        }
+    }
+}
+
+// MARK: - Camera format choice
+
+struct CameraFormatCandidate: Equatable {
+    var width: Int
+    var height: Int
+    var maxFPS: Double
+    var index: Int
+}
+
+enum CameraFormatChooser {
+    /// Highest-resolution candidate with max(width,height) <= maxEdge; ties go to
+    /// highest maxFPS, then lowest index. nil if nothing qualifies.
+    static func best(_ candidates: [CameraFormatCandidate], maxEdge: Int = 1920) -> CameraFormatCandidate? {
+        candidates
+            .filter { max($0.width, $0.height) <= maxEdge }
+            .min { a, b in
+                let pa = a.width * a.height, pb = b.width * b.height
+                if pa != pb { return pa > pb }
+                if a.maxFPS != b.maxFPS { return a.maxFPS > b.maxFPS }
+                return a.index < b.index
+            }
+    }
+}
+
 enum DeviceDiscovery {
     /// Enumerates displays via ScreenCaptureKit. Throws if Screen Recording
     /// permission is missing (first call also triggers the TCC prompt).
@@ -128,5 +191,23 @@ enum DeviceDiscovery {
             }
         }
         return "Display \(displayID)"
+    }
+}
+
+extension DeviceDiscovery {
+    static func kind(of device: AVCaptureDevice) -> DeviceKind {
+        DeviceKind.classify(name: device.localizedName, manufacturer: device.manufacturer,
+                            modelID: device.modelID, deviceType: device.deviceType.rawValue)
+    }
+
+    /// Stable group order: builtIn, phone, external, virtual; name order within.
+    /// Empty groups are omitted.
+    static func grouped(_ devices: [AVCaptureDevice]) -> [(kind: DeviceKind, devices: [AVCaptureDevice])] {
+        DeviceKind.allCases.compactMap { kind in
+            let members = devices
+                .filter { self.kind(of: $0) == kind }
+                .sorted { $0.localizedName.localizedStandardCompare($1.localizedName) == .orderedAscending }
+            return members.isEmpty ? nil : (kind: kind, devices: members)
+        }
     }
 }

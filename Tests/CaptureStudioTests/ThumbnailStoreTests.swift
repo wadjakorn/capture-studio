@@ -29,12 +29,32 @@ import Foundation
         #expect(FileManager.default.fileExists(atPath: bundle.thumbnailURL.path))
     }
 
+    private func writeMeta(_ bundle: ProjectBundle) throws {
+        try bundle.writeMeta(ProjectMeta(
+            app: AppInfo(version: "0", macOSVersion: "15.0.0"),
+            display: DisplayInfo.synthetic(width: 100, height: 100),
+            tracks: [TrackInfo(type: .screen, filename: "screen.mp4", sessionStartHostTime: 1,
+                               nominalFPS: 60, codec: "h264", deviceName: "D", deviceID: "1")],
+            recordedAt: Date()))
+    }
+
     @Test func failureIsCachedAndNotRetried() async throws {
         let (bundle, tmp) = try tempBundle()   // no screen.mp4
         defer { try? FileManager.default.removeItem(at: tmp) }
+        try writeMeta(bundle)
         let store = ThumbnailStore()
         #expect(await store.image(bundleURL: bundle.url) == nil)
         #expect(await store.image(bundleURL: bundle.url) == nil)
         #expect(await store.generationCount == 1)
+    }
+
+    // No meta.json yet = bundle possibly mid-write: a failure must not stick.
+    @Test func failureWithUnreadableMetaIsRetried() async throws {
+        let (bundle, tmp) = try tempBundle()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = ThumbnailStore()
+        #expect(await store.image(bundleURL: bundle.url) == nil)
+        #expect(await store.image(bundleURL: bundle.url) == nil)
+        #expect(await store.generationCount == 2)
     }
 }
