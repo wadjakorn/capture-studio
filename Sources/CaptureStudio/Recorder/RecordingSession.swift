@@ -226,6 +226,9 @@ final class RecordingSession: ObservableObject {
                     micDevice: micDevice,
                     micOutputURL: micDevice != nil ? bundle.micURL : nil
                 )
+                recorder.onDeviceLost = { [weak self] msg in
+                    Task { @MainActor in self?.warnings.append(msg) }
+                }
                 do {
                     try await recorder.warmUp()
                     // Cancelled during warm-up: the recorder is still local, so

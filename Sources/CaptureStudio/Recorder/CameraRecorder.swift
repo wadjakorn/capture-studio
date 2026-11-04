@@ -49,6 +49,16 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
+    /// Fired once, on an arbitrary thread, when the camera or hosted mic
+    /// disconnects or the session hits a runtime error. Recording continues;
+    /// the affected tracks are marked truncated.
+    var onDeviceLost: (@Sendable (String) -> Void)?
+    /// Video-side flag, read/written on `queue`: set when the camera is lost.
+    private var deviceLost = false
+    /// Audio-side flag, read/written on `audioQueue`: set when the mic or camera is lost.
+    private var audioDeviceLost = false
+    /// Guards `onDeviceLost` to fire once; accessed on `queue`.
+    private var deviceLostReported = false
     /// Pixel size from the settings dictionary actually handed to the writer
     /// input (never inferred from `activeFormat`). Set in `beginWriting()`.
     private(set) var writtenPixelSize: CGSize?
@@ -145,6 +155,39 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
                 continuation.resume()
             }
         }
+
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(deviceWasDisconnected(_:)),
+                           name: AVCaptureDevice.wasDisconnectedNotification, object: nil)
+        center.addObserver(self, selector: #selector(sessionRuntimeError(_:)),
+                           name: .AVCaptureSessionRuntimeError, object: session)
+    }
+
+    @objc private func deviceWasDisconnected(_ note: Notification) {
+        guard let id = (note.object as? AVCaptureDevice)?.uniqueID else { return }
+        if id == device.uniqueID {
+            handleDeviceLost("Camera disconnected.", cameraLost: true)
+        } else if id == micDevice?.uniqueID {
+            // Mic only: the camera video keeps recording.
+            handleDeviceLost("Microphone disconnected.", cameraLost: false)
+        }
+    }
+
+    @objc private func sessionRuntimeError(_ note: Notification) {
+        let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+        handleDeviceLost("Camera error: \(error?.localizedDescription ?? "unknown")", cameraLost: true)
+    }
+
+    private func handleDeviceLost(_ message: String, cameraLost: Bool) {
+        markTruncated()
+        audioQueue.sync { audioDeviceLost = true }
+        let firstReport: Bool = queue.sync {
+            if cameraLost { deviceLost = true }
+            guard !deviceLostReported else { return false }
+            deviceLostReported = true
+            return true
+        }
+        if firstReport { onDeviceLost?(message) }
     }
 
     /// True while `device.lockForConfiguration()` is held for the format choice.
@@ -223,6 +266,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// finalizing anything — for Cancel from the armed state or app teardown.
     /// Never throws, produces no TrackInfo.
     func discard() async {
+        NotificationCenter.default.removeObserver(self)
         session.stopRunning()
         queue.sync { self.writer?.cancelWriting() }
         audioQueue.sync { self.audioWriter?.cancelWriting() }
@@ -282,6 +326,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     func stop() async throws -> Result {
+        NotificationCenter.default.removeObserver(self)
         session.stopRunning()
         let (writer, input, startTime): (AVAssetWriter?, AVAssetWriterInput?, Double?) = queue.sync {
             (self.writer, self.input, self.sessionStartHostTime)
@@ -359,7 +404,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
-        guard let writer, let input, writer.status == .writing else { return }
+        guard !deviceLost, let writer, let input, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if sessionStartHostTime == nil {
             // When a mic shares this session, wait until audio is flowing so the
@@ -386,7 +431,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
         audioReady = true // master clock is now on the audio device clock
-        guard let writer = audioWriter, let input = audioInput,
+        guard !audioDeviceLost, let writer = audioWriter, let input = audioInput,
               writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if audioStartHostTime == nil {
