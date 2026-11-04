@@ -7,7 +7,7 @@ struct RecorderMenuView: View {
     @EnvironmentObject private var session: RecordingSession
 
     @State private var displays: [DisplayItem] = []
-    @State private var selectedDisplayID: CGDirectDisplayID?
+    @State private var mainSource: MainSource?
     @State private var cameras: [AVCaptureDevice] = []
     @State private var selectedCameraID: String?
     @State private var microphones: [AVCaptureDevice] = []
@@ -40,10 +40,10 @@ struct RecorderMenuView: View {
                     .font(.subheadline.weight(.medium))
             }
 
-            if !permissionGranted {
-                permissionView
-            } else {
+            if permissionGranted || !cameras.isEmpty {
                 recorderView
+            } else {
+                permissionView
             }
 
             if !session.warnings.isEmpty {
@@ -100,7 +100,6 @@ struct RecorderMenuView: View {
             guard !Task.isCancelled else { return }
             projectRows = rows
         }
-        .onChange(of: selectedDisplayID) { _, id in AppSettings.lastDisplayID = id }
         .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasConnectedNotification)) { _ in
             Task { await refreshDevices() }
         }
@@ -236,15 +235,54 @@ struct RecorderMenuView: View {
 
             captureModeRow
 
-            // Area mode derives the display from where you drag; picker is for
-            // whole-display capture only.
-            if !captureAreaEnabled {
-                dropdown("display", selection: displayLabel, isPresented: $showDisplayMenu) {
+            // Area mode derives the display from where you drag, but the Main
+            // picker stays so a camera can be chosen as the main source.
+            dropdown("display", selection: mainLabel, isPresented: $showDisplayMenu) {
+                Text("Displays")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if permissionGranted {
                     ForEach(displays) { display in
                         pickRow("\(display.name) (\(display.pixelWidth)×\(display.pixelHeight))",
-                                selected: selectedDisplayID == display.id) {
-                            selectedDisplayID = display.id
+                                selected: mainSource == .display(display.id)) {
+                            selectMain(.display(display.id))
                             showDisplayMenu = false
+                        }
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        Text("Grant Screen Recording to record a display")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        Button("Request") {
+                            Permissions.requestScreenRecording()
+                            permissionGranted = Permissions.screenRecordingGranted()
+                            if permissionGranted { Task { await refreshDevices() } }
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                }
+                if !cameras.isEmpty {
+                    Divider().padding(.vertical, 4)
+                    Text("Cameras")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    let groups = DeviceDiscovery.grouped(cameras)
+                    ForEach(groups, id: \.kind) { group in
+                        if groups.count > 1 {
+                            Text(group.kind.groupTitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(group.devices, id: \.uniqueID) { device in
+                            pickRow(device.localizedName,
+                                    selected: mainSource == .camera(uniqueID: device.uniqueID)) {
+                                selectMain(.camera(uniqueID: device.uniqueID))
+                                showDisplayMenu = false
+                            }
                         }
                     }
                 }
@@ -265,14 +303,14 @@ struct RecorderMenuView: View {
             .padding(.top, 6)
 
             HStack(alignment: .top, spacing: 6) {
-                dropdown("video", selection: deviceLabel(cameras, selectedCameraID),
+                dropdown("video", selection: "Front camera: " + deviceLabel(frontCameras, selectedCameraID),
                          isPresented: $showCameraMenu) {
                     pickRow("None", selected: selectedCameraID == nil) {
                         selectedCameraID = nil
                         AppSettings.lastCameraID = nil
                         showCameraMenu = false
                     }
-                    let groups = DeviceDiscovery.grouped(cameras)
+                    let groups = DeviceDiscovery.grouped(frontCameras)
                     ForEach(groups, id: \.kind) { group in
                         if groups.count > 1 {
                             Text(group.kind.groupTitle)
@@ -342,7 +380,9 @@ struct RecorderMenuView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                     .labelsHidden()
+                    .disabled(cameraIsMain)
             }
+            .help(cameraIsMain ? Self.cameraMainHelp : "")
 
             HStack(spacing: 6) {
                 Image(systemName: "macwindow")
@@ -364,16 +404,19 @@ struct RecorderMenuView: View {
                 let savedRegion = AppSettings.captureRegion
                 let savedDisplay = AppSettings.captureRegionDisplayID
                 // Area mode seeds the saved region (editable live); full mode the picker's.
-                let region = captureAreaEnabled ? savedRegion : nil
+                let cameraMain = cameraIsMain
+                let region = captureAreaEnabled && !cameraMain ? savedRegion : nil
                 // Seed display from the saved region; fall back to the picker so a
                 // never-set area still has a screen to open the overlay on.
-                let useDisplay = captureAreaEnabled
-                    ? (savedDisplay ?? selectedDisplayID)
-                    : selectedDisplayID
+                let main: MainSource? = cameraMain
+                    ? mainSource
+                    : (captureAreaEnabled
+                        ? (savedDisplay.map(MainSource.display) ?? mainSource)
+                        : mainSource)
                 // Full Display never selects an area. Area mode requires one only
                 // when nothing is saved at all (a full-display area keeps its
                 // display id, so it's recordable as-is).
-                let areaSelection: AreaSelection = !captureAreaEnabled
+                let areaSelection: AreaSelection = (!captureAreaEnabled || cameraMain)
                     ? .unavailable
                     : (savedRegion == nil && savedDisplay == nil ? .required : .optional)
                 // Get the popup out of the way of the preview / area overlay.
@@ -381,10 +424,10 @@ struct RecorderMenuView: View {
                 // torn down by the close doesn't matter.
                 TrayPopupOpener.closePopup()
                 Task {
-                    await session.toggle(main: useDisplay.map(MainSource.display),
+                    await session.toggle(main: main,
                                          cameraID: selectedCameraID,
                                          micID: selectedMicID,
-                                         systemAudio: systemAudioEnabled,
+                                         systemAudio: systemAudioEnabled && !cameraMain,
                                          region: region,
                                          activateForPrompts: false,
                                          previewFirst: true,
@@ -393,14 +436,14 @@ struct RecorderMenuView: View {
             } label: {
                 // Area mode opens the live selection overlay; full-display just
                 // arms a confirm-preview. Camera (if any) previews in both.
-                Label(captureAreaEnabled ? "Preview / Select Area" : "Preview",
-                      systemImage: captureAreaEnabled ? "crop" : "eye")
+                Label(areaMode ? "Preview / Select Area" : "Preview",
+                      systemImage: areaMode ? "crop" : "eye")
                     .frame(maxWidth: .infinity)
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled(captureAreaEnabled ? false : selectedDisplayID == nil)
+            .disabled((!areaMode && mainSource == nil) || (!cameraIsMain && !permissionGranted))
             .padding(.top, 4)
 
             HStack(spacing: 6) {
@@ -530,10 +573,12 @@ struct RecorderMenuView: View {
                 .frame(width: 16)
                 .foregroundStyle(.secondary)
             segmentedToggle
+                .disabled(cameraIsMain)
         }
         .frame(maxWidth: .infinity)
+        .help(cameraIsMain ? Self.cameraMainHelp : "")
 
-        if captureAreaEnabled {
+        if areaMode {
             HStack(spacing: 6) {
                 Image(systemName: "selection.pin.in.out")
                     .frame(width: 16)
@@ -621,10 +666,43 @@ struct RecorderMenuView: View {
         devices.first { $0.uniqueID == id }?.localizedName ?? "None"
     }
 
-    /// Visible label for the display dropdown.
-    private var displayLabel: String {
-        guard let d = displays.first(where: { $0.id == selectedDisplayID }) else { return "Display" }
-        return "\(d.name) (\(d.pixelWidth)×\(d.pixelHeight))"
+    private static let cameraMainHelp = "Not available when a camera is the main source"
+
+    private var cameraIsMain: Bool { mainSource?.isCamera == true }
+
+    /// Area mode is only effective when the main source is a display.
+    private var areaMode: Bool { captureAreaEnabled && !cameraIsMain }
+
+    /// Cameras eligible as the front camera (the main camera is excluded).
+    private var frontCameras: [AVCaptureDevice] {
+        guard let main = mainSource else { return cameras }
+        let ids = Set(RecorderSelection.frontCameraIDs(all: cameras.map(\.uniqueID), main: main))
+        return cameras.filter { ids.contains($0.uniqueID) }
+    }
+
+    /// Persist the choice and re-resolve the front camera against the new main.
+    private func selectMain(_ source: MainSource) {
+        mainSource = source
+        AppSettings.lastMainSource = source
+        resolveFrontCamera()
+    }
+
+    private func resolveFrontCamera() {
+        selectedCameraID = RecorderSelection.resolvedFrontCamera(
+            selectedCameraID, candidates: frontCameras.map(\.uniqueID))
+    }
+
+    /// Visible label for the Main dropdown.
+    private var mainLabel: String {
+        switch mainSource {
+        case .display(let id):
+            guard let d = displays.first(where: { $0.id == id }) else { return "Main" }
+            return "\(d.name) (\(d.pixelWidth)×\(d.pixelHeight))"
+        case .camera(let id):
+            return cameras.first { $0.uniqueID == id }?.localizedName ?? "Main"
+        case nil:
+            return "Main"
+        }
     }
 
     /// Name of the display the saved region was dragged on (for the Area readout).
@@ -644,7 +722,11 @@ struct RecorderMenuView: View {
 
     /// " · <display>" suffix shown under the recording timer, when known.
     private var recordingTargetSuffix: String {
-        let id = captureAreaEnabled ? captureRegionDisplayID : selectedDisplayID
+        if case .camera(let id) = mainSource {
+            guard let name = cameras.first(where: { $0.uniqueID == id })?.localizedName else { return "" }
+            return " · \(name)"
+        }
+        let id = captureAreaEnabled ? captureRegionDisplayID : mainSource?.displayID
         guard let name = displays.first(where: { $0.id == id })?.name else { return "" }
         return " · \(name)"
     }
@@ -658,6 +740,7 @@ struct RecorderMenuView: View {
             seededSelections = true
             selectedCameraID = AppSettings.lastCameraID
             selectedMicID = AppSettings.lastMicID
+            mainSource = AppSettings.lastMainSource
         }
         if let id = selectedCameraID, !cameras.contains(where: { $0.uniqueID == id }) {
             selectedCameraID = nil
@@ -665,18 +748,27 @@ struct RecorderMenuView: View {
         if let id = selectedMicID, !microphones.contains(where: { $0.uniqueID == id }) {
             selectedMicID = nil
         }
-        guard permissionGranted else { return }
-        do {
-            let (items, _) = try await DeviceDiscovery.displays()
-            displays = items
-            if selectedDisplayID == nil { selectedDisplayID = AppSettings.lastDisplayID }
-            if selectedDisplayID == nil || !items.contains(where: { $0.id == selectedDisplayID }) {
-                selectedDisplayID = items.first?.id
+        if permissionGranted {
+            do {
+                let (items, _) = try await DeviceDiscovery.displays()
+                displays = items
+            } catch {
+                displays = []
             }
-        } catch {
+        } else {
             displays = []
-            selectedDisplayID = nil
         }
+        switch mainSource {
+        case .camera(let id) where !cameras.contains(where: { $0.uniqueID == id }):
+            mainSource = displays.first.map { .display($0.id) }
+        case .display(let id) where permissionGranted && !displays.contains(where: { $0.id == id }):
+            mainSource = displays.first.map { .display($0.id) }
+        case nil:
+            mainSource = displays.first.map { .display($0.id) }
+        default:
+            break
+        }
+        resolveFrontCamera()
     }
 }
 

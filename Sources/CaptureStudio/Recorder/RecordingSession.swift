@@ -875,7 +875,10 @@ final class RecordingSession: ObservableObject {
         }
         if main.isCamera || camera != nil, await !Permissions.requestCapture(.video) {
             // Camera-main without camera access can't record anything.
-            if main.isCamera { return }
+            if main.isCamera {
+                state = .failed("Camera access is required to record a camera.")
+                return
+            }
             camera = nil
         }
         if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }

@@ -9,6 +9,7 @@ struct StudioCanvasToolbar: View {
     @ObservedObject var model: StudioModel
     let maskAction: () -> Void
     let zoomAction: () -> Void
+    var zoomEnabled = true
 
     var body: some View {
         HStack(spacing: 10) {
@@ -24,7 +25,10 @@ struct StudioCanvasToolbar: View {
             } label: {
                 Label("Zoom", systemImage: "plus.magnifyingglass")
             }
-            .help("Add an auto zoom/pan block (follows the cursor) at the playhead")
+            .disabled(!zoomEnabled)
+            .help(zoomEnabled
+                  ? "Add an auto zoom/pan block (follows the cursor) at the playhead"
+                  : "Zoom needs cursor data from a screen recording")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

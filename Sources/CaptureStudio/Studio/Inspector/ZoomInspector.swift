@@ -13,7 +13,10 @@ struct ZoomInspector: View {
                 Button { model.addZoomBlock() } label: {
                     Label("Add zoom", systemImage: "plus.magnifyingglass")
                 }
-                .help("Add an auto zoom/pan block at the playhead")
+                .disabled(!model.hasCursorData)
+                .help(model.hasCursorData
+                      ? "Add an auto zoom/pan block at the playhead"
+                      : "Zoom needs cursor data from a screen recording")
 
                 Button(role: .destructive) {
                     if let id = model.selectedZoomBlockID { model.removeZoomBlock(id) }
