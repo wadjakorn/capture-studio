@@ -56,6 +56,7 @@ class StreamService : Service(), LifecycleOwner {
     @Volatile private var fingerprint: ByteArray? = null
 
     override fun onCreate() {
+        DeviceOrientation.start(this)
         super.onCreate()
         registry.currentState = Lifecycle.State.CREATED
         createChannel()
@@ -115,6 +116,7 @@ class StreamService : Service(), LifecycleOwner {
     }
 
     override fun onDestroy() {
+        DeviceOrientation.stop()
         destroyed = true
         instance = null
         _running.value = false

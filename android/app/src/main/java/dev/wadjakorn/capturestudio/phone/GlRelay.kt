@@ -35,6 +35,11 @@ class EncoderGlRelay(
     private val encoderSurface: Surface,
     private val width: Int,
     private val height: Int,
+    /** Size CameraX renders into the SurfaceTexture (pre-transform). */
+    private val cameraWidth: Int = width,
+    private val cameraHeight: Int = height,
+    /** Flip the output horizontally (front cameras arrive mirrored from the HAL). */
+    private val mirrorX: Boolean = false,
     /** GL/EGL failure while running (GL thread). Not called after [release]. */
     private val onError: (String) -> Unit,
 ) {
@@ -55,7 +60,8 @@ class EncoderGlRelay(
     @Volatile private var released = false // release() requested (or setup failed)
     @Volatile private var failed = false // a frame failed; stop drawing, still needs release()
 
-    private val vertices: FloatBuffer = floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
+    private val vertices: FloatBuffer = if (mirrorX) floatBuffer(1f, -1f, -1f, -1f, 1f, 1f, -1f, 1f)
+                                        else floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
     private val texCoords: FloatBuffer = floatBuffer(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
 
     /**
@@ -169,7 +175,7 @@ class EncoderGlRelay(
         checkGl("texture setup")
 
         val st = SurfaceTexture(texId)
-        st.setDefaultBufferSize(width, height)
+        st.setDefaultBufferSize(cameraWidth, cameraHeight)
         st.setOnFrameAvailableListener({ drawFrame() }, handler)
         surfaceTexture = st
         camSurface = Surface(st)

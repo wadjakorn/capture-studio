@@ -18,6 +18,8 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
+import androidx.camera.core.AspectRatio
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -51,10 +53,16 @@ class VideoPipeline(
     @Volatile private var stopped = false
     @Volatile private var codec: MediaCodec? = null
     @Volatile private var rotationDeg = 0
+    @Volatile private var sensorOrientation = 0
     @Volatile private var configSent = false
     @Volatile private var lastPtsNs = Long.MIN_VALUE
 
+    private val rotationListener: (Int) -> Unit = { r ->
+        preview?.let { p -> if (p.targetRotation != r) p.targetRotation = r }
+    }
+
     fun start() {
+        DeviceOrientation.addListener(rotationListener)
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             if (stopped) return@addListener
@@ -67,10 +75,14 @@ class VideoPipeline(
         }, mainExecutor)
     }
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class, androidx.camera.core.ExperimentalCameraInfo::class])
     private fun bind(cameraProvider: ProcessCameraProvider) {
         provider = cameraProvider
         val selector = cameraSelector()
         val resolution = ResolutionSelector.Builder()
+            .setAspectRatioStrategy(
+                AspectRatioStrategy(AspectRatio.RATIO_16_9, AspectRatioStrategy.FALLBACK_RULE_AUTO),
+            )
             .setResolutionStrategy(
                 ResolutionStrategy(Size(width, height), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER),
             )
@@ -78,9 +90,15 @@ class VideoPipeline(
         val p = Preview.Builder()
             .setResolutionSelector(resolution)
             .setTargetFrameRate(Range(fps, fps))
+            .setTargetRotation(DeviceOrientation.rotation)
             .build()
         p.setSurfaceProvider(surfaceExecutor) { request -> onSurfaceRequest(request) }
         preview = p
+        sensorOrientation = runCatching {
+            Camera2CameraInfo.from(cameraProvider.getCameraInfo(selector))
+                .getCameraCharacteristic(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        }.getOrDefault(0)
+        Log.i(TAG, "Sensor orientation $sensorOrientation")
         val camera = cameraProvider.bindToLifecycle(lifecycleOwner, selector, p)
         Log.i(TAG, "Camera bound: id=${cameraId(camera.cameraInfo)} facing=$facing")
         PhoneClock.configure(camera.cameraInfo)
@@ -112,8 +130,12 @@ class VideoPipeline(
         runCatching { Camera2CameraInfo.from(info).cameraId }.getOrDefault("?")
 
     private fun onSurfaceRequest(request: SurfaceRequest) {
-        val size = request.resolution
-        Log.i(TAG, "Surface request ${size.width}x${size.height}")
+        val camSize = request.resolution
+        // The HAL's buffer transform (undone by the SurfaceTexture matrix in the relay)
+        // rotates the content by the sensor orientation, so the encoded frame has the
+        // swapped size for 90/270 sensors.
+        val size = if (sensorOrientation % 180 != 0) Size(camSize.height, camSize.width) else camSize
+        Log.i(TAG, "Surface request ${camSize.width}x${camSize.height} -> encoding ${size.width}x${size.height}")
         val thread = HandlerThread("CSPhone-venc").apply { start() }
         val handler = Handler(thread.looper)
         val enc = try {
@@ -153,7 +175,8 @@ class VideoPipeline(
             }
             Unit
         }
-        val relay = EncoderGlRelay(encoderSurface, size.width, size.height) { message -> fail(message) }
+        val relay = EncoderGlRelay(encoderSurface, size.width, size.height, camSize.width, camSize.height,
+            mirrorX = facing == CameraSelector.LENS_FACING_FRONT) { message -> fail(message) }
         try {
             relay.start()
         } catch (e: Exception) {
@@ -164,7 +187,25 @@ class VideoPipeline(
             return
         }
         codec = enc
-        request.setTransformationInfoListener(surfaceExecutor) { info -> rotationDeg = info.rotationDegrees }
+        request.setTransformationInfoListener(surfaceExecutor) { info ->
+            // The SurfaceTexture transform applied by the GL relay already undoes the
+            // sensor orientation (the HAL's buffer transform), so only the device
+            // rotation remains for the Mac to apply.
+            // The relay output is upright for the device's natural orientation (both
+            // facings, unmirrored), so the Mac only needs to undo the physical device
+            // rotation: device turned counter-clockwise by r → content appears turned
+            // clockwise by r → rotate by (360 − r) clockwise.
+            val r = when (DeviceOrientation.rotation) {
+                Surface.ROTATION_90 -> 90
+                Surface.ROTATION_180 -> 180
+                Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            // The front camera is un-mirrored in GL (horizontal flip), which inverts
+            // the rotation sense, so its rotation is r rather than 360 − r.
+            rotationDeg = if (facing == CameraSelector.LENS_FACING_FRONT) r else (360 - r) % 360
+            Log.i(TAG, "Rotation: target=$r camerax=${info.rotationDegrees} sensor=$sensorOrientation -> sent $rotationDeg")
+        }
         request.provideSurface(relay.cameraSurface(), surfaceExecutor) { result ->
             // Release order: CameraX is done with the camera surface (this result
             // callback) → relay drops the SurfaceTexture and EGL objects on the GL
@@ -273,6 +314,7 @@ class VideoPipeline(
     fun stop() {
         if (stopped) return
         stopped = true
+        DeviceOrientation.removeListener(rotationListener)
         preview?.let { provider?.unbind(it) }
         preview = null
     }
