@@ -57,8 +57,8 @@ let fixtureSPSPPS: [Data] = [
     #expect(CMSampleBufferGetPresentationTimeStamp(s) == pts)
     #expect(CMSampleBufferGetNumSamples(s) == 1)
     #expect(CMSampleBufferGetTotalSampleSize(s) == 4)
-    let trim = CMGetAttachment(s, key: kCMSampleBufferAttachmentKey_TrimDurationAtStart, attachmentModeOut: nil)
-    #expect(CMTimeMakeFromDictionary(trim as! CFDictionary?) == MediaPassthrough.aacPrimingTrim)
+    let trim = try #require(CMGetAttachment(s, key: kCMSampleBufferAttachmentKey_TrimDurationAtStart, attachmentModeOut: nil) as? NSDictionary)
+    #expect(CMTimeMakeFromDictionary(trim as CFDictionary) == MediaPassthrough.aacPrimingTrim)
     let plain = try MediaPassthrough.audioSample(AudioFramePayload(ptsNs: 0, accessUnit: Data([1])), format: fmt, pts: pts, trimAtStart: nil)
     #expect(CMGetAttachment(plain, key: kCMSampleBufferAttachmentKey_TrimDurationAtStart, attachmentModeOut: nil) == nil)
 }
@@ -90,4 +90,32 @@ let fixtureSPSPPS: [Data] = [
     // Mirroring swaps left/right: the source origin lands on the right edge for 0°.
     let m = CGPoint.zero.applying(MediaPassthrough.transform(rotationDeg: 0, mirrored: true, size: size))
     #expect(abs(m.x - 1920) < 0.01 && abs(m.y) < 0.01)
+}
+@Test func previewCopyOfNonKeyframeKeepsNotSync() throws {
+    let fmt = try MediaPassthrough.videoFormat(parameterSets: fixtureSPSPPS)
+    let s = try MediaPassthrough.videoSample(VideoFramePayload(ptsNs: 0, keyframe: false, mirrored: false, rotationDeg: 0, nalus: Data([0,0,0,2,0x41,0x00])), format: fmt, pts: .zero)
+    let c = try MediaPassthrough.previewCopy(s)
+    let copyAtt = try #require((CMSampleBufferGetSampleAttachmentsArray(c, createIfNecessary: false) as? [[CFString: Any]])?.first)
+    #expect(copyAtt[kCMSampleAttachmentKey_NotSync] as? Bool == true)
+    #expect(copyAtt[kCMSampleAttachmentKey_DisplayImmediately] as? Bool == true)
+    let origAtt = try #require((CMSampleBufferGetSampleAttachmentsArray(s, createIfNecessary: false) as? [[CFString: Any]])?.first)
+    #expect(origAtt[kCMSampleAttachmentKey_NotSync] as? Bool == true)
+    #expect(origAtt[kCMSampleAttachmentKey_DisplayImmediately] == nil)
+}
+@Test func mirroredRotationsFlipInDisplayFrame() {
+    let size = CGSize(width: 1920, height: 1080)
+    let p90 = CGPoint(x: 1920, y: 0).applying(MediaPassthrough.transform(rotationDeg: 90, mirrored: true, size: size))
+    #expect(abs(p90.x - 0) < 0.01 && abs(p90.y - 1920) < 0.01)
+    let p270 = CGPoint.zero.applying(MediaPassthrough.transform(rotationDeg: 270, mirrored: true, size: size))
+    #expect(abs(p270.x - 1080) < 0.01 && abs(p270.y - 1920) < 0.01)
+    // Mirroring is a horizontal flip of the upright (unmirrored) output for every rotation.
+    for deg: UInt16 in [0, 90, 180, 270] {
+        let plain = MediaPassthrough.transform(rotationDeg: deg, mirrored: false, size: size)
+        let mirrored = MediaPassthrough.transform(rotationDeg: deg, mirrored: true, size: size)
+        let outW = MediaPassthrough.rotatedSize(size, rotationDeg: deg).width
+        for src in [CGPoint(x: 0, y: 0), CGPoint(x: 1920, y: 0), CGPoint(x: 0, y: 1080), CGPoint(x: 1920, y: 1080), CGPoint(x: 300, y: 700)] {
+            let a = src.applying(plain), b = src.applying(mirrored)
+            #expect(abs(b.x - (outW - a.x)) < 0.01 && abs(b.y - a.y) < 0.01)
+        }
+    }
 }

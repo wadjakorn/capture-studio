@@ -120,8 +120,8 @@ enum MediaPassthrough {
     }
 
     /// Writer-input transform for a buffer of pixel `size` that must be rotated clockwise by
-    /// `rotationDeg` (CameraX `rotationDegrees`) to display upright, optionally mirrored
-    /// horizontally first. Maps the source pixel rect exactly onto (0, 0, rotatedSize).
+    /// `rotationDeg` (CameraX `rotationDegrees`) to display upright, then optionally mirrored
+    /// horizontally in the upright frame. Maps the source pixel rect exactly onto (0, 0, rotatedSize).
     static func transform(rotationDeg: UInt16, mirrored: Bool, size: CGSize) -> CGAffineTransform {
         let w = size.width, h = size.height
         let rotation: CGAffineTransform
@@ -132,8 +132,11 @@ enum MediaPassthrough {
         default:  rotation = .identity
         }
         guard mirrored else { return rotation }
-        let flip = CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: w, ty: 0)
-        return flip.concatenating(rotation)   // flip first, then rotate
+        // Mirror in the display (rotated) frame: flipping the source before a 90°/270°
+        // rotation would flip the result vertically instead.
+        let outWidth = rotatedSize(size, rotationDeg: rotationDeg).width
+        let flip = CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: outWidth, ty: 0)
+        return rotation.concatenating(flip)   // rotate first, then flip horizontally
     }
 
     static func rotatedSize(_ size: CGSize, rotationDeg: UInt16) -> CGSize {
