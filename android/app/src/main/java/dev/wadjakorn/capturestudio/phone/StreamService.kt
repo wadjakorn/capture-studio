@@ -45,6 +45,7 @@ class StreamService : Service(), LifecycleOwner {
     private val occupant = AtomicReference<Session?>(null)
 
     private var started = false
+    @Volatile private var destroyed = false
     @Volatile private var server: TlsServer? = null
     private var advertiser: Advertiser? = null
     @Volatile private var video: VideoPipeline? = null
@@ -91,6 +92,10 @@ class StreamService : Service(), LifecycleOwner {
             Identity.ensureKey()
             fingerprint = Identity.fingerprint()
             val s = TlsServer(Identity.sslContext())
+            if (destroyed) {
+                s.close()
+                return
+            }
             server = s
             s.start { socket ->
                 val session = Session(socket, sessionContext)
@@ -98,17 +103,18 @@ class StreamService : Service(), LifecycleOwner {
                 session.start()
             }
             main.post {
-                if (server !== s) return@post
+                if (destroyed || server !== s) return@post
                 advertiser = Advertiser(this).also { it.register(s.port) }
             }
             Log.i(TAG, "TLS server listening on port ${s.port}")
         } catch (e: Exception) {
             Log.e(TAG, "Could not start the server", e)
-            main.post { stopSelf() }
+            main.post { if (!destroyed) stopSelf() }
         }
     }
 
     override fun onDestroy() {
+        destroyed = true
         instance = null
         advertiser?.unregister()
         advertiser = null
@@ -122,6 +128,11 @@ class StreamService : Service(), LifecycleOwner {
         _sessionState.value = SessionState.Idle
         registry.currentState = Lifecycle.State.DESTROYED
         io.shutdown()
+        // Remove the ongoing notification; updates posted by closing sessions are
+        // ignored from here on (destroyed), so it cannot reappear.
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        started = false
         super.onDestroy()
     }
 
@@ -182,7 +193,7 @@ class StreamService : Service(), LifecycleOwner {
     // region Streaming (main thread)
 
     private fun beginStreaming(session: Session, requested: StartConfig, sink: MediaSink) {
-        if (occupant.get() !== session) return // closed before this ran
+        if (destroyed || occupant.get() !== session) return // closed before this ran
         stopPipelines()
         val prefs = settings.value
         val config = requested.copy(
@@ -194,15 +205,18 @@ class StreamService : Service(), LifecycleOwner {
         streamingSession = session
         acquireLocks()
         registry.currentState = Lifecycle.State.STARTED
+        // Pipeline failures end the session with ERROR{internal}; the session's
+        // idempotent close then stops the pipelines and releases occupancy.
+        val onFailure: (String) -> Unit = { message -> session.fail(message) }
         if (config.video) {
             val lens = if (config.facing == "front") CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             video = VideoPipeline(
                 this, this, lens, config.width, config.height,
-                config.fps.coerceIn(1, 60), config.bitrate.coerceIn(500_000, 50_000_000), sink,
+                config.fps.coerceIn(1, 60), config.bitrate.coerceIn(500_000, 50_000_000), sink, onFailure,
             ).also { it.start() }
         }
         if (config.audio) {
-            audio = AudioPipeline(this, sink).also { it.start() }
+            audio = AudioPipeline(this, sink, onFailure).also { it.start() }
         }
     }
 
@@ -269,7 +283,7 @@ class StreamService : Service(), LifecycleOwner {
     }
 
     private fun updateNotification(streamingTo: String?) {
-        if (!started) return
+        if (!started || destroyed) return
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(streamingTo))
     }
 
@@ -296,12 +310,13 @@ class StreamService : Service(), LifecycleOwner {
 
         val isRunning: Boolean get() = instance != null
 
-        fun allowPairing() {
-            pairingSession.get()?.resolvePairing(true)
+        /** Resolves the pending pairing only if it is still [sessionId] (from [pairingRequest]). */
+        fun allowPairing(sessionId: Long) {
+            pairingSession.get()?.takeIf { it.id == sessionId }?.resolvePairing(true)
         }
 
-        fun denyPairing() {
-            pairingSession.get()?.resolvePairing(false)
+        fun denyPairing(sessionId: Long) {
+            pairingSession.get()?.takeIf { it.id == sessionId }?.resolvePairing(false)
         }
 
         fun start(context: Context) {

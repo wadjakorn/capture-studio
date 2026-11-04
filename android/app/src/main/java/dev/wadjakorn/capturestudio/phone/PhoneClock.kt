@@ -47,7 +47,9 @@ object PhoneClock {
     fun sampleMonotonicOffset(): Long {
         var best = Long.MAX_VALUE
         repeat(SAMPLES) {
-            val d = SystemClock.elapsedRealtimeNanos() - System.nanoTime()
+            // nanoTime first: any delay between the reads inflates d, so min picks the tightest pair.
+            val n = System.nanoTime()
+            val d = SystemClock.elapsedRealtimeNanos() - n
             if (d < best) best = d
         }
         return best

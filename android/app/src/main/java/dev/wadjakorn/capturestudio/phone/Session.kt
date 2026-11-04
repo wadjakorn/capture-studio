@@ -15,6 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLSocket
+import org.json.JSONException
+import org.json.JSONObject
 import kotlin.concurrent.withLock
 
 /** What the UI shows about the (single) occupying Mac. */
@@ -88,6 +90,7 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
     private var queuedVideo = 0
     private var queuedAudio = 0
     private var draining = false // Close sentinel queued: accept nothing more
+    private var dropUntilKeyframe = false // a P-frame was dropped: the chain is broken until the next IDR
     @Volatile private var lastSyncRequestMs = 0L
     @Volatile private var lastWriteMs = 0L
 
@@ -168,11 +171,17 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
 
     private fun onHello(payload: ByteArray): Unit = synchronized(lock) {
         if (phase != Phase.AwaitingHello) return violation("HELLO in $phase")
-        val hello = Hello.decode(payload) ?: return violation("malformed HELLO")
-        if (hello.pv != PROTOCOL_VERSION) {
-            sendError(ErrorPayload.VERSION, "Protocol version ${hello.pv} is not supported (phone speaks $PROTOCOL_VERSION).")
+        // Check pv alone first so a future HELLO shape gets ERROR{version}, not a malformed-close.
+        val pv = try {
+            JSONObject(String(payload, Charsets.UTF_8)).getInt("pv")
+        } catch (e: JSONException) {
+            return violation("malformed HELLO")
+        }
+        if (pv != PROTOCOL_VERSION) {
+            sendError(ErrorPayload.VERSION, "Protocol version $pv is not supported (phone speaks $PROTOCOL_VERSION).")
             return
         }
+        val hello = Hello.decode(payload) ?: return violation("malformed HELLO")
         macName = hello.deviceName.take(MAX_NAME).ifBlank { "Mac" }
         val name = ctx.deviceName()
         send(Message(MessageType.HELLO, Hello(PROTOCOL_VERSION, name, name, listOf("video", "audio")).encode()))
@@ -291,6 +300,13 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
         ctx.publishState(this, SessionState.Streaming(macName))
     }
 
+    /** A capture pipeline failed: tell the Mac (ERROR{internal}) and close. Any thread. */
+    fun fail(message: String): Unit = synchronized(lock) {
+        if (phase != Phase.Streaming) return
+        Log.e(TAG, "session $id: pipeline failure: $message")
+        sendError(ErrorPayload.INTERNAL, message)
+    }
+
     private fun violation(what: String) {
         Log.w(TAG, "session $id: protocol violation: $what")
         shutdown(graceful = false, what)
@@ -342,22 +358,37 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
         queueLock.withLock {
             if (draining) return
             when (item) {
-                is Outgoing.Pong -> queue.addFirst(item) // timing-sensitive; independent of media order
-                else -> queue.addLast(item)
-            }
-            when (item) {
                 is Outgoing.Video -> {
-                    queuedVideo++
-                    if (queuedVideo > maxQueuedVideo && dropOldest { it is Outgoing.Video && !it.keyframe }) {
-                        queuedVideo--
-                        needSync = true
+                    // GOP-safe backpressure (the Mac writes passthrough, so a broken
+                    // reference chain would land in the file): never send a P-frame whose
+                    // predecessor was dropped. Over budget → drop the incoming P-frame and
+                    // every following one until the next keyframe. A keyframe arriving
+                    // over budget supersedes all video queued before it.
+                    if (!item.keyframe) {
+                        if (dropUntilKeyframe) return
+                        if (queuedVideo >= maxQueuedVideo) {
+                            dropUntilKeyframe = true
+                            needSync = true
+                        }
+                    } else {
+                        dropUntilKeyframe = false
+                        if (queuedVideo >= maxQueuedVideo) {
+                            queue.removeAll { it is Outgoing.Video }
+                            queuedVideo = 0
+                        }
+                    }
+                    if (!needSync) {
+                        queue.addLast(item)
+                        queuedVideo++
                     }
                 }
                 is Outgoing.Audio -> {
+                    queue.addLast(item)
                     queuedAudio++
                     if (queuedAudio > MAX_QUEUED_AUDIO && dropOldest { it is Outgoing.Audio }) queuedAudio--
                 }
-                else -> Unit
+                is Outgoing.Pong -> queue.addFirst(item) // timing-sensitive; independent of media order
+                else -> queue.addLast(item)
             }
             queueReady.signal()
         }

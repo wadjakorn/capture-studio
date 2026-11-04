@@ -19,7 +19,12 @@ import androidx.core.content.ContextCompat
  * from `AudioRecord.getTimestamp(TIMEBASE_BOOTTIME)` plus the frames read since —
  * never from when `read()` happened to return.
  */
-class AudioPipeline(private val context: Context, private val sink: MediaSink) {
+class AudioPipeline(
+    private val context: Context,
+    private val sink: MediaSink,
+    /** Fatal capture/encoder failure (any thread). Not called after [stop]. */
+    private val onFailure: (String) -> Unit,
+) {
     @Volatile private var running = false
     private var thread: Thread? = null
 
@@ -27,7 +32,8 @@ class AudioPipeline(private val context: Context, private val sink: MediaSink) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            Log.e(TAG, "RECORD_AUDIO not granted; audio disabled")
+            Log.e(TAG, "RECORD_AUDIO not granted")
+            onFailure("Microphone permission not granted on the phone")
             return
         }
         running = true
@@ -53,11 +59,13 @@ class AudioPipeline(private val context: Context, private val sink: MediaSink) {
                 )
             } catch (e: SecurityException) {
                 Log.e(TAG, "AudioRecord denied", e)
+                fail("Microphone access denied")
                 return
             }
             record = rec
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "AudioRecord failed to initialize")
+                fail("Microphone could not start")
                 return
             }
             val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -82,8 +90,10 @@ class AudioPipeline(private val context: Context, private val sink: MediaSink) {
             while (running) {
                 val n = readFully(rec, pcm)
                 if (n <= 0) {
-                    if (n < 0) Log.e(TAG, "AudioRecord.read error $n")
-                    if (n < 0) break else continue
+                    if (n == 0) continue
+                    Log.e(TAG, "AudioRecord.read error $n")
+                    fail("Microphone read error $n")
+                    break
                 }
                 val chunkStartFrame = framesRead
                 framesRead += n / BYTES_PER_FRAME
@@ -105,6 +115,7 @@ class AudioPipeline(private val context: Context, private val sink: MediaSink) {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Audio pipeline failed", e)
+            fail("Audio pipeline failed: ${e.message}")
         } finally {
             record?.let { r ->
                 runCatching { r.stop() }
@@ -115,6 +126,10 @@ class AudioPipeline(private val context: Context, private val sink: MediaSink) {
                 c.release()
             }
         }
+    }
+
+    private fun fail(message: String) {
+        if (running) onFailure(message)
     }
 
     private fun readFully(rec: AudioRecord, buf: ByteArray): Int {

@@ -37,11 +37,13 @@ class VideoPipeline(
     private val fps: Int,
     private val bitrate: Int,
     private val sink: MediaSink,
+    /** Fatal camera/encoder failure (any thread). Not called after [stop]. */
+    private val onFailure: (String) -> Unit,
 ) {
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private var provider: ProcessCameraProvider? = null
     private var preview: Preview? = null
-    private var stopped = false
+    @Volatile private var stopped = false
     @Volatile private var codec: MediaCodec? = null
     @Volatile private var rotationDeg = 0
     @Volatile private var configSent = false
@@ -55,6 +57,7 @@ class VideoPipeline(
                 bind(future.get())
             } catch (e: Exception) {
                 Log.e(TAG, "Camera bind failed", e)
+                fail("Camera could not start: ${e.message}")
             }
         }, mainExecutor)
     }
@@ -92,11 +95,20 @@ class VideoPipeline(
                 Log.e(TAG, "Encoder configure failed", e2)
                 thread.quitSafely()
                 request.willNotProvideSurface()
+                fail("Video encoder could not be configured: ${e2.message}")
                 return
             }
         }
-        val surface: Surface = enc.createInputSurface()
-        enc.start()
+        val surface: Surface = try {
+            enc.createInputSurface().also { enc.start() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Encoder start failed", e)
+            enc.release()
+            thread.quitSafely()
+            request.willNotProvideSurface()
+            fail("Video encoder could not start: ${e.message}")
+            return
+        }
         codec = enc
         request.setTransformationInfoListener(surfaceExecutor) { info -> rotationDeg = info.rotationDegrees }
         request.provideSurface(surface, surfaceExecutor) { result ->
@@ -158,7 +170,8 @@ class VideoPipeline(
         }
 
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-            Log.e(TAG, "Video encoder error", e)
+            Log.e(TAG, "Video encoder error (transient=${e.isTransient}, recoverable=${e.isRecoverable})", e)
+            if (!e.isTransient) fail("Video encoder error: ${e.diagnosticInfo}")
         }
 
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
@@ -192,6 +205,10 @@ class VideoPipeline(
                 nalus = nalus,
             ),
         )
+    }
+
+    private fun fail(message: String) {
+        if (!stopped) onFailure(message)
     }
 
     /** Thread-safe; asks the encoder for an IDR as soon as possible. */
