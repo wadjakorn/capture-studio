@@ -37,8 +37,14 @@
 	<string>15.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_capturestudio._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Capture Studio records your camera alongside the screen so you can edit them separately.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Capture Studio finds Capture Studio Phone on your Wi-Fi to use your phone as a camera and microphone.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Capture Studio records your microphone alongside the screen so you can edit them separately.</string>
 	<key>UTExportedTypeDeclarations</key>

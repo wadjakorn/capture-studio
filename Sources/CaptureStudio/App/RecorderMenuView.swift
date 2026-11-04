@@ -82,7 +82,11 @@ struct RecorderMenuView: View {
         }
         .padding(14)
         .frame(width: 300)
-        .task { await refreshDevices() }
+        .task {
+            // Lazy policy: only browse automatically once the user has paired before.
+            if PhonePairingStore.shared.hasAnyPairing { PhoneBrowser.shared.start() }
+            await refreshDevices()
+        }
         // Openability + meta reads touch the disk (possibly a network volume),
         // so they run off-main and only the result lands in @State.
         // The active recording is part of the key so its row reappears once the
