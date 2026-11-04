@@ -164,8 +164,8 @@ private final class CameraPanel: NSPanel {
     }
 }
 
-/// Hosts a source-fed preview layer whose transform (rotation, front-camera
-/// mirror) the source sets. For a 90/270 rotation the inner layer gets swapped
+/// Hosts a source-fed preview layer whose transform (rotation only) the source
+/// sets; mirroring is the panel toggle on this container. For a 90/270 rotation the inner layer gets swapped
 /// bounds (height × width) centered in the container, so the rotated frame fits
 /// instead of being clipped. Relayout follows the inner layer's transform (KVO).
 private final class RotatedPreviewContainerLayer: CALayer {
@@ -194,7 +194,7 @@ private final class RotatedPreviewContainerLayer: CALayer {
     override func layoutSublayers() {
         super.layoutSublayers()
         let t = inner.transform
-        // A 90/270 rotation (with or without a mirror) swaps the axes.
+        // A 90/270 rotation swaps the axes.
         let swapsAxes = abs(t.m12) > abs(t.m11)
         let size = swapsAxes ? CGSize(width: bounds.height, height: bounds.width) : bounds.size
         CATransaction.begin()

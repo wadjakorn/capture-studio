@@ -7,7 +7,9 @@ track roles, camera-main recording).
 Changelog: v2.1 (2026-11-04) - Writing rule 5 priming-trim conditions; Security
 "Busy handling" 120 s pairing deadline for a socket mid-pairing.
 v2.2 (2026-11-04) - Writing rule 3: `mirrored` affects the preview only, never
-the file; Security "Not covered" adds first-pairing impersonation by a LAN peer.
+the file; Security "Not covered" adds first-pairing impersonation by a LAN peer;
+then rule 3 again: `mirrored` is informational (neither file nor preview
+applies it; the panel toggle alone mirrors the preview).
 
 ## Intent
 
@@ -246,8 +248,9 @@ observed and left for a later slewing change. Minimum RTT > 100 ms → warning
    even though they arrive later — otherwise Studio's `max(0, offset)` clamp
    bakes in the network latency) and (b) is a keyframe: create the
    `AVAssetWriter` + passthrough input, set `input.transform` from this
-   frame's `rotationDeg` only; `mirrored` affects the preview, never the file
-   (transform must precede `startWriting`),
+   frame's `rotationDeg` only; `mirrored` is informational; neither the file
+   nor the preview transform applies it — the preview mirror is the panel
+   toggle, like the local camera (transform must precede `startWriting`),
    `startWriting`, `startSession(atSourceTime: hostPTS)`,
    `sessionStartHostTime = hostPTS.seconds`. Rotation changes afterwards are
    ignored and warned.

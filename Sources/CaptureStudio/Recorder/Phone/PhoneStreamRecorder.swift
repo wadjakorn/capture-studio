@@ -34,7 +34,11 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     private static let drainRetryInterval: DispatchTimeInterval = .milliseconds(5)
     private static let stopDrainTimeout: TimeInterval = 2
     private static let nominalFPS: Double = 30
-    /// No primary-track sample for this long after warm-up → treated as a disconnect.
+    /// Frame-arrival watchdog (primary track: video, or audio when audio-only).
+    /// Until the first sample arrives the phone may still be cold-starting its
+    /// camera/codec after START, so the first deadline is `firstSampleGrace`;
+    /// after that, no sample for `frameStallTimeout` → treated as a disconnect.
+    private static let firstSampleGrace: TimeInterval = 10
     private static let frameStallTimeout: TimeInterval = 3
 
     private let device: PhoneDevice
@@ -75,7 +79,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     // Video
     private var videoFormat: CMVideoFormatDescription?
     private var videoDimensions = CGSize.zero
-    private var previewTransformKey: (rotation: UInt16, mirrored: Bool)?
+    private var previewTransformKey: UInt16?
     private var videoWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var videoWriterFailed = false
@@ -255,16 +259,18 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     // MARK: - Frame-arrival watchdog (queue)
 
     /// The connection can stay open for a long time after Wi-Fi drops (TCP
-    /// keepalive). No video (or, audio-only, no audio) for 3 s → same as `didFail`.
+    /// keepalive). No video (or, audio-only, no audio) for 3 s → same as `didFail`;
+    /// the first sample after START gets a 10 s grace (camera cold start).
     private func armFrameWatchdog() {
         guard frameWatchdog == nil, !stopping, !stopRequested, !deviceLost else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + Self.frameStallTimeout)
+        timer.schedule(deadline: .now() + Self.firstSampleGrace)
         timer.setEventHandler { [weak self] in self?.frameWatchdogFired() }
         frameWatchdog = timer
         timer.resume()
     }
 
+    /// Per primary-track sample: the first one ends the 10 s grace; from then on 3 s.
     private func rearmFrameWatchdog() {
         frameWatchdog?.schedule(deadline: .now() + Self.frameStallTimeout)
     }
@@ -325,10 +331,10 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         writeVideo(sample, frame: frame, hostPTS: hostPTS, format: format)
     }
 
-    /// Rule 7: a DisplayImmediately copy per frame; rotation/mirror as a layer
-    /// transform. This recorder owns `layer.transform`; the preview panel hosts the
-    /// layer in a container (its mirror toggle flips the container, and it lays the
-    /// layer out with swapped bounds for 90/270).
+    /// Rule 7: a DisplayImmediately copy per frame; rotation as a layer transform.
+    /// `frame.mirrored` is not applied: the preview mirror is the panel's toggle
+    /// alone (it flips the hosting container), like the local camera. This recorder
+    /// owns `layer.transform`; the panel lays the layer out with swapped bounds for 90/270.
     private func enqueuePreview(_ sample: CMSampleBuffer, frame: VideoFramePayload) {
         guard let layer, let renderer else { return }
         if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
@@ -341,11 +347,10 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         } catch {
             Log.recorder.error("phone preview copy failed: \(String(describing: error), privacy: .public)")
         }
-        if previewTransformKey?.rotation != frame.rotationDeg || previewTransformKey?.mirrored != frame.mirrored {
-            previewTransformKey = (frame.rotationDeg, frame.mirrored)
+        if previewTransformKey != frame.rotationDeg {
+            previewTransformKey = frame.rotationDeg
             let radians = -CGFloat(frame.rotationDeg % 360) * .pi / 180
-            let transform = CATransform3DConcat(CATransform3DMakeRotation(radians, 0, 0, 1),
-                                                CATransform3DMakeScale(frame.mirrored ? -1 : 1, 1, 1))
+            let transform = CATransform3DMakeRotation(radians, 0, 0, 1)
             DispatchQueue.main.async {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
