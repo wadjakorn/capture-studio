@@ -23,6 +23,11 @@ struct CompositorLayout {
 
     var screenTrackID: CMPersistentTrackID
     var cameraTrackID: CMPersistentTrackID?
+    /// Source tracks' `preferredTransform`s (top-left space). Applied when the
+    /// frame is fetched so all downstream math sees upright frames; identity
+    /// (every local capture) skips the work.
+    var screenTransform: CGAffineTransform = .identity
+    var cameraTransform: CGAffineTransform = .identity
 
     // Camera (present only when a styled camera is shown).
     var feedSize: CGSize = .zero
@@ -313,6 +318,7 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 request.finish(with: CompositorError.noFrame)
                 return
             }
+            let screenSource = Self.oriented(screenBuf, layout.screenTransform)
             let now = request.compositionTime.seconds
 
             // Resolve auto-zoom for this frame (identity when scale == 1).
@@ -384,13 +390,13 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                 // real source pixels (transparent elsewhere), so the background
                 // shows through the letterbox bars, outside the frame, and in any
                 // overflow gap the pan opens at the frame edge — all in one step.
-                let screen = zoomed(screenCanvasImage(screenBuf, layout: layout))
-                let bg = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
+                let screen = zoomed(screenCanvasImage(screenSource, layout: layout))
+                let bg = backgroundFill(video: screenSource,
                                         layout: layout,
                                         image: instruction.overlay.backgroundImage)
                 output = framed(screen).composited(over: bg)
             } else {
-                output = backgroundFill(video: CIImage(cvPixelBuffer: screenBuf),
+                output = backgroundFill(video: screenSource,
                                         layout: layout,
                                         image: instruction.overlay.backgroundImage)
             }
@@ -457,6 +463,18 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
 
     // MARK: - Frame building
 
+    /// Source frame as a CIImage, upright per the track's `preferredTransform`
+    /// (top-left space → conjugated into CI's bottom-left space), re-anchored at
+    /// the origin. Identity returns the buffer image untouched.
+    static func oriented(_ buffer: CVPixelBuffer, _ transform: CGAffineTransform) -> CIImage {
+        let image = CIImage(cvPixelBuffer: buffer)
+        guard !transform.isIdentity else { return image }
+        let flipY = CGAffineTransform(scaleX: 1, y: -1)
+        let turned = image.transformed(by: flipY.concatenating(transform).concatenating(flipY))
+        return turned.transformed(by: CGAffineTransform(translationX: -turned.extent.minX,
+                                                        y: -turned.extent.minY))
+    }
+
     /// Place the source onto the canvas at the manual reframe (fit letterbox or
     /// cover crop) WITHOUT discarding the out-of-frame source. The transform only
     /// positions/scales the full source; nothing is cropped here. The caller adds
@@ -466,8 +484,7 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     /// reframe positions the source, the zoom crops/zooms within it. Pixels the
     /// zoom leaves outside the frame are transparent, so the background shows
     /// through there.
-    private func screenCanvasImage(_ buffer: CVPixelBuffer, layout: CompositorLayout) -> CIImage {
-        let image = CIImage(cvPixelBuffer: buffer)
+    private func screenCanvasImage(_ image: CIImage, layout: CompositorLayout) -> CIImage {
         if let place = layout.screenFit {
             // Contain (letterbox) the whole source at the fit placement.
             guard place.width > 0, layout.sourceSize.width > 0 else { return image }
@@ -565,7 +582,7 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
                                opacity: CGFloat) -> CIImage? {
         guard layout.feedCrop.width > 0, pip.width > 0,
               let mask = decorations.mask else { return nil }
-        var image = CIImage(cvPixelBuffer: buffer)
+        var image = Self.oriented(buffer, layout.cameraTransform)
         // Orient the raw feed first (clockwise quarter turns), then re-anchor its
         // extent at the origin so all downstream crop/scale runs in oriented space.
         if layout.cameraQuarterTurns != 0 {

@@ -112,7 +112,7 @@ struct StudioTransportBar: View {
         if model.showsCameraTimeline { count += 1 }
         if !model.textBlocks.isEmpty { count += 1 }
         if model.showsShapeTimeline { count += 1 }
-        if model.showsZoomTimeline { count += 1 }
+        if model.showsZoomTimeline && model.hasCursorData { count += 1 }
         if model.showsSubtitleTimeline { count += 1 }
         return count
     }

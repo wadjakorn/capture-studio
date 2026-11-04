@@ -64,4 +64,14 @@ struct StudioModelFitTests {
                                            zoom: 1, centerX: 0.5, centerY: -1.0)
         #expect(bottom.minY == canvas.height - bottom.height)  // flush bottom
     }
+
+    // A portrait phone track is stored landscape with a 90° preferredTransform;
+    // the render size must be the upright (transformed) size.
+    @Test func orientedSizeAppliesQuarterTurnTransform() {
+        let t = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 1080, ty: 0)
+        #expect(StudioModel.orientedSize(CGSize(width: 1920, height: 1080), transform: t)
+                == CGSize(width: 1080, height: 1920))
+        #expect(StudioModel.orientedSize(CGSize(width: 1920, height: 1080), transform: .identity)
+                == CGSize(width: 1920, height: 1080))
+    }
 }

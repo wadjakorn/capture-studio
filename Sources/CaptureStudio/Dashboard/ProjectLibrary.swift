@@ -15,10 +15,13 @@ struct ProjectSummary: Identifiable, Equatable {
     var name: String
     var recordedAt: Date?
     var status: ProjectStatus
+    /// Has an overlay (PiP) camera track — not counting a camera main track.
     var hasCamera: Bool
     var byteSize: Int64
     /// Lives outside the recordings directory (opened from elsewhere).
     var isExternal: Bool
+    /// The main video track is a camera (no screen recording).
+    var isCameraMain: Bool = false
 
     var id: String { ProjectLibrary.identity(of: url) }
 }
@@ -68,13 +71,15 @@ enum ProjectLibrary {
         var status = ProjectStatus.ready
         var recordedAt: Date?
         var hasCamera = false
+        var isCameraMain = false
         if isActive {
             status = .recording
         } else if !fileManager.fileExists(atPath: bundle.metaURL.path) {
             status = .incomplete
         } else if let meta = try? bundle.loadMeta() {
             recordedAt = meta.recordedAt
-            hasCamera = meta.tracks.contains { $0.type == .camera }
+            hasCamera = meta.overlayCameraTrack != nil
+            isCameraMain = meta.isCameraMain
         } else {
             status = .unreadable
         }
@@ -91,7 +96,8 @@ enum ProjectLibrary {
             status: status,
             hasCamera: hasCamera,
             byteSize: byteSize(of: url, fileManager: fileManager),
-            isExternal: isExternal)
+            isExternal: isExternal,
+            isCameraMain: isCameraMain)
     }
 
     private static func byteSize(of url: URL, fileManager: FileManager) -> Int64 {
