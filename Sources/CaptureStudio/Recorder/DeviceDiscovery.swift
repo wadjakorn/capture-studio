@@ -78,6 +78,42 @@ struct DisplayItem: Identifiable, Hashable {
     }
 }
 
+/// Where a capture device comes from, for grouping in the recorder's pickers.
+enum DeviceKind: String, CaseIterable {
+    case builtIn, phone, external, virtual
+}
+
+extension DeviceKind {
+    private static let builtInNames = ["macbook", "imac", "mac mini", "mac studio", "built-in"]
+    private static let phoneHints = ["samsung", "galaxy", "android", "iriun", "droidcam", "camo",
+                                     "epoccam", "iphone", "ipad", "pixel"]
+    private static let virtualHints = ["virtual", "obs", "snap camera", "mmhmm"]
+
+    /// Pure. `deviceType` is the raw `AVCaptureDevice.DeviceType.rawValue`.
+    static func classify(name: String, manufacturer: String?, modelID: String?,
+                         deviceType: String) -> DeviceKind {
+        if deviceType == AVCaptureDevice.DeviceType.continuityCamera.rawValue { return .phone }
+        if deviceType == AVCaptureDevice.DeviceType.builtInWideAngleCamera.rawValue
+            || deviceType.hasPrefix("AVCaptureDeviceTypeBuiltIn") { return .builtIn }
+        let lowerName = name.lowercased()
+        // Microphones report deviceType `.microphone`, never built-in, so go by name.
+        if builtInNames.contains(where: lowerName.contains) { return .builtIn }
+        let haystack = [name, manufacturer ?? "", modelID ?? ""].joined(separator: " ").lowercased()
+        if phoneHints.contains(where: haystack.contains) { return .phone }
+        if virtualHints.contains(where: haystack.contains) { return .virtual }
+        return .external
+    }
+
+    var groupTitle: String {
+        switch self {
+        case .builtIn: "Built-in"
+        case .phone: "Phone"
+        case .external: "External"
+        case .virtual: "Virtual"
+        }
+    }
+}
+
 enum DeviceDiscovery {
     /// Enumerates displays via ScreenCaptureKit. Throws if Screen Recording
     /// permission is missing (first call also triggers the TCC prompt).
@@ -128,5 +164,23 @@ enum DeviceDiscovery {
             }
         }
         return "Display \(displayID)"
+    }
+}
+
+extension DeviceDiscovery {
+    static func kind(of device: AVCaptureDevice) -> DeviceKind {
+        DeviceKind.classify(name: device.localizedName, manufacturer: device.manufacturer,
+                            modelID: device.modelID, deviceType: device.deviceType.rawValue)
+    }
+
+    /// Stable group order: builtIn, phone, external, virtual; name order within.
+    /// Empty groups are omitted.
+    static func grouped(_ devices: [AVCaptureDevice]) -> [(kind: DeviceKind, devices: [AVCaptureDevice])] {
+        DeviceKind.allCases.compactMap { kind in
+            let members = devices
+                .filter { self.kind(of: $0) == kind }
+                .sorted { $0.localizedName.localizedStandardCompare($1.localizedName) == .orderedAscending }
+            return members.isEmpty ? nil : (kind: kind, devices: members)
+        }
     }
 }
