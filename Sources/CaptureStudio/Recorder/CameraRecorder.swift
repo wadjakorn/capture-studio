@@ -49,6 +49,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
+    /// Mic track truncated (set with `truncated`, or alone on a mic-only loss).
+    /// Accessed on `queue`.
+    private var micTruncated = false
     /// Fired once, on an arbitrary thread, when the camera or hosted mic
     /// disconnects or the session hits a runtime error. Recording continues;
     /// the affected tracks are marked truncated.
@@ -167,7 +170,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard let id = (note.object as? AVCaptureDevice)?.uniqueID else { return }
         if id == device.uniqueID {
             handleDeviceLost("Camera disconnected.", cameraLost: true)
-        } else if id == micDevice?.uniqueID {
+        } else if micAttached, id == micDevice?.uniqueID {
             // Mic only: the camera video keeps recording.
             handleDeviceLost("Microphone disconnected.", cameraLost: false)
         }
@@ -179,10 +182,13 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     private func handleDeviceLost(_ message: String, cameraLost: Bool) {
-        markTruncated()
         audioQueue.sync { audioDeviceLost = true }
         let firstReport: Bool = queue.sync {
-            if cameraLost { deviceLost = true }
+            micTruncated = true
+            if cameraLost {
+                deviceLost = true
+                truncated = true
+            }
             guard !deviceLostReported else { return false }
             deviceLostReported = true
             return true
@@ -322,7 +328,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     }
 
     func markTruncated() {
-        queue.sync { truncated = true }
+        queue.sync { truncated = true; micTruncated = true }
     }
 
     func stop() async throws -> Result {
