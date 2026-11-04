@@ -123,14 +123,16 @@ final class RecordingSession: ObservableObject {
         state.holdsActiveBundle ? pendingBundleURL : nil
     }
     private var screenRecorder: ScreenRecorder?
-    private var cameraRecorder: CameraRecorder?
+    private var cameraRecorder: (any CameraSourceRecorder)?
     private var micRecorder: MicRecorder?
     private var previewPanel: CameraPreviewPanel?
     /// Camera-main mode: the camera recording the main video (`main-camera.mp4`).
     /// Mandatory like the screen recorder; nil in display-main mode.
-    private var mainCameraRecorder: CameraRecorder?
+    private var mainCameraRecorder: (any CameraSourceRecorder)?
     /// Camera-main mode: large bottom-center live preview of the main camera.
     private var mainPreviewPanel: CameraPreviewPanel?
+    /// Warning when a camera source stops without a video track.
+    private static let cameraNoVideoWarning = "Camera produced no video."
     /// Main source this session armed with. Set in `arm()`, cleared wherever
     /// `armedDisplayID` is. Every branch that differs for camera-main switches on
     /// it — `screenRecorder == nil` already means "area deferred" and must not
@@ -258,16 +260,19 @@ final class RecordingSession: ObservableObject {
                         return
                     }
                     cameraRecorder = recorder
-                    // Live preview off the recorder's own session — excluded
+                    warnings.append(contentsOf: recorder.warmUpWarnings)
+                    // Live preview off the recorder's own surface — excluded
                     // from screen.mp4 because the whole app is excluded.
-                    let panel = CameraPreviewPanel(
-                        session: recorder.captureSession,
-                        onDisplay: displayID,
-                        onCancel: { [weak self] in
-                            Task { @MainActor in await self?.cancelCountdownOrArming() }
-                        })
-                    panel.show()
-                    previewPanel = panel
+                    if let surface = recorder.previewSurface {
+                        let panel = CameraPreviewPanel(
+                            surface: surface,
+                            onDisplay: displayID,
+                            onCancel: { [weak self] in
+                                Task { @MainActor in await self?.cancelCountdownOrArming() }
+                            })
+                        panel.show()
+                        previewPanel = panel
+                    }
                     if let w = recorder.micWarning {
                         Log.recorder.error("mic on camera session failed: \(w, privacy: .public)")
                         // Mic couldn't attach to the camera session — try a
@@ -429,15 +434,18 @@ final class RecordingSession: ObservableObject {
                 return
             }
             mainCameraRecorder = mainRecorder
-            let mainPanel = CameraPreviewPanel(
-                session: mainRecorder.captureSession,
-                onDisplay: nil,
-                placement: .bottomCenterLarge,
-                onCancel: { [weak self] in
-                    Task { @MainActor in await self?.cancelCountdownOrArming() }
-                })
-            mainPanel.show()
-            mainPreviewPanel = mainPanel
+            warnings.append(contentsOf: mainRecorder.warmUpWarnings)
+            if let surface = mainRecorder.previewSurface {
+                let mainPanel = CameraPreviewPanel(
+                    surface: surface,
+                    onDisplay: nil,
+                    placement: .bottomCenterLarge,
+                    onCancel: { [weak self] in
+                        Task { @MainActor in await self?.cancelCountdownOrArming() }
+                    })
+                mainPanel.show()
+                mainPreviewPanel = mainPanel
+            }
             if let w = mainRecorder.micWarning {
                 Log.recorder.error("mic \(micDevice?.localizedName ?? "none", privacy: .public) on main camera session failed: \(w, privacy: .public); falling back to a standalone mic session")
                 if let micDevice {
@@ -465,15 +473,18 @@ final class RecordingSession: ObservableObject {
                         return
                     }
                     cameraRecorder = recorder
-                    let panel = CameraPreviewPanel(
-                        session: recorder.captureSession,
-                        onDisplay: nil,
-                        placement: .corner,
-                        onCancel: { [weak self] in
-                            Task { @MainActor in await self?.cancelCountdownOrArming() }
-                        })
-                    panel.show()
-                    previewPanel = panel
+                    warnings.append(contentsOf: recorder.warmUpWarnings)
+                    if let surface = recorder.previewSurface {
+                        let panel = CameraPreviewPanel(
+                            surface: surface,
+                            onDisplay: nil,
+                            placement: .corner,
+                            onCancel: { [weak self] in
+                                Task { @MainActor in await self?.cancelCountdownOrArming() }
+                            })
+                        panel.show()
+                        previewPanel = panel
+                    }
                 } catch {
                     guard armIsCurrent(generation) else {
                         abandonArm(bundle)
@@ -555,7 +566,7 @@ final class RecordingSession: ObservableObject {
     /// factory so Part C can branch on non-AVCaptureDevice sources.
     private func makeCameraSource(id: String, outputURL: URL,
                                   micDevice: AVCaptureDevice?,
-                                  micOutputURL: URL?) -> CameraRecorder? {
+                                  micOutputURL: URL?) -> (any CameraSourceRecorder)? {
         guard let device = DeviceDiscovery.cameras().first(where: { $0.uniqueID == id }) else {
             return nil
         }
@@ -1069,7 +1080,11 @@ final class RecordingSession: ObservableObject {
             if let cameraRecorder {
                 do {
                     let result = try await cameraRecorder.stop()
-                    tracks.append(result.camera)
+                    if let cameraTrack = result.camera {
+                        tracks.append(cameraTrack)
+                    } else {
+                        warnings.append(Self.cameraNoVideoWarning)
+                    }
                     if let micTrack = result.mic { tracks.append(micTrack) }
                     if let w = cameraRecorder.micWarning { warnings.append(w) }
                 } catch {
@@ -1110,11 +1125,16 @@ final class RecordingSession: ObservableObject {
     /// Camera-main `stop()`: finalizes the main camera (anchor), overlay camera
     /// and standalone mic, then writes a v2 meta with synthetic display geometry
     /// sized to the main video. No events.jsonl — there is no captured display.
-    private func finishCameraMain(bundle: ProjectBundle, mainRecorder: CameraRecorder,
+    private func finishCameraMain(bundle: ProjectBundle,
+                                  mainRecorder: any CameraSourceRecorder,
                                   streamError: Error?) async {
-        let mainResult: CameraRecorder.Result
+        let mainResult: CameraSourceResult
+        let mainCameraTrack: TrackInfo
         do {
             mainResult = try await mainRecorder.stop()
+            // No main video is the same failed take as a stop() error.
+            guard let camera = mainResult.camera else { throw MainCameraNoVideoError() }
+            mainCameraTrack = camera
         } catch {
             // The anchor track is lost — nothing to save. Release the other
             // still-running capture sessions instead of leaking them.
@@ -1129,7 +1149,7 @@ final class RecordingSession: ObservableObject {
             return
         }
         do {
-            var mainTrack = mainResult.camera
+            var mainTrack = mainCameraTrack
             mainTrack.role = .main
             var tracks = [mainTrack]
             if let micTrack = mainResult.mic { tracks.append(micTrack) }
@@ -1138,9 +1158,12 @@ final class RecordingSession: ObservableObject {
             if let cameraRecorder {
                 do {
                     let result = try await cameraRecorder.stop()
-                    var overlayTrack = result.camera
-                    overlayTrack.role = .overlay
-                    tracks.append(overlayTrack)
+                    if var overlayTrack = result.camera {
+                        overlayTrack.role = .overlay
+                        tracks.append(overlayTrack)
+                    } else {
+                        warnings.append(Self.cameraNoVideoWarning)
+                    }
                     if let micTrack = result.mic { tracks.append(micTrack) }
                 } catch {
                     warnings.append("Camera track lost: \(error.localizedDescription)")
@@ -1271,6 +1294,11 @@ final class RecordingSession: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
     }
+}
+
+/// Camera-main `stop()`: the main camera source finished without a video track.
+struct MainCameraNoVideoError: LocalizedError {
+    var errorDescription: String? { "Main camera produced no video." }
 }
 
 /// Stream error for an auto-stop caused by losing the main camera.

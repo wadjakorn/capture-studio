@@ -9,7 +9,8 @@ import AVFoundation
 /// A camera's built-in mic (e.g. a USB webcam) cannot stream audio to a rival
 /// AVCaptureSession while this session owns the device — the audio session
 /// gets zero buffers. Hosting the mic here avoids that contention.
-final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate,
+final class CameraRecorder: NSObject, CameraSourceRecorder,
+                            AVCaptureVideoDataOutputSampleBufferDelegate,
                             AVCaptureAudioDataOutputSampleBufferDelegate {
     enum CameraError: LocalizedError {
         case deviceUnavailable
@@ -25,13 +26,6 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
-    /// Result of a camera recording: the camera track plus, when a mic was
-    /// hosted on this session and produced audio, its track too.
-    struct Result {
-        var camera: TrackInfo
-        var mic: TrackInfo?
-    }
-
     private let device: AVCaptureDevice
     private let outputURL: URL
     private let micDevice: AVCaptureDevice?
@@ -40,7 +34,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// The live capture session, exposed so a preview layer can render the feed
     /// in parallel with the file writer (an independent connection — no extra
     /// device open, so no same-device audio/video contention).
-    var captureSession: AVCaptureSession { session }
+    var previewSurface: PreviewSurface? { .captureSession(session) }
+    /// Local capture reports warm-up problems by throwing or via `micWarning`.
+    var warmUpWarnings: [String] { [] }
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "capturestudio.camera.output")
 
@@ -339,7 +335,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         queue.sync { truncated = true; micTruncated = true }
     }
 
-    func stop() async throws -> Result {
+    func stop() async throws -> CameraSourceResult {
         NotificationCenter.default.removeObserver(self)
         session.stopRunning()
         let (writer, input, startTime): (AVAssetWriter?, AVAssetWriterInput?, Double?) = queue.sync {
@@ -371,7 +367,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             truncated: truncated
         )
         let micTrack = await finishAudio()
-        return Result(camera: cameraTrack, mic: micTrack)
+        return CameraSourceResult(camera: cameraTrack, mic: micTrack)
     }
 
     /// Finalizes the audio writer if it captured samples. Returns the mic

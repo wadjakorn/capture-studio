@@ -1,9 +1,10 @@
 import AppKit
 import AVFoundation
 
-/// Floating live camera-preview window shown while recording. Renders the
-/// camera feed from the recorder's own `AVCaptureSession` via a parallel
-/// `AVCaptureVideoPreviewLayer` (no extra device open). The whole app is
+/// Floating live camera-preview window shown while recording. A local camera
+/// renders from the recorder's own `AVCaptureSession` via a parallel
+/// `AVCaptureVideoPreviewLayer` (no extra device open); a remote source hands
+/// over an `AVSampleBufferDisplayLayer` it feeds itself. The whole app is
 /// excluded from the screen capture, so this panel never appears in screen.mp4.
 ///
 /// Draggable + resizable, non-activating (never steals focus from the recorded
@@ -14,7 +15,10 @@ final class CameraPreviewPanel: NSObject {
     private static let mirrorDefaultsKey = "previewMirrored"
 
     private let panel: CameraPanel
-    private let previewLayer: AVCaptureVideoPreviewLayer
+    /// The hosted preview sublayer: an `AVCaptureVideoPreviewLayer` for
+    /// `.captureSession` (mirrored via its connection), or the source's own
+    /// layer for `.displayLayer` (mirrored via a transform).
+    private let previewLayer: CALayer
     private var mirrored: Bool
 
     /// Where the panel opens. `.corner` is the overlay-camera preview (bottom
@@ -27,7 +31,7 @@ final class CameraPreviewPanel: NSObject {
 
     /// `onCancel` fires on ESC while the preview is the key window, so cancelling
     /// works even when the user last clicked (focused) the camera preview.
-    init(session: AVCaptureSession, onDisplay displayID: CGDirectDisplayID?,
+    init(surface: PreviewSurface, onDisplay displayID: CGDirectDisplayID?,
          placement: Placement = .corner,
          onCancel: @escaping () -> Void = {}) {
         let screen = NSScreen.screens.first {
@@ -62,8 +66,15 @@ final class CameraPreviewPanel: NSObject {
             backing: .buffered, defer: false
         )
         panel.onCancel = onCancel
-        previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspect
+        switch surface {
+        case .captureSession(let session):
+            let layer = AVCaptureVideoPreviewLayer(session: session)
+            layer.videoGravity = .resizeAspect
+            previewLayer = layer
+        case .displayLayer(let layer):
+            layer.videoGravity = .resizeAspect
+            previewLayer = layer
+        }
         mirrored = UserDefaults.standard.bool(forKey: Self.mirrorDefaultsKey)
 
         super.init()
@@ -117,10 +128,20 @@ final class CameraPreviewPanel: NSObject {
     }
 
     private func applyMirror() {
-        guard let connection = previewLayer.connection,
-              connection.isVideoMirroringSupported else { return }
-        connection.automaticallyAdjustsVideoMirroring = false
-        connection.isVideoMirrored = mirrored
+        if let captureLayer = previewLayer as? AVCaptureVideoPreviewLayer {
+            guard let connection = captureLayer.connection,
+                  connection.isVideoMirroringSupported else { return }
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = mirrored
+        } else {
+            // Display layer: flip just this sublayer — the mirror button is a
+            // sibling subview, so it stays unmirrored.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            previewLayer.transform = mirrored ? CATransform3DMakeScale(-1, 1, 1)
+                                              : CATransform3DIdentity
+            CATransaction.commit()
+        }
     }
 
     private static var mirrorIcon: NSImage {
@@ -141,11 +162,11 @@ private final class CameraPanel: NSPanel {
     }
 }
 
-/// Hosts an `AVCaptureVideoPreviewLayer`, keeping it sized to the view's bounds.
+/// Hosts the preview sublayer, keeping it sized to the view's bounds.
 private final class PreviewLayerHostView: NSView {
-    private let previewLayer: AVCaptureVideoPreviewLayer
+    private let previewLayer: CALayer
 
-    init(previewLayer: AVCaptureVideoPreviewLayer) {
+    init(previewLayer: CALayer) {
         self.previewLayer = previewLayer
         super.init(frame: .zero)
         wantsLayer = true
@@ -157,6 +178,10 @@ private final class PreviewLayerHostView: NSView {
 
     override func layout() {
         super.layout()
-        previewLayer.frame = bounds
+        // Not `frame`: it is undefined under a non-identity transform (a
+        // mirrored display layer). bounds + centered position is equivalent
+        // for an identity transform (default 0.5 anchor).
+        previewLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        previewLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
     }
 }
