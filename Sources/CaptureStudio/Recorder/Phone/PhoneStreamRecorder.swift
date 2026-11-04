@@ -99,6 +99,13 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     private var audioDrainScheduled = false
     private var warnedAudioOrder = false
     private var warnedAudioOverflow = false
+    /// True until the phone's first AU since START/AUDIO_CONFIG has been seen.
+    private var awaitingStreamFirstAU = true
+    /// Priming still to trim from the head of the written audio (spec rule 5).
+    private var primingTrimRemaining = CMTime.zero
+    /// Host time of the last KEYFRAME_REQ sent from a recovery path (rate limit).
+    private var lastRecoveryKeyframeRequest: CMTime?
+    private static let keyframeRequestMinInterval = CMTime(value: 1, timescale: 2)
 
     // MARK: Public getters
 
@@ -273,7 +280,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
             Log.recorder.error("phone preview renderer failed: \(renderer.error?.localizedDescription ?? "unknown", privacy: .public); flushing")
             renderer.flush()
-            connection?.requestKeyframe()
+            requestRecoveryKeyframe()
         }
         do {
             renderer.enqueue(try MediaPassthrough.previewCopy(sample))
@@ -326,8 +333,10 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     private func startVideoWriter(frame: VideoFramePayload, hostPTS: CMTime,
                                   format: CMVideoFormatDescription) -> Bool {
         guard let outputURL else { videoWriterFailed = true; return false }
+        var created = false
         do {
             let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+            created = true
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: format)
             input.expectsMediaDataInRealTime = true
             let rotation = rotationLatch.latch(frame.rotationDeg)
@@ -352,6 +361,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
             return true
         } catch {
             Log.recorder.error("phone video writer failed: \(error.localizedDescription, privacy: .public)")
+            if created { try? FileManager.default.removeItem(at: outputURL) }
             videoWriterFailed = true
             return false
         }
@@ -365,11 +375,19 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         while let head = videoFIFO.first, !Self.isKeyframe(head) { videoFIFO.removeFirst() }
         if videoFIFO.isEmpty { videoNeedsKeyframe = true }
         _truncated = true
-        connection?.requestKeyframe()
+        requestRecoveryKeyframe()
         if !warnedVideoOverflow {
             warnedVideoOverflow = true
             Log.recorder.warning("Wi-Fi could not keep up; video was truncated.")
         }
+    }
+
+    /// KEYFRAME_REQ from the overflow/renderer-recovery paths, at most once per 500 ms.
+    private func requestRecoveryKeyframe() {
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        if let last = lastRecoveryKeyframeRequest, now - last < Self.keyframeRequestMinInterval { return }
+        lastRecoveryKeyframeRequest = now
+        connection?.requestKeyframe()
     }
 
     // MARK: - Audio
@@ -382,20 +400,28 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         }
         do {
             audioFormat = try MediaPassthrough.audioFormat(asc: asc)
+            awaitingStreamFirstAU = true
         } catch {
             Log.recorder.error("phone audio config rejected: \(String(describing: error), privacy: .public)")
             if _micWarning == nil { _micWarning = "Phone microphone format is unsupported." }
         }
     }
 
-    /// Rule 5: own anchor from the first accepted AU, which carries the priming trim.
+    /// Rule 5: own anchor from the first accepted AU (`hostPTS ≥ beginHostPTS`).
     private func handleAudioFrame(_ frame: AudioFramePayload) {
-        guard audio, !stopping, shouldWrite, !audioWriterFailed, let format = audioFormat else { return }
+        guard audio else { return }
+        let isStreamFirstAU = awaitingStreamFirstAU
+        awaitingStreamFirstAU = false
+        guard !stopping, shouldWrite, !audioWriterFailed, let format = audioFormat else { return }
         let hostPTS = ClockSync.mapToHost(ptsNs: frame.ptsNs, offsetNs: offsetNs)
         guard PTSFloor(floor: beginHostPTS).accept(hostPTS) else { return }
-        let first = audioWriter == nil
-        if first {
+        if audioWriter == nil {
             guard startAudioWriter(hostPTS: hostPTS, format: format) else { return }
+            // Spec rule 5, as ruled: encoder priming exists only at the head of the
+            // phone's stream. The encoder starts at warm-up, so the first AU after
+            // Record is normally mid-stream and must not be trimmed; trim only when
+            // it is also the first AU since START/AUDIO_CONFIG.
+            primingTrimRemaining = isStreamFirstAU ? Self.primingTrim(for: format) : .zero
         }
         guard audioGate.accept(hostPTS) else {
             if !warnedAudioOrder {
@@ -407,7 +433,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         let sample: CMSampleBuffer
         do {
             sample = try MediaPassthrough.audioSample(frame, format: format, pts: hostPTS,
-                                                      trimAtStart: first ? MediaPassthrough.aacPrimingTrim : nil)
+                                                      trimAtStart: nextPrimingTrim(format: format))
         } catch {
             Log.recorder.error("phone audio sample failed: \(String(describing: error), privacy: .public)")
             return
@@ -424,10 +450,33 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         drainAudio()
     }
 
+    /// The priming (`aacPrimingTrim`'s frame count) at the format's sample rate.
+    private static func primingTrim(for format: CMAudioFormatDescription) -> CMTime {
+        guard let rate = sampleRate(of: format) else { return .zero }
+        return CMTime(value: MediaPassthrough.aacPrimingTrim.value, timescale: rate)
+    }
+
+    /// Trim for the next written AU: the remaining priming capped to one AU
+    /// (1024 frames) — a trim may not exceed its sample; the rest carries over.
+    private func nextPrimingTrim(format: CMAudioFormatDescription) -> CMTime? {
+        guard primingTrimRemaining > .zero, let rate = Self.sampleRate(of: format) else { return nil }
+        let trim = CMTimeMinimum(primingTrimRemaining, CMTime(value: 1024, timescale: rate))
+        primingTrimRemaining = primingTrimRemaining - trim
+        return trim
+    }
+
+    private static func sampleRate(of format: CMAudioFormatDescription) -> CMTimeScale? {
+        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+              asbd.mSampleRate > 0 else { return nil }
+        return CMTimeScale(asbd.mSampleRate.rounded())
+    }
+
     private func startAudioWriter(hostPTS: CMTime, format: CMAudioFormatDescription) -> Bool {
         guard let micOutputURL else { audioWriterFailed = true; return false }
+        var created = false
         do {
             let writer = try AVAssetWriter(outputURL: micOutputURL, fileType: .m4a)
+            created = true
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: format)
             input.expectsMediaDataInRealTime = true
             guard writer.canAdd(input) else {
@@ -444,6 +493,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
             return true
         } catch {
             Log.recorder.error("phone audio writer failed: \(error.localizedDescription, privacy: .public)")
+            if created { try? FileManager.default.removeItem(at: micOutputURL) }
             audioWriterFailed = true
             if _micWarning == nil { _micWarning = "Phone microphone recording failed." }
             return false
