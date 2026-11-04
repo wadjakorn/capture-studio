@@ -680,6 +680,14 @@ struct RecorderMenuView: View {
         return cameras.filter { ids.contains($0.uniqueID) }
     }
 
+    /// Fall back to the first display and persist it so the hotkey path
+    /// (which reads AppSettings) agrees with what the popup shows.
+    private func adoptFallbackDisplay() {
+        guard let first = displays.first else { mainSource = nil; return }
+        mainSource = .display(first.id)
+        AppSettings.lastMainSource = .display(first.id)
+    }
+
     /// Persist the choice and re-resolve the front camera against the new main.
     private func selectMain(_ source: MainSource) {
         mainSource = source
@@ -762,9 +770,9 @@ struct RecorderMenuView: View {
         case .camera(let id) where !cameras.contains(where: { $0.uniqueID == id }):
             mainSource = displays.first.map { .display($0.id) }
         case .display(let id) where permissionGranted && !displays.contains(where: { $0.id == id }):
-            mainSource = displays.first.map { .display($0.id) }
+            adoptFallbackDisplay()
         case nil:
-            mainSource = displays.first.map { .display($0.id) }
+            adoptFallbackDisplay()
         default:
             break
         }
