@@ -34,6 +34,8 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     private static let drainRetryInterval: DispatchTimeInterval = .milliseconds(5)
     private static let stopDrainTimeout: TimeInterval = 2
     private static let nominalFPS: Double = 30
+    /// No primary-track sample for this long after warm-up → treated as a disconnect.
+    private static let frameStallTimeout: TimeInterval = 3
 
     private let device: PhoneDevice
     private let video: Bool
@@ -67,6 +69,8 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     private var micTruncated = false
     private var deviceLost = false
     private var deviceLostReported = false
+    /// Frame-arrival watchdog (armed after warm-up; rearmed per primary-track sample).
+    private var frameWatchdog: DispatchSourceTimer?
 
     // Video
     private var videoFormat: CMVideoFormatDescription?
@@ -175,7 +179,10 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
             Log.recorder.info("phone clock sync: offset=\(clock.offsetNs) ns minRTT=\(clock.minRTTNs) ns")
             try await conn.start(StartConfig(video: video, audio: audio, facing: facing,
                                              width: 1920, height: 1080, fps: 30, bitrate: 8_000_000))
-            queue.sync { started = true }
+            queue.sync {
+                started = true
+                armFrameWatchdog()
+            }
         } catch {
             Log.recorder.error("phone warm-up failed: \(error.localizedDescription, privacy: .public)")
             conn.close()
@@ -222,17 +229,59 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     /// writers keep what they have and are finalized by `stop()`.
     func phoneConnection(_ c: PhoneConnection, didFail message: String) {
         Log.recorder.error("phone connection failed: \(message, privacy: .public)")
-        let (firstReport, firstCameraLoss): (Bool, Bool) = queue.sync {
-            _truncated = true
-            micTruncated = true
-            let firstCameraLoss = video && !deviceLost
-            deviceLost = true
-            guard !deviceLostReported else { return (false, firstCameraLoss) }
-            deviceLostReported = true
-            return (true, firstCameraLoss)
-        }
+        let (firstReport, firstCameraLoss) = queue.sync { markLostLocked() }
+        reportLoss(firstReport: firstReport, firstCameraLoss: firstCameraLoss)
+    }
+
+    /// Queue. Marks the stream lost (truncated, device lost); returns which
+    /// callbacks are due (each fires once per recorder).
+    private func markLostLocked() -> (firstReport: Bool, firstCameraLoss: Bool) {
+        cancelFrameWatchdog()
+        _truncated = true
+        micTruncated = true
+        let firstCameraLoss = video && !deviceLost
+        deviceLost = true
+        guard !deviceLostReported else { return (false, firstCameraLoss) }
+        deviceLostReported = true
+        return (true, firstCameraLoss)
+    }
+
+    /// Off `queue` (callers may read the recorder's getters synchronously).
+    private func reportLoss(firstReport: Bool, firstCameraLoss: Bool) {
         if firstReport { onDeviceLost?("Phone disconnected.") }
         if firstCameraLoss { onCameraLost?() }
+    }
+
+    // MARK: - Frame-arrival watchdog (queue)
+
+    /// The connection can stay open for a long time after Wi-Fi drops (TCP
+    /// keepalive). No video (or, audio-only, no audio) for 3 s → same as `didFail`.
+    private func armFrameWatchdog() {
+        guard frameWatchdog == nil, !stopping, !stopRequested, !deviceLost else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.frameStallTimeout)
+        timer.setEventHandler { [weak self] in self?.frameWatchdogFired() }
+        frameWatchdog = timer
+        timer.resume()
+    }
+
+    private func rearmFrameWatchdog() {
+        frameWatchdog?.schedule(deadline: .now() + Self.frameStallTimeout)
+    }
+
+    private func cancelFrameWatchdog() {
+        frameWatchdog?.cancel()
+        frameWatchdog = nil
+    }
+
+    private func frameWatchdogFired() {
+        guard frameWatchdog != nil, !stopping, !stopRequested else { return }
+        Log.recorder.error("phone stream stalled: no \(self.video ? "video" : "audio", privacy: .public) for \(Self.frameStallTimeout) s; treating as disconnected")
+        let (firstReport, firstCameraLoss) = markLostLocked()
+        connection?.close()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.reportLoss(firstReport: firstReport, firstCameraLoss: firstCameraLoss)
+        }
     }
 
     func markTruncated() {
@@ -261,7 +310,9 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     }
 
     private func handleVideoFrame(_ frame: VideoFramePayload) {
-        guard video, !stopping, let format = videoFormat else { return }
+        guard video else { return }
+        rearmFrameWatchdog()
+        guard !stopping, let format = videoFormat else { return }
         let hostPTS = ClockSync.mapToHost(ptsNs: frame.ptsNs, offsetNs: offsetNs)
         let sample: CMSampleBuffer
         do {
@@ -274,7 +325,10 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         writeVideo(sample, frame: frame, hostPTS: hostPTS, format: format)
     }
 
-    /// Rule 7: a DisplayImmediately copy per frame; rotation/mirror as a layer transform.
+    /// Rule 7: a DisplayImmediately copy per frame; rotation/mirror as a layer
+    /// transform. This recorder owns `layer.transform`; the preview panel hosts the
+    /// layer in a container (its mirror toggle flips the container, and it lays the
+    /// layer out with swapped bounds for 90/270).
     private func enqueuePreview(_ sample: CMSampleBuffer, frame: VideoFramePayload) {
         guard let layer, let renderer else { return }
         if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
@@ -341,8 +395,9 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
             input.expectsMediaDataInRealTime = true
             let rotation = rotationLatch.latch(frame.rotationDeg)
             latchedMirrored = frame.mirrored
-            // The transform must be set before startWriting.
-            input.transform = MediaPassthrough.transform(rotationDeg: rotation, mirrored: frame.mirrored,
+            // The transform must be set before startWriting. Rotation only: `mirrored`
+            // affects the preview, never the file (always unmirrored, like the local camera).
+            input.transform = MediaPassthrough.transform(rotationDeg: rotation, mirrored: false,
                                                          size: videoDimensions)
             guard writer.canAdd(input) else {
                 throw PhoneWriterError("writer rejected video input")
@@ -410,6 +465,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
     /// Rule 5: own anchor from the first accepted AU (`hostPTS ≥ beginHostPTS`).
     private func handleAudioFrame(_ frame: AudioFramePayload) {
         guard audio else { return }
+        if !video { rearmFrameWatchdog() }
         let isStreamFirstAU = awaitingStreamFirstAU
         awaitingStreamFirstAU = false
         guard !stopping, shouldWrite, !audioWriterFailed, let format = audioFormat else { return }
@@ -572,6 +628,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
             // Once only: a second stop (or stop after discard) must not touch finished writers.
             guard let connection, !stopRequested, !stopping else { throw PhoneRecorderError.notWarmedUp }
             stopRequested = true
+            cancelFrameWatchdog()
             return connection
         }
         await conn.stop()
@@ -689,6 +746,7 @@ final class PhoneStreamRecorder: CameraSourceRecorder, PhoneConnectionDelegate, 
         let conn: PhoneConnection? = queue.sync {
             stopping = true
             shouldWrite = false
+            cancelFrameWatchdog()
             videoFIFO.removeAll()
             audioFIFO.removeAll()
             if let videoWriter {

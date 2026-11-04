@@ -88,7 +88,7 @@ private struct PairingPanelView: View {
                     Text("on \(model.prompt.phoneName)")
                         .font(.title3)
                 }
-                Text("Check that the same code is shown on your phone, then tap Confirm there.")
+                Text("Check that the same code is shown on your phone, then tap Allow on the phone.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

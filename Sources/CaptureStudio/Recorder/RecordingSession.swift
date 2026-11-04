@@ -649,9 +649,14 @@ final class RecordingSession: ObservableObject {
                               micDevice: micDevice, micOutputURL: micOutputURL)
     }
 
-    /// Runs `warmUp()` with the recorder parked in `pendingRecorder`, so a
-    /// cancel mid-warm-up (e.g. while a phone waits for pairing) discards it.
+    /// Runs `warmUp()`; a phone recorder is parked in `pendingRecorder` so a
+    /// cancel mid-warm-up (e.g. while it waits for pairing) discards it. A local
+    /// `CameraRecorder` is not parked: its cancel path is unchanged.
     private func warmUpTracked(_ recorder: any CameraSourceRecorder) async throws {
+        guard recorder is PhoneStreamRecorder else {
+            try await recorder.warmUp()
+            return
+        }
         pendingRecorder = recorder
         defer { if pendingRecorder === recorder { pendingRecorder = nil } }
         try await recorder.warmUp()

@@ -79,6 +79,7 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
     private var commitment: ByteArray? = null
     private var phoneNonce: ByteArray? = null
     private var deadline: ScheduledFuture<*>? = null
+    private var writerWatchdog: ScheduledFuture<*>? = null
     @Volatile private var videoConfigSent = false
     @Volatile private var maxQueuedVideo = 60
     private val socketClosed = AtomicBoolean(false)
@@ -93,6 +94,10 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
     private var dropUntilKeyframe = false // a P-frame was dropped: the chain is broken until the next IDR
     @Volatile private var lastSyncRequestMs = 0L
     @Volatile private var lastWriteMs = 0L
+    /** Last writer progress: a completed write, or work arriving at an idle writer. */
+    @Volatile private var progressMs = 0L
+    /** The writer has taken an item and not finished writing it. */
+    @Volatile private var writerBusy = false
 
     private sealed class Outgoing {
         class Control(val message: Message) : Outgoing()
@@ -267,9 +272,29 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
         // the occupancy if START never comes, so a vanished Mac cannot hold the phone.
         deadline?.cancel(false)
         deadline = scheduler.schedule({ shutdown(graceful = false, "no START") }, AUTH_IDLE_S, TimeUnit.SECONDS)
+        // Writer stall watchdog for Authenticated + Streaming, any message type: a Mac
+        // that vanished without FIN stops reading, the socket write blocks, and the
+        // phone would otherwise stay occupied until TCP gives up.
+        progressMs = SystemClock.elapsedRealtime()
+        writerWatchdog?.cancel(false)
+        writerWatchdog = scheduler.scheduleWithFixedDelay(::checkWriterStall,
+            WATCHDOG_PERIOD_MS, WATCHDOG_PERIOD_MS, TimeUnit.MILLISECONDS)
         phase = Phase.Authenticated
         ctx.publishState(this, SessionState.Connected(macName))
         return true
+    }
+
+    /** Scheduler thread: the writer made no progress for [STALL_MS] while it had work. */
+    private fun checkWriterStall() {
+        if (phase != Phase.Authenticated && phase != Phase.Streaming) return
+        val stalled = queueLock.withLock {
+            (queue.isNotEmpty() || writerBusy) && SystemClock.elapsedRealtime() - progressMs > STALL_MS
+        }
+        if (!stalled) return
+        Log.w(TAG, "session $id: writer stalled for ${STALL_MS} ms; closing")
+        // Best effort: the writer is blocked, so the ERROR likely never leaves; the
+        // graceful close's grace timer closes the socket regardless.
+        sendError(ErrorPayload.INTERNAL, "Mac stopped reading")
     }
 
     private fun onClockPing(payload: ByteArray, recvNs: Long) {
@@ -357,6 +382,8 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
         var needSync = false
         queueLock.withLock {
             if (draining) return
+            // Work arriving at an idle writer starts the stall clock afresh.
+            if (queue.isEmpty() && !writerBusy) progressMs = SystemClock.elapsedRealtime()
             when (item) {
                 is Outgoing.Video -> {
                     // GOP-safe backpressure (the Mac writes passthrough, so a broken
@@ -427,6 +454,7 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
                 val item = queueLock.withLock {
                     while (queue.isEmpty()) queueReady.await()
                     val next = queue.pollFirst()!!
+                    writerBusy = true
                     when (next) {
                         is Outgoing.Video -> queuedVideo--
                         is Outgoing.Audio -> queuedAudio--
@@ -448,7 +476,10 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
                 val stream = out ?: socket.outputStream.also { out = it }
                 stream.write(MessageCodec.encode(message))
                 stream.flush()
-                lastWriteMs = SystemClock.elapsedRealtime()
+                val now = SystemClock.elapsedRealtime()
+                lastWriteMs = now
+                progressMs = now
+                writerBusy = false
             }
         } catch (e: IOException) {
             if (phase != Phase.Closed) Log.w(TAG, "session $id: write failed: ${e.message}")
@@ -476,6 +507,8 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
             phase = Phase.Closed
             deadline?.cancel(false)
             deadline = null
+            writerWatchdog?.cancel(false)
+            writerWatchdog = null
         }
         if (previous != Phase.Closed) {
             Log.i(TAG, "session $id: closing ($reason)")
@@ -528,6 +561,7 @@ class Session(private val socket: SSLSocket, private val ctx: SessionContext) : 
         private const val GRACE_S = 3L
         private const val AUTH_IDLE_S = 60L
         private const val STALL_MS = 10_000L
+        private const val WATCHDOG_PERIOD_MS = 1_000L
         private const val NONCE_LEN = 32
         private const val TOKEN_LEN = 32
         private const val MAX_NAME = 128

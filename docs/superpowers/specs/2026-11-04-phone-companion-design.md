@@ -1,11 +1,13 @@
 # Phone companion: built-in Android camera/mic over Wi-Fi — design
 
-Date: 2026-11-04. Status: draft v2.1 (after two review passes; v2.1: two post-implementation rulings, see Changelog). Depends on
+Date: 2026-11-04. Status: draft v2.2 (after two review passes; v2.1: two post-implementation rulings; v2.2: final-review amendments, see Changelog). Depends on
 `2026-11-04-phone-camera-and-main-source-design.md` (Part B: `MainSource`,
 track roles, camera-main recording).
 
 Changelog: v2.1 (2026-11-04) - Writing rule 5 priming-trim conditions; Security
 "Busy handling" 120 s pairing deadline for a socket mid-pairing.
+v2.2 (2026-11-04) - Writing rule 3: `mirrored` affects the preview only, never
+the file; Security "Not covered" adds first-pairing impersonation by a LAN peer.
 
 ## Intent
 
@@ -138,7 +140,10 @@ and the Mac verifies it is talking to the phone it paired with.
 - **Threats covered:** LAN stranger cannot start the camera (no token), cannot
   impersonate the phone (pin), cannot read the stream (TLS), cannot win the
   pairing with better than 1-in-a-million odds (commitment). Not covered: a
-  compromised Mac user account, and a user who taps Allow without reading.
+  compromised Mac user account, a user who taps Allow without reading, and
+  a LAN peer impersonating a not-yet-paired phone during first pairing (the
+  Mac accepts PAIR_OK from whichever endpoint it browsed; a Mac-side "codes
+  match" confirmation is a planned follow-up).
 
 ## Protocol
 
@@ -241,7 +246,8 @@ observed and left for a later slewing change. Minimum RTT > 100 ms → warning
    even though they arrive later — otherwise Studio's `max(0, offset)` clamp
    bakes in the network latency) and (b) is a keyframe: create the
    `AVAssetWriter` + passthrough input, set `input.transform` from this
-   frame's `rotationDeg`/`mirrored` (transform must precede `startWriting`),
+   frame's `rotationDeg` only; `mirrored` affects the preview, never the file
+   (transform must precede `startWriting`),
    `startWriting`, `startSession(atSourceTime: hostPTS)`,
    `sessionStartHostTime = hostPTS.seconds`. Rotation changes afterwards are
    ignored and warned.

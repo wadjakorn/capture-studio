@@ -16,8 +16,9 @@ final class CameraPreviewPanel: NSObject {
 
     private let panel: CameraPanel
     /// The hosted preview sublayer: an `AVCaptureVideoPreviewLayer` for
-    /// `.captureSession` (mirrored via its connection), or the source's own
-    /// layer for `.displayLayer` (mirrored via a transform).
+    /// `.captureSession` (mirrored via its connection), or, for `.displayLayer`,
+    /// a container around the source's layer (the source owns the inner layer's
+    /// transform — rotation; the mirror toggle transforms only the container).
     private let previewLayer: CALayer
     private var mirrored: Bool
 
@@ -73,7 +74,7 @@ final class CameraPreviewPanel: NSObject {
             previewLayer = layer
         case .displayLayer(let layer):
             layer.videoGravity = .resizeAspect
-            previewLayer = layer
+            previewLayer = RotatedPreviewContainerLayer(inner: layer)
         }
         mirrored = UserDefaults.standard.bool(forKey: Self.mirrorDefaultsKey)
 
@@ -134,8 +135,9 @@ final class CameraPreviewPanel: NSObject {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = mirrored
         } else {
-            // Display layer: flip just this sublayer — the mirror button is a
-            // sibling subview, so it stays unmirrored.
+            // Display layer: flip just the container (never the source's inner
+            // layer, whose transform carries the rotation) — the mirror button is
+            // a sibling subview, so it stays unmirrored.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             previewLayer.transform = mirrored ? CATransform3DMakeScale(-1, 1, 1)
@@ -159,6 +161,48 @@ private final class CameraPanel: NSPanel {
     override func cancelOperation(_ sender: Any?) { onCancel() }
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { onCancel() } else { super.keyDown(with: event) }
+    }
+}
+
+/// Hosts a source-fed preview layer whose transform (rotation, front-camera
+/// mirror) the source sets. For a 90/270 rotation the inner layer gets swapped
+/// bounds (height × width) centered in the container, so the rotated frame fits
+/// instead of being clipped. Relayout follows the inner layer's transform (KVO).
+private final class RotatedPreviewContainerLayer: CALayer {
+    private let inner: CALayer
+    private var transformObservation: NSKeyValueObservation?
+
+    init(inner: CALayer) {
+        self.inner = inner
+        super.init()
+        addSublayer(inner)
+        // The source sets the transform on the main thread.
+        transformObservation = inner.observe(\.transform) { [weak self] _, _ in
+            self?.setNeedsLayout()
+        }
+    }
+
+    /// Core Animation's presentation-layer copy.
+    override init(layer: Any) {
+        inner = (layer as? RotatedPreviewContainerLayer)?.inner ?? CALayer()
+        super.init(layer: layer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layoutSublayers() {
+        super.layoutSublayers()
+        let t = inner.transform
+        // A 90/270 rotation (with or without a mirror) swaps the axes.
+        let swapsAxes = abs(t.m12) > abs(t.m11)
+        let size = swapsAxes ? CGSize(width: bounds.height, height: bounds.width) : bounds.size
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Not `frame`: undefined under a non-identity transform.
+        inner.bounds = CGRect(origin: .zero, size: size)
+        inner.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        CATransaction.commit()
     }
 }
 

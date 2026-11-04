@@ -50,6 +50,9 @@ final class PhoneConnection: @unchecked Sendable {
     private static let pairingTimeout: TimeInterval = 120
     private static let connectTimeout: TimeInterval = 10
     private static let stopGrace: TimeInterval = 1
+    /// Streaming liveness: a CLOCK_PING every 2 s after START; no pong in 5 s fails.
+    private static let streamPingInterval: TimeInterval = 2
+    private static let streamPongTimeout: TimeInterval = 5
     private static let nonceLength = 32
     private static let tokenLength = 32
 
@@ -88,6 +91,11 @@ final class PhoneConnection: @unchecked Sendable {
     private var pendingConnect: PendingConnect?
     private var pendingControl: PendingControl?
     private var pendingPong: PendingPong?
+    private var streamPingTimer: DispatchSourceTimer?
+    /// The one streaming ping in flight (matched on its `macSendHostNs` echo).
+    private var streamPingOutstanding: (macSendNs: UInt64, timeout: DispatchWorkItem)?
+    /// Offset from the last `syncClock`, for drift logging only.
+    private var syncedOffsetNs: Int64?
 
     init(device: PhoneDevice, pairing: PhonePairing?, macName: String) {
         self.device = device
@@ -168,6 +176,7 @@ final class PhoneConnection: @unchecked Sendable {
               let minRTT = collected.map(\.rttNs).min() else {
             throw PhoneConnectionError.network("clock sync failed")
         }
+        queue.async { self.syncedOffsetNs = offset }
         return (offset, minRTT)
     }
 
@@ -184,6 +193,7 @@ final class PhoneConnection: @unchecked Sendable {
                     if let error {
                         cont.resume(throwing: PhoneConnectionError.network(error.localizedDescription))
                     } else {
+                        self.startStreamPings()
                         cont.resume()
                     }
                 }
@@ -207,6 +217,7 @@ final class PhoneConnection: @unchecked Sendable {
                     cont.resume()
                     return
                 }
+                self.stopStreamPings() // nothing more after STOP
                 let once = OnceFlag()
                 let finish = {
                     guard once.claim() else { return }
@@ -362,11 +373,19 @@ final class PhoneConnection: @unchecked Sendable {
             delegate?.phoneConnection(self, audioFrame: p)
         case .clockPong:
             guard let pong = ClockPongPayload(m.payload) else { return fail(.network("malformed clockPong")) }
-            guard let p = pendingPong, p.macSendNs == pong.macSendHostNs else { return } // stray
-            pendingPong = nil
-            p.timeout.cancel()
-            p.cont.resume(returning: ClockSample(macSendNs: pong.macSendHostNs, phoneRecvNs: pong.phoneRecvNs,
-                                                 phoneSendNs: pong.phoneSendNs, macRecvNs: Self.hostNowNs()))
+            if let p = pendingPong, p.macSendNs == pong.macSendHostNs {
+                pendingPong = nil
+                p.timeout.cancel()
+                p.cont.resume(returning: ClockSample(macSendNs: pong.macSendHostNs, phoneRecvNs: pong.phoneRecvNs,
+                                                     phoneSendNs: pong.phoneSendNs, macRecvNs: Self.hostNowNs()))
+            } else if let s = streamPingOutstanding, s.macSendNs == pong.macSendHostNs {
+                streamPingOutstanding = nil
+                s.timeout.cancel()
+                let sample = ClockSample(macSendNs: pong.macSendHostNs, phoneRecvNs: pong.phoneRecvNs,
+                                         phoneSendNs: pong.phoneSendNs, macRecvNs: Self.hostNowNs())
+                let drift = syncedOffsetNs.map { sample.offsetNs - $0 } ?? 0
+                Log.recorder.debug("phone ping: rtt=\(sample.rttNs) ns drift=\(drift) ns")
+            } // else stray
         case .error:
             let payload = try? JSONDecoder().decode(ErrorPayload.self, from: m.payload)
             fail(mapError(payload))
@@ -455,6 +474,37 @@ final class PhoneConnection: @unchecked Sendable {
         }
     }
 
+    /// Queue. Liveness pings while streaming; never overlaps `syncClock` (starts after START).
+    private func startStreamPings() {
+        guard !closed, streamPingTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.streamPingInterval, repeating: Self.streamPingInterval)
+        timer.setEventHandler { [weak self] in self?.sendStreamPing() }
+        streamPingTimer = timer
+        timer.resume()
+    }
+
+    private func stopStreamPings() {
+        streamPingTimer?.cancel()
+        streamPingTimer = nil
+        streamPingOutstanding?.timeout.cancel()
+        streamPingOutstanding = nil
+    }
+
+    /// Queue. One ping in flight at a time; its own 5 s timeout fails the connection.
+    private func sendStreamPing() {
+        guard !closed, connection != nil, streamPingOutstanding == nil else { return }
+        let macSend = Self.hostNowNs()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, let s = self.streamPingOutstanding, s.macSendNs == macSend else { return }
+            self.streamPingOutstanding = nil
+            self.fail(.network("Phone stopped responding."))
+        }
+        streamPingOutstanding = (macSend, item)
+        queue.asyncAfter(deadline: .now() + Self.streamPongTimeout, execute: item)
+        send(PhoneMessage(type: .clockPing, payload: Self.bigEndian(macSend)))
+    }
+
     private func setPhoneVersion(_ pv: Int) async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async { self.phoneProtocolVersion = pv; cont.resume() }
@@ -505,6 +555,7 @@ final class PhoneConnection: @unchecked Sendable {
     /// Idempotent. Each pending continuation is taken (nil'd) before it is resumed.
     private func closeLocked(resuming error: PhoneConnectionError) {
         closed = true
+        stopStreamPings()
         if let p = takeConnect() { p.cont.resume(throwing: error) }
         if let p = pendingControl {
             pendingControl = nil
