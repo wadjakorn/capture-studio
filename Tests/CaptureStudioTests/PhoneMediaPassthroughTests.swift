@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import CoreMedia
 import Foundation
@@ -70,6 +71,48 @@ let fixtureSPSPPS: [Data] = [
     #expect(att?.first?[kCMSampleAttachmentKey_DisplayImmediately] as? Bool == true)
     let orig = CMSampleBufferGetSampleAttachmentsArray(s, createIfNecessary: false) as? [[CFString: Any]]
     #expect(orig?.first?[kCMSampleAttachmentKey_DisplayImmediately] == nil)
+}
+@Test func esDescriptorWrapsASC() {
+    let d = [UInt8](MediaPassthrough.esDescriptor(asc: Data([0x11, 0x88])))
+    #expect(d == [0x03, 0x19, 0x00, 0x00, 0x00,
+                  0x04, 0x11, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                  0x05, 0x02, 0x11, 0x88,
+                  0x06, 0x01, 0x02])
+}
+@Test func audioFormatCookieIsESDescriptor() throws {
+    let fmt = try MediaPassthrough.audioFormat(asc: Data([0x11, 0x88]))
+    var size = 0
+    let raw = try #require(CMAudioFormatDescriptionGetMagicCookie(fmt, sizeOut: &size))
+    let cookie = [UInt8](UnsafeBufferPointer(start: raw.assumingMemoryBound(to: UInt8.self), count: size))
+    #expect(cookie.first == 0x03 && cookie.suffix(5) == [0x11, 0x88, 0x06, 0x01, 0x02])
+}
+/// AVAssetWriter must produce an m4a that CoreAudio can open (the bare-ASC cookie bug).
+@Test func passthroughAudioFileOpensInCoreAudio() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("cs-aac-\(UUID().uuidString).m4a")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let fmt = try MediaPassthrough.audioFormat(asc: Data([0x11, 0x88]))
+    let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
+    let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: fmt)
+    writer.add(input)
+    #expect(writer.startWriting())
+    writer.startSession(atSourceTime: .zero)
+    // One silent AAC-LC mono frame (any syntactically valid AU is fine for the container).
+    let au = Data([0x21, 0x10, 0x04, 0x60, 0x8C, 0x1C])
+    for i in 0..<5 {
+        let s = try MediaPassthrough.audioSample(AudioFramePayload(ptsNs: 0, accessUnit: au), format: fmt,
+                                                 pts: CMTime(value: CMTimeValue(i * 1024), timescale: 48_000), trimAtStart: nil)
+        while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.005) }
+        #expect(input.append(s))
+    }
+    input.markAsFinished()
+    let done = DispatchSemaphore(value: 0)
+    writer.finishWriting { done.signal() }
+    done.wait()
+    #expect(writer.status == .completed)
+    var file: AudioFileID?
+    let status = AudioFileOpenURL(url as CFURL, .readPermission, 0, &file)
+    #expect(status == noErr, "AudioFileOpenURL: \(status)")
+    if let file { AudioFileClose(file) }
 }
 @Test func invalidASCThrows() {
     #expect(throws: (any Error).self) { try MediaPassthrough.audioFormat(asc: Data([0x11])) }

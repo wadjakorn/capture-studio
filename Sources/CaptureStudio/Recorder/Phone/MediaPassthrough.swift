@@ -49,7 +49,10 @@ enum MediaPassthrough {
             mChannelsPerFrame: config.channels,
             mBitsPerChannel: 0,
             mReserved: 0)
-        let cookie = [UInt8](asc)
+        // CoreAudio's AAC magic cookie is the MPEG-4 ES_Descriptor, not the bare
+        // AudioSpecificConfig: AVAssetWriter copies the cookie verbatim into the
+        // `esds` atom, and a bare ASC there yields a file CoreAudio refuses to open.
+        let cookie = [UInt8](esDescriptor(asc: asc))
         var format: CMAudioFormatDescription?
         let status = cookie.withUnsafeBytes { raw in
             CMAudioFormatDescriptionCreate(
@@ -154,6 +157,19 @@ enum MediaPassthrough {
     // MARK: - Private
 
     private struct AACConfig { var sampleRate: Float64; var channels: UInt32 }
+
+    /// Wraps an AudioSpecificConfig in the MPEG-4 ES_Descriptor chain stored in an
+    /// `esds` atom: ES_Descriptor(0x03) → DecoderConfigDescriptor(0x04, AAC/audio) →
+    /// DecoderSpecificInfo(0x05, the ASC) + SLConfigDescriptor(0x06, predefined 2).
+    /// Bitrates are left 0 (unknown); descriptor sizes use single-byte lengths.
+    static func esDescriptor(asc: Data) -> Data {
+        let dsi: [UInt8] = [0x05, UInt8(asc.count)] + [UInt8](asc)
+        let dcdPayload: [UInt8] = [0x40, 0x15] + [UInt8](repeating: 0, count: 11) + dsi
+        let dcd: [UInt8] = [0x04, UInt8(dcdPayload.count)] + dcdPayload
+        let sl: [UInt8] = [0x06, 0x01, 0x02]
+        let esPayload: [UInt8] = [0x00, 0x00, 0x00] + dcd + sl
+        return Data([0x03, UInt8(esPayload.count)] + esPayload)
+    }
 
     private static let sampleRates: [Float64] = [
         96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
