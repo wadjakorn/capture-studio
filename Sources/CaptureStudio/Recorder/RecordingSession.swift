@@ -402,6 +402,17 @@ final class RecordingSession: ObservableObject {
             mainRecorder.onDeviceLost = { [weak self] msg in
                 Task { @MainActor in self?.warnings.append(msg) }
             }
+            // The main camera is mandatory (mirrors `screen.onStreamError`):
+            // armed → fail and drop the empty bundle; recording → auto-stop so
+            // the take so far is saved and the state shows why.
+            mainRecorder.onCameraLost = { [weak self, weak mainRecorder] in
+                Task { @MainActor in
+                    // Ignore a late report from a previous session's recorder.
+                    guard let self, let mainRecorder,
+                          self.mainCameraRecorder === mainRecorder else { return }
+                    await self.handleMainCameraLost()
+                }
+            }
             do {
                 try await mainRecorder.warmUp()
             } catch {
@@ -428,7 +439,7 @@ final class RecordingSession: ObservableObject {
             mainPanel.show()
             mainPreviewPanel = mainPanel
             if let w = mainRecorder.micWarning {
-                Log.recorder.error("mic on main camera session failed: \(w, privacy: .public)")
+                Log.recorder.error("mic \(micDevice?.localizedName ?? "none", privacy: .public) on main camera session failed: \(w, privacy: .public); falling back to a standalone mic session")
                 if let micDevice {
                     await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
                 }
@@ -502,11 +513,35 @@ final class RecordingSession: ObservableObject {
 
             state = .armed
             Log.recorder.info("armed (camera main): \(bundle.url.lastPathComponent, privacy: .public)")
+            // Lost during warm-up: its callback ran while `.arming` and was a no-op.
+            if mainRecorder.isCameraLost {
+                await failArmed(MainCameraLostError.message)
+            }
         } catch {
             guard armIsCurrent(generation) else { return }
             Log.recorder.error("arm (camera main) failed: \(error.localizedDescription, privacy: .public)")
             await tearDownArmed()
             if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
+        }
+    }
+
+    /// Main camera lost (camera-main mode only). Armed → `failArmed`;
+    /// recording → auto-stop with a stream error. Other states: no-op (arming
+    /// re-checks `isCameraLost` before going `.armed`; finishing is already
+    /// stopping).
+    private func handleMainCameraLost() async {
+        Log.recorder.error("main camera lost (state=\(String(describing: self.state), privacy: .public))")
+        if isArmed {
+            // A running countdown would otherwise call beginRecording() on a
+            // torn-down session (it no-ops, but cancel it cleanly).
+            if counting {
+                countdownTask?.cancel()
+                countdownTask = nil
+                counting = false
+            }
+            await failArmed(MainCameraLostError.message)
+        } else if isRecording {
+            await stop(streamError: MainCameraLostError())
         }
     }
 
@@ -705,7 +740,10 @@ final class RecordingSession: ObservableObject {
         guard isArmed, let bundle, let armedMain else { return }
 
         if armedMain.isCamera {
-            guard let mainCameraRecorder else { return }
+            guard let mainCameraRecorder else {
+                await failArmed("Internal error: no main camera.")
+                return
+            }
             state = .preparing
             do {
                 // Main camera is mandatory — failure here aborts the recording.
@@ -1083,6 +1121,10 @@ final class RecordingSession: ObservableObject {
             Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
             await cameraRecorder?.discard()
             await micRecorder?.discard()
+            // Studio needs a main track, so the overlay/mic files alone are not
+            // a project: delete the orphaned bundle (partial main-camera.mp4,
+            // no meta.json). clearAfterStop() posts .projectLibraryDidChange.
+            try? FileManager.default.removeItem(at: bundle.url)
             state = .failed(error.localizedDescription)
             return
         }
@@ -1229,4 +1271,10 @@ final class RecordingSession: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
     }
+}
+
+/// Stream error for an auto-stop caused by losing the main camera.
+struct MainCameraLostError: LocalizedError {
+    static let message = "Main camera disconnected."
+    var errorDescription: String? { Self.message }
 }

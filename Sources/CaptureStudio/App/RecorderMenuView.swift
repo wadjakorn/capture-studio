@@ -17,7 +17,6 @@ struct RecorderMenuView: View {
     @State private var captureAreaEnabled = AppSettings.captureAreaEnabled
     @State private var captureRegion: CGRect? = AppSettings.captureRegion
     @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
-    @State private var seededSelections = false
     @State private var showPhoneHelp = false
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
@@ -692,6 +691,8 @@ struct RecorderMenuView: View {
     private func selectMain(_ source: MainSource) {
         mainSource = source
         AppSettings.lastMainSource = source
+        // Restore a front camera dropped only because it was the previous main.
+        selectedCameraID = selectedCameraID ?? AppSettings.lastCameraID
         resolveFrontCamera()
     }
 
@@ -744,12 +745,14 @@ struct RecorderMenuView: View {
     private func refreshDevices() async {
         cameras = DeviceDiscovery.cameras()
         microphones = DeviceDiscovery.microphones()
-        if !seededSelections {
-            seededSelections = true
-            selectedCameraID = AppSettings.lastCameraID
-            selectedMicID = AppSettings.lastMicID
-            mainSource = AppSettings.lastMainSource
-        }
+        // Re-read the persisted picks on every refresh: the MenuBarExtra view
+        // keeps @State across popup opens, so a device that was unplugged (and
+        // dropped from the popup only) must come back when replugged, matching
+        // the hotkey path which reads AppSettings. "None" persists nil, so
+        // falling back to AppSettings never resurrects a cleared choice.
+        selectedCameraID = selectedCameraID ?? AppSettings.lastCameraID
+        selectedMicID = selectedMicID ?? AppSettings.lastMicID
+        mainSource = AppSettings.lastMainSource
         if let id = selectedCameraID, !cameras.contains(where: { $0.uniqueID == id }) {
             selectedCameraID = nil
         }
@@ -768,6 +771,7 @@ struct RecorderMenuView: View {
         }
         switch mainSource {
         case .camera(let id) where !cameras.contains(where: { $0.uniqueID == id }):
+            // Not persisted: the saved camera main returns when replugged.
             mainSource = displays.first.map { .display($0.id) }
         case .display(let id) where permissionGranted && !displays.contains(where: { $0.id == id }):
             adoptFallbackDisplay()

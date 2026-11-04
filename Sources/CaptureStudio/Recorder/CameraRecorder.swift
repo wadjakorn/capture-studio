@@ -62,6 +62,12 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private var audioDeviceLost = false
     /// Guards `onDeviceLost` to fire once; accessed on `queue`.
     private var deviceLostReported = false
+    /// Fired once, on an arbitrary thread, when the CAMERA itself is lost
+    /// (disconnect or session runtime error) — never for a mic-only loss.
+    /// Lets a caller treat this camera as mandatory (camera-main mode).
+    var onCameraLost: (@Sendable () -> Void)?
+    /// True once the camera has been lost (sticky). Safe from any thread.
+    var isCameraLost: Bool { queue.sync { deviceLost } }
     /// Pixel size from the settings dictionary actually handed to the writer
     /// input (never inferred from `activeFormat`). Set in `beginWriting()`.
     private(set) var writtenPixelSize: CGSize?
@@ -183,17 +189,19 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
     private func handleDeviceLost(_ message: String, cameraLost: Bool) {
         audioQueue.sync { audioDeviceLost = true }
-        let firstReport: Bool = queue.sync {
+        let (firstReport, firstCameraLoss): (Bool, Bool) = queue.sync {
             micTruncated = true
+            let firstCameraLoss = cameraLost && !deviceLost
             if cameraLost {
                 deviceLost = true
                 truncated = true
             }
-            guard !deviceLostReported else { return false }
+            guard !deviceLostReported else { return (false, firstCameraLoss) }
             deviceLostReported = true
-            return true
+            return (true, firstCameraLoss)
         }
         if firstReport { onDeviceLost?(message) }
+        if firstCameraLoss { onCameraLost?() }
     }
 
     /// True while `device.lockForConfiguration()` is held for the format choice.
