@@ -4,3 +4,7 @@ dist/
 *.xcodeproj
 .swiftpm/
 .superpowers/
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
