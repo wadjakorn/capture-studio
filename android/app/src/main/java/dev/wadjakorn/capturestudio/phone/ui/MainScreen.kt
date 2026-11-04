@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -51,6 +52,7 @@ import dev.wadjakorn.capturestudio.phone.PairingCode
 import dev.wadjakorn.capturestudio.phone.PairingStore
 import dev.wadjakorn.capturestudio.phone.SessionState
 import dev.wadjakorn.capturestudio.phone.StreamService
+import dev.wadjakorn.capturestudio.phone.VideoPipeline
 import java.text.DateFormat
 import java.util.Date
 
@@ -120,6 +122,7 @@ private fun Dashboard(onUserStopped: () -> Unit, onToggleService: (running: Bool
     val streaming = state is SessionState.Streaming
 
     val running by StreamService.running.collectAsStateWithLifecycle()
+val caps by VideoPipeline.caps.collectAsStateWithLifecycle()
     // Service went away (notification Stop, startup failure): don't auto-restart on resume.
     var wasRunning by remember { mutableStateOf(false) }
     LaunchedEffect(running) {
@@ -175,6 +178,31 @@ private fun Dashboard(onUserStopped: () -> Unit, onToggleService: (running: Bool
                     StreamService.updateSettings(context) { it.copy(aspect = a) }
                 }
                 if (streaming) Text("Settings apply to the next stream.", style = MaterialTheme.typography.bodySmall)
+                val zoom = settings.zoom ?: 1f
+                Text("Zoom  ${"%.1f".format(zoom)}×", style = MaterialTheme.typography.bodyMedium)
+                Slider(
+                    value = zoom,
+                    onValueChange = { z -> StreamService.updateSettings(context) { it.copy(zoom = z) } },
+                    valueRange = (caps?.minZoom ?: 1f)..(caps?.maxZoom ?: 10f),
+                )
+                Text("A fixed zoom also pins the lens the phone uses.", style = MaterialTheme.typography.bodySmall)
+                Text("Focus", style = MaterialTheme.typography.bodyMedium)
+                Choice(listOf("auto" to "Auto", "locked" to "Locked", "manual" to "Manual"), settings.focus ?: "auto", true) { f ->
+                    StreamService.updateSettings(context) { it.copy(focus = if (f == "auto") null else f) }
+                }
+                if (settings.focus == "manual") {
+                    if (caps?.manualFocus == false) {
+                        Text("This camera has no manual focus.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text("Distance  far ← → near", style = MaterialTheme.typography.bodySmall)
+                    Slider(
+                        value = settings.focusDistance ?: 0f,
+                        onValueChange = { d -> StreamService.updateSettings(context) { it.copy(focusDistance = d) } },
+                        valueRange = 0f..1f,
+                    )
+                } else if (settings.focus == "locked") {
+                    Text("Focuses once on the centre when the stream starts, then holds.", style = MaterialTheme.typography.bodySmall)
+                }
                 val locked = settings.lockedRotation
                 Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {

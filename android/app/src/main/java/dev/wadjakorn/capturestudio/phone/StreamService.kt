@@ -37,7 +37,9 @@ import java.util.concurrent.atomic.AtomicReference
  * Phone-side capture preferences; when set they override the Mac's START values.
  * [height] is the short side (720/1080). [aspect] is "16:9" (null), "4:3" or "1:1".
  * [lockedRotation] is a Surface.ROTATION_* value pinning the stream's orientation
- * (null follows the accelerometer).
+ * (null follows the accelerometer). [zoom] is the zoom ratio (null = 1x); [focus] is
+ * null (continuous AF), "locked" (focus once on the centre, then hold) or "manual"
+ * ([focusDistance] 0 = infinity … 1 = closest).
  */
 data class StreamSettings(
     val facing: String? = null,
@@ -45,7 +47,12 @@ data class StreamSettings(
     val height: Int? = null,
     val aspect: String? = null,
     val lockedRotation: Int? = null,
-)
+    val zoom: Float? = null,
+    val focus: String? = null,
+    val focusDistance: Float? = null,
+) {
+    val lens: LensSettings get() = LensSettings(zoom, focus, focusDistance)
+}
 
 /**
  * Foreground service (type camera|microphone) hosting the TLS server, the NSD
@@ -81,7 +88,10 @@ class StreamService : Service(), LifecycleOwner {
         createChannel()
         loadSettings(this)
         // Orientation lock changes apply live to a running stream.
-        settings.onEach { video?.setLockedRotation(it.lockedRotation) }.launchIn(uiScope)
+        settings.onEach {
+            video?.setLockedRotation(it.lockedRotation)
+            video?.setLens(it.lens)
+        }.launchIn(uiScope)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -248,7 +258,7 @@ class StreamService : Service(), LifecycleOwner {
             video = VideoPipeline(
                 this, this, lens, config.width, config.height,
                 config.fps.coerceIn(1, 60), config.bitrate.coerceIn(500_000, 50_000_000),
-                aspect, prefs.lockedRotation, sink, onFailure,
+                aspect, prefs.lockedRotation, prefs.lens, sink, onFailure,
             ).also { it.start() }
         }
         if (config.audio) {
@@ -354,12 +364,16 @@ class StreamService : Service(), LifecycleOwner {
                 if (settingsLoaded) return
                 val p = context.applicationContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
                 fun int(key: String): Int? = if (p.contains(key)) p.getInt(key, 0) else null
+                fun float(key: String): Float? = if (p.contains(key)) p.getFloat(key, 0f) else null
                 settings.value = StreamSettings(
                     facing = p.getString("facing", null),
                     width = int("width"),
                     height = int("height"),
                     aspect = p.getString("aspect", null),
                     lockedRotation = int("locked_rotation"),
+                    zoom = float("zoom"),
+                    focus = p.getString("focus", null),
+                    focusDistance = float("focus_distance"),
                 )
                 settingsLoaded = true
             }
@@ -376,6 +390,9 @@ class StreamService : Service(), LifecycleOwner {
             putInt("height", s.height)
             editor.putString("aspect", s.aspect)
             putInt("locked_rotation", s.lockedRotation)
+            if (s.zoom == null) editor.remove("zoom") else editor.putFloat("zoom", s.zoom)
+            editor.putString("focus", s.focus)
+            if (s.focusDistance == null) editor.remove("focus_distance") else editor.putFloat("focus_distance", s.focusDistance)
             editor.apply()
         }
 

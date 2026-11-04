@@ -12,9 +12,16 @@ import android.util.Log
 import android.util.Range
 import android.util.Size
 import android.view.Surface
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
+import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
@@ -26,6 +33,15 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.Executors
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/** Zoom ratio (null = 1x) and focus mode: null (continuous), "locked" or "manual". */
+data class LensSettings(val zoom: Float? = null, val focus: String? = null, val focusDistance: Float? = null)
+
+/** What the bound camera supports; published while a stream runs. */
+data class LensCaps(val minZoom: Float, val maxZoom: Float, val manualFocus: Boolean)
 
 /**
  * CameraX `Preview` → [EncoderGlRelay] (OpenGL ES) → hardware H.264 encoder input
@@ -47,6 +63,7 @@ class VideoPipeline(
     private val aspect: String?,
     /** Initial orientation lock (a Surface.ROTATION_* value); null follows the accelerometer. */
     lockedRotation: Int?,
+    lens: LensSettings,
     private val sink: MediaSink,
     /** Fatal camera/encoder failure (any thread). Not called after [stop]. */
     private val onFailure: (String) -> Unit,
@@ -54,6 +71,10 @@ class VideoPipeline(
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private var provider: ProcessCameraProvider? = null
     private var preview: Preview? = null
+    private var camera: Camera? = null
+    private var lens: LensSettings = lens
+    /** Minimum focus distance in diopters (0 = fixed focus, manual focus unsupported). */
+    private var minFocusDistance = 0f
     @Volatile private var stopped = false
     @Volatile private var codec: MediaCodec? = null
     @Volatile private var rotationDeg = 0
@@ -82,6 +103,49 @@ class VideoPipeline(
         val r = effectiveRotation
         preview?.let { p -> if (p.targetRotation != r) p.targetRotation = r }
         updateRotationDeg()
+    }
+
+    /** Main thread. Applies zoom / focus settings live. */
+    fun setLens(settings: LensSettings) {
+        if (stopped || settings == lens) return
+        val focusChanged = settings.focus != lens.focus || settings.focusDistance != lens.focusDistance
+        lens = settings
+        camera?.let { applyLens(it, focus = focusChanged) }
+    }
+
+    @androidx.annotation.OptIn(markerClass = [ExperimentalCamera2Interop::class])
+    private fun applyLens(cam: Camera, focus: Boolean) {
+        val control = cam.cameraControl
+        val zoomState = cam.cameraInfo.zoomState.value
+        val minZoom = zoomState?.minZoomRatio ?: 1f
+        val maxZoom = zoomState?.maxZoomRatio ?: 1f
+        control.setZoomRatio((lens.zoom ?: 1f).coerceIn(minZoom, maxZoom))
+        if (!focus) return
+        val interop = Camera2CameraControl.from(control)
+        when (lens.focus) {
+            "manual" -> {
+                control.cancelFocusAndMetering()
+                val distance = (lens.focusDistance ?: 0f).coerceIn(0f, 1f) * minFocusDistance
+                interop.setCaptureRequestOptions(
+                    CaptureRequestOptions.Builder()
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                        .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, distance)
+                        .build(),
+                )
+            }
+            "locked" -> {
+                // Focus once on the centre, then hold (AF mode AUTO without further triggers).
+                interop.clearCaptureRequestOptions()
+                val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
+                control.startFocusAndMetering(
+                    FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).disableAutoCancel().build(),
+                )
+            }
+            else -> {
+                interop.clearCaptureRequestOptions()
+                control.cancelFocusAndMetering()
+            }
+        }
     }
 
     fun start() {
@@ -128,6 +192,14 @@ class VideoPipeline(
         val camera = cameraProvider.bindToLifecycle(lifecycleOwner, selector, p)
         Log.i(TAG, "Camera bound: id=${cameraId(camera.cameraInfo)} facing=$facing")
         PhoneClock.configure(camera.cameraInfo)
+        this.camera = camera
+        minFocusDistance = runCatching {
+            Camera2CameraInfo.from(camera.cameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        }.getOrDefault(0f)
+        val zoomState = camera.cameraInfo.zoomState.value
+        _caps.value = LensCaps(zoomState?.minZoomRatio ?: 1f, zoomState?.maxZoomRatio ?: 1f, minFocusDistance > 0f)
+        applyLens(camera, focus = true)
     }
 
     /**
@@ -360,13 +432,19 @@ class VideoPipeline(
         DeviceOrientation.removeListener(rotationListener)
         preview?.let { provider?.unbind(it) }
         preview = null
+        camera = null
+        _caps.value = null
     }
 
-    private companion object {
-        const val TAG = "CSPhone"
+    companion object {
+        private const val TAG = "CSPhone"
+
+        private val _caps = MutableStateFlow<LensCaps?>(null)
+        /** Lens capabilities of the camera currently streaming (null when idle). */
+        val caps: StateFlow<LensCaps?> = _caps.asStateFlow()
 
         /** Shared across pipelines: surface/result callbacks may still arrive after [stop]. */
-        val surfaceExecutor = Executors.newSingleThreadExecutor { r ->
+        private val surfaceExecutor = Executors.newSingleThreadExecutor { r ->
             Thread(r, "CSPhone-vsurface").apply { isDaemon = true }
         }
     }
