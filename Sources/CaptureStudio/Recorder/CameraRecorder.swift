@@ -110,21 +110,17 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
         session.addInput(deviceInput)
         // canSetSessionPreset is only meaningful once the input is attached.
-        // UVC/virtual cameras often reject .high; fall back to picking a
-        // sane (<= 1080p-edge) format by hand.
-        if session.canSetSessionPreset(.high) {
-            session.sessionPreset = .high
-        } else {
-            // `.inputPriority` is marked unavailable in the macOS SDK; use the
-            // raw preset string, gated on support, so the hand-picked format sticks.
-            let inputPriority = AVCaptureSession.Preset(rawValue: "AVCaptureSessionPresetInputPriority")
-            if session.canSetSessionPreset(inputPriority) {
-                session.sessionPreset = inputPriority
-            }
+        // Keep .high when settable. For non-built-in devices (UVC, virtual,
+        // phone) or when .high is rejected, hand-pick a <=1920-edge format.
+        let presetOK = session.canSetSessionPreset(.high)
+        if presetOK { session.sessionPreset = .high }
+        if !presetOK || DeviceDiscovery.kind(of: device) != .builtIn {
             selectSafeFormat()
         }
         guard session.canAddOutput(output) else {
+            session.removeInput(deviceInput)
             session.commitConfiguration()
+            unlockDeviceIfHeld()
             throw CameraError.deviceUnavailable
         }
         session.addOutput(output)
@@ -138,17 +134,31 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
         session.commitConfiguration()
 
-        // startRunning blocks; keep it off the main thread.
+        // startRunning blocks; keep it off the main thread. The device config
+        // lock (if held for activeFormat) is released only after startRunning
+        // returns, otherwise the session preset re-applies and overwrites the
+        // chosen format (macOS behavior).
         await withCheckedContinuation { continuation in
             queue.async {
                 self.session.startRunning()
+                self.unlockDeviceIfHeld()
                 continuation.resume()
             }
         }
     }
 
-    /// Picks the best <=1920-edge format and pins its frame rate (<= 30 fps).
-    /// Best-effort: on lock failure the device keeps its current format.
+    /// True while `device.lockForConfiguration()` is held for the format choice.
+    private var holdsDeviceLock = false
+
+    private func unlockDeviceIfHeld() {
+        guard holdsDeviceLock else { return }
+        holdsDeviceLock = false
+        device.unlockForConfiguration()
+    }
+
+    /// Picks the best <=1920-edge format. On success the device configuration
+    /// lock stays held (see `warmUp`); best-effort — on lock failure the device
+    /// keeps its current format.
     private func selectSafeFormat() {
         let formats = device.formats
         let candidates = formats.enumerated().map { index, format -> CameraFormatCandidate in
@@ -163,26 +173,22 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         } catch {
             return
         }
-        defer { device.unlockForConfiguration() }
+        holdsDeviceLock = true
         device.activeFormat = formats[pick.index]
-        let fps = min(pick.maxFPS, 30)
-        if fps > 0 {
-            let duration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
-            device.activeVideoMinFrameDuration = duration
-            device.activeVideoMaxFrameDuration = duration
-        }
     }
 
     /// Creates the writers and begins accepting samples. Call after `warmUp()`
     /// (session already running, audio clock settled). The next delegate frame
     /// anchors `sessionStartHostTime`.
     func beginWriting() throws {
+        writtenPixelSize = nil
         let settings: [String: Any]
         if let recommended = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) {
             settings = recommended
         } else {
-            // Only reached on the .inputPriority path, where the active format's
-            // dimensions are the delivered buffer dimensions.
+            // The output can report no recommended settings regardless of preset.
+            // Assumption: the active format's dimensions are the delivered buffer
+            // dimensions (true when we chose the format ourselves).
             let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             guard dims.width > 0, dims.height > 0 else {
                 throw CameraError.writerSetupFailed("no recommended settings")
@@ -190,10 +196,6 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             settings = [AVVideoCodecKey: AVVideoCodecType.h264,
                         AVVideoWidthKey: Int(dims.width),
                         AVVideoHeightKey: Int(dims.height)]
-        }
-        if let w = (settings[AVVideoWidthKey] as? NSNumber)?.intValue,
-           let h = (settings[AVVideoHeightKey] as? NSNumber)?.intValue {
-            writtenPixelSize = CGSize(width: w, height: h)
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
@@ -204,6 +206,10 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         writer.add(input)
         guard writer.startWriting() else {
             throw CameraError.writerSetupFailed(writer.error?.localizedDescription ?? "unknown")
+        }
+        if let w = (settings[AVVideoWidthKey] as? NSNumber)?.intValue,
+           let h = (settings[AVVideoHeightKey] as? NSNumber)?.intValue {
+            writtenPixelSize = CGSize(width: w, height: h)
         }
         // Publish writer/input to the capture queue before accepting buffers.
         queue.sync {
