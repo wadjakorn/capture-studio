@@ -20,6 +20,35 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
+ * Normalized (0..1) texture-space rect. Texture coordinates are mapped as
+ * `u' = left + u × (right − left)`, `v' = top + v × (bottom − top)`.
+ */
+data class TexCrop(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+    /** Triangle-strip texture coordinates for the full-screen quad. */
+    fun texCoords(): FloatArray = floatArrayOf(left, top, right, top, left, bottom, right, bottom)
+
+    companion object {
+        val FULL = TexCrop(0f, 0f, 1f, 1f)
+
+        /**
+         * Centered square crop of a [width]×[height] frame (in the axes of the
+         * texture coordinates fed to the relay): the long axis is trimmed evenly.
+         */
+        fun centerSquare(width: Int, height: Int): TexCrop = when {
+            width > height -> {
+                val w = width.toFloat()
+                TexCrop((width - height) / (2 * w), 0f, (width + height) / (2 * w), 1f)
+            }
+            height > width -> {
+                val h = height.toFloat()
+                TexCrop(0f, (height - width) / (2 * h), 1f, (height + width) / (2 * h))
+            }
+            else -> FULL
+        }
+    }
+}
+
+/**
  * Relays camera frames to a MediaCodec input surface through OpenGL ES.
  *
  * The camera renders into a [SurfaceTexture] (external OES texture) owned by this
@@ -28,8 +57,8 @@ import java.util.concurrent.TimeUnit
  * Some camera HAL / encoder pairs (e.g. Samsung + Qualcomm on Android 16) cannot
  * share buffers directly — the encoder then emits valid H.264 full of noise.
  *
- * No rotation or mirroring is applied here; the SurfaceTexture transform matrix
- * only maps buffer coordinates. All GL/EGL work happens on a private GL thread.
+ * No rotation is applied here; the SurfaceTexture transform matrix only maps
+ * buffer coordinates. Optional horizontal mirroring and a centered [TexCrop]. All GL/EGL work happens on a private GL thread.
  */
 class EncoderGlRelay(
     private val encoderSurface: Surface,
@@ -40,6 +69,11 @@ class EncoderGlRelay(
     private val cameraHeight: Int = height,
     /** Flip the output horizontally (front cameras arrive mirrored from the HAL). */
     private val mirrorX: Boolean = false,
+    /**
+     * Normalized texture rect sampled from the camera image, applied to the quad's
+     * texture coordinates before the SurfaceTexture matrix. Default: the full frame.
+     */
+    private val crop: TexCrop = TexCrop.FULL,
     /** GL/EGL failure while running (GL thread). Not called after [release]. */
     private val onError: (String) -> Unit,
 ) {
@@ -62,7 +96,7 @@ class EncoderGlRelay(
 
     private val vertices: FloatBuffer = if (mirrorX) floatBuffer(1f, -1f, -1f, -1f, 1f, 1f, -1f, 1f)
                                         else floatBuffer(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
-    private val texCoords: FloatBuffer = floatBuffer(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
+    private val texCoords: FloatBuffer = floatBuffer(*crop.texCoords())
 
     /**
      * Starts the GL thread and sets up EGL, the shader and the camera-facing

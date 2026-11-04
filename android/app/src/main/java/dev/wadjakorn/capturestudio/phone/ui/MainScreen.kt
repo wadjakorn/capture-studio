@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.view.Surface as ViewSurface
 import android.view.WindowManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -44,12 +45,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.wadjakorn.capturestudio.phone.DeviceOrientation
 import dev.wadjakorn.capturestudio.phone.PairedMac
 import dev.wadjakorn.capturestudio.phone.PairingCode
 import dev.wadjakorn.capturestudio.phone.PairingStore
 import dev.wadjakorn.capturestudio.phone.SessionState
 import dev.wadjakorn.capturestudio.phone.StreamService
-import kotlinx.coroutines.flow.update
 import java.text.DateFormat
 import java.util.Date
 
@@ -163,13 +164,31 @@ private fun Dashboard(onUserStopped: () -> Unit, onToggleService: (running: Bool
                 Text("Camera", style = MaterialTheme.typography.titleMedium)
                 val facing = settings.facing
                 Choice(listOf("back" to "Back", "front" to "Front"), facing, !streaming) { v ->
-                    StreamService.settings.update { it.copy(facing = v) }
+                    StreamService.updateSettings(context) { it.copy(facing = v) }
                 }
                 val height = settings.height
                 Choice(listOf(720 to "720p", 1080 to "1080p"), height, !streaming) { h ->
-                    StreamService.settings.update { it.copy(width = if (h == 1080) 1920 else 1280, height = h) }
+                    StreamService.updateSettings(context) { it.copy(width = if (h == 1080) 1920 else 1280, height = h) }
+                }
+                Text("Aspect", style = MaterialTheme.typography.bodyMedium)
+                Choice(listOf("16:9" to "16:9", "4:3" to "4:3", "1:1" to "1:1"), settings.aspect ?: "16:9", !streaming) { a ->
+                    StreamService.updateSettings(context) { it.copy(aspect = a) }
                 }
                 if (streaming) Text("Settings apply to the next stream.", style = MaterialTheme.typography.bodySmall)
+                val locked = settings.lockedRotation
+                Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Lock orientation")
+                        if (locked != null) {
+                            Text("Locked to ${rotationName(locked)}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Switch(checked = locked != null, onCheckedChange = { on ->
+                        StreamService.updateSettings(context) {
+                            it.copy(lockedRotation = if (on) DeviceOrientation.rotation else null)
+                        }
+                    })
+                }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Text("Keep screen on", Modifier.weight(1f))
                     Switch(checked = keepOn, onCheckedChange = {
@@ -208,6 +227,14 @@ private fun Dashboard(onUserStopped: () -> Unit, onToggleService: (running: Bool
             dismissButton = { TextButton(onClick = { StreamService.denyPairing(req.sessionId) }) { Text("Deny") } },
         )
     }
+}
+
+/** ROTATION_0 is the device's natural orientation. */
+private fun rotationName(rotation: Int): String = when (rotation) {
+    ViewSurface.ROTATION_90 -> "Landscape"
+    ViewSurface.ROTATION_180 -> "Upside down"
+    ViewSurface.ROTATION_270 -> "Landscape (reversed)"
+    else -> "Portrait"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

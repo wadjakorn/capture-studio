@@ -19,15 +19,33 @@ import androidx.camera.core.CameraSelector
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
-/** Phone-side capture preferences; when set they override the Mac's START values. */
-data class StreamSettings(val facing: String? = null, val width: Int? = null, val height: Int? = null)
+/**
+ * Phone-side capture preferences; when set they override the Mac's START values.
+ * [height] is the short side (720/1080). [aspect] is "16:9" (null), "4:3" or "1:1".
+ * [lockedRotation] is a Surface.ROTATION_* value pinning the stream's orientation
+ * (null follows the accelerometer).
+ */
+data class StreamSettings(
+    val facing: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val aspect: String? = null,
+    val lockedRotation: Int? = null,
+)
 
 /**
  * Foreground service (type camera|microphone) hosting the TLS server, the NSD
@@ -54,12 +72,16 @@ class StreamService : Service(), LifecycleOwner {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     @Volatile private var fingerprint: ByteArray? = null
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onCreate() {
         DeviceOrientation.start(this)
         super.onCreate()
         registry.currentState = Lifecycle.State.CREATED
         createChannel()
+        loadSettings(this)
+        // Orientation lock changes apply live to a running stream.
+        settings.onEach { video?.setLockedRotation(it.lockedRotation) }.launchIn(uiScope)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -117,6 +139,7 @@ class StreamService : Service(), LifecycleOwner {
 
     override fun onDestroy() {
         DeviceOrientation.stop()
+        uiScope.cancel()
         destroyed = true
         instance = null
         _running.value = false
@@ -200,11 +223,19 @@ class StreamService : Service(), LifecycleOwner {
         if (destroyed || occupant.get() !== session) return // closed before this ran
         stopPipelines()
         val prefs = settings.value
-        val config = requested.copy(
-            facing = prefs.facing ?: requested.facing,
-            width = prefs.width ?: requested.width,
-            height = prefs.height ?: requested.height,
-        )
+        val aspect = prefs.aspect?.takeIf { it == "4:3" || it == "1:1" }
+        val config = if (aspect == null) {
+            requested.copy(
+                facing = prefs.facing ?: requested.facing,
+                width = prefs.width ?: requested.width,
+                height = prefs.height ?: requested.height,
+            )
+        } else {
+            // 4:3 and 1:1 both capture 4:3 (1:1 is cropped in the GL relay); the
+            // resolution preference is the short side.
+            val short = prefs.height ?: minOf(requested.width, requested.height)
+            requested.copy(facing = prefs.facing ?: requested.facing, width = short * 4 / 3, height = short)
+        }
         Log.i(TAG, "Streaming with $config")
         streamingSession = session
         acquireLocks()
@@ -216,7 +247,8 @@ class StreamService : Service(), LifecycleOwner {
             val lens = if (config.facing == "front") CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
             video = VideoPipeline(
                 this, this, lens, config.width, config.height,
-                config.fps.coerceIn(1, 60), config.bitrate.coerceIn(500_000, 50_000_000), sink, onFailure,
+                config.fps.coerceIn(1, 60), config.bitrate.coerceIn(500_000, 50_000_000),
+                aspect, prefs.lockedRotation, sink, onFailure,
             ).also { it.start() }
         }
         if (config.audio) {
@@ -309,8 +341,43 @@ class StreamService : Service(), LifecycleOwner {
         private val _pairingRequest = MutableStateFlow<PairingRequest?>(null)
         val pairingRequest: StateFlow<PairingRequest?> = _pairingRequest.asStateFlow()
 
-        /** UI preferences, read at each START. */
+        /** UI preferences, read at each START. Write via [updateSettings] to persist. */
         val settings = MutableStateFlow(StreamSettings())
+
+        private const val SETTINGS_PREFS = "settings"
+        @Volatile private var settingsLoaded = false
+
+        /** Loads persisted [settings] once per process (idempotent, any thread). */
+        fun loadSettings(context: Context) {
+            if (settingsLoaded) return
+            synchronized(this) {
+                if (settingsLoaded) return
+                val p = context.applicationContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+                fun int(key: String): Int? = if (p.contains(key)) p.getInt(key, 0) else null
+                settings.value = StreamSettings(
+                    facing = p.getString("facing", null),
+                    width = int("width"),
+                    height = int("height"),
+                    aspect = p.getString("aspect", null),
+                    lockedRotation = int("locked_rotation"),
+                )
+                settingsLoaded = true
+            }
+        }
+
+        /** Updates [settings] and persists them. */
+        fun updateSettings(context: Context, transform: (StreamSettings) -> StreamSettings) {
+            loadSettings(context)
+            val s = settings.updateAndGet(transform)
+            val editor = context.applicationContext.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE).edit()
+            fun putInt(key: String, v: Int?) { if (v == null) editor.remove(key) else editor.putInt(key, v) }
+            editor.putString("facing", s.facing)
+            putInt("width", s.width)
+            putInt("height", s.height)
+            editor.putString("aspect", s.aspect)
+            putInt("locked_rotation", s.lockedRotation)
+            editor.apply()
+        }
 
         private val _running = MutableStateFlow(false)
         val running: StateFlow<Boolean> = _running.asStateFlow()

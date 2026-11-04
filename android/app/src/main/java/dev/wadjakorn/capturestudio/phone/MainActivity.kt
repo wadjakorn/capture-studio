@@ -9,6 +9,7 @@ import dev.wadjakorn.capturestudio.phone.ui.MainScreen
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        StreamService.loadSettings(this)
         setContent { CaptureStudioPhoneTheme { MainScreen() } }
     }
 }

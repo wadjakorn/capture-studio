@@ -43,6 +43,10 @@ class VideoPipeline(
     private val height: Int,
     private val fps: Int,
     private val bitrate: Int,
+    /** "16:9" (null), "4:3" or "1:1" (4:3 camera, center-cropped to a square in GL). */
+    private val aspect: String?,
+    /** Initial orientation lock (a Surface.ROTATION_* value); null follows the accelerometer. */
+    lockedRotation: Int?,
     private val sink: MediaSink,
     /** Fatal camera/encoder failure (any thread). Not called after [stop]. */
     private val onFailure: (String) -> Unit,
@@ -57,8 +61,27 @@ class VideoPipeline(
     @Volatile private var configSent = false
     @Volatile private var lastPtsNs = Long.MIN_VALUE
 
+    /**
+     * Orientation lock (a Surface.ROTATION_* value). While set, accelerometer updates
+     * are ignored. Write via [setLockedRotation] on the main thread.
+     */
+    @Volatile private var lockedRotation: Int? = lockedRotation
+
+    private val effectiveRotation: Int get() = lockedRotation ?: DeviceOrientation.rotation
+
     private val rotationListener: (Int) -> Unit = { r ->
+        if (lockedRotation == null) {
+            preview?.let { p -> if (p.targetRotation != r) p.targetRotation = r }
+        }
+    }
+
+    /** Main thread. Applies a new orientation lock (null = follow the device) live. */
+    fun setLockedRotation(rotation: Int?) {
+        if (stopped || rotation == lockedRotation) return
+        lockedRotation = rotation
+        val r = effectiveRotation
         preview?.let { p -> if (p.targetRotation != r) p.targetRotation = r }
+        updateRotationDeg()
     }
 
     fun start() {
@@ -81,7 +104,10 @@ class VideoPipeline(
         val selector = cameraSelector()
         val resolution = ResolutionSelector.Builder()
             .setAspectRatioStrategy(
-                AspectRatioStrategy(AspectRatio.RATIO_16_9, AspectRatioStrategy.FALLBACK_RULE_AUTO),
+                AspectRatioStrategy(
+                    if (aspect == "4:3" || aspect == "1:1") AspectRatio.RATIO_4_3 else AspectRatio.RATIO_16_9,
+                    AspectRatioStrategy.FALLBACK_RULE_AUTO,
+                ),
             )
             .setResolutionStrategy(
                 ResolutionStrategy(Size(width, height), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER),
@@ -90,7 +116,7 @@ class VideoPipeline(
         val p = Preview.Builder()
             .setResolutionSelector(resolution)
             .setTargetFrameRate(Range(fps, fps))
-            .setTargetRotation(DeviceOrientation.rotation)
+            .setTargetRotation(effectiveRotation)
             .build()
         p.setSurfaceProvider(surfaceExecutor) { request -> onSurfaceRequest(request) }
         preview = p
@@ -134,8 +160,19 @@ class VideoPipeline(
         // The HAL's buffer transform (undone by the SurfaceTexture matrix in the relay)
         // rotates the content by the sensor orientation, so the encoded frame has the
         // swapped size for 90/270 sensors.
-        val size = if (sensorOrientation % 180 != 0) Size(camSize.height, camSize.width) else camSize
-        Log.i(TAG, "Surface request ${camSize.width}x${camSize.height} -> encoding ${size.width}x${size.height}")
+        val transformed = if (sensorOrientation % 180 != 0) Size(camSize.height, camSize.width) else camSize
+        // 1:1 — center-crop the long side in the relay. The relay's pre-matrix texture
+        // coordinates span the output (post-transform) frame, so the crop is computed
+        // on the transformed size; a centered square is the same region either way.
+        val square = aspect == "1:1"
+        val crop = if (square) TexCrop.centerSquare(transformed.width, transformed.height) else TexCrop.FULL
+        val size = if (square) {
+            val side = minOf(camSize.width, camSize.height)
+            Size(side, side)
+        } else {
+            transformed
+        }
+        Log.i(TAG, "Surface request ${camSize.width}x${camSize.height} -> encoding ${size.width}x${size.height} crop=$crop")
         val thread = HandlerThread("CSPhone-venc").apply { start() }
         val handler = Handler(thread.looper)
         val enc = try {
@@ -176,7 +213,7 @@ class VideoPipeline(
             Unit
         }
         val relay = EncoderGlRelay(encoderSurface, size.width, size.height, camSize.width, camSize.height,
-            mirrorX = facing == CameraSelector.LENS_FACING_FRONT) { message -> fail(message) }
+            mirrorX = facing == CameraSelector.LENS_FACING_FRONT, crop = crop) { message -> fail(message) }
         try {
             relay.start()
         } catch (e: Exception) {
@@ -195,15 +232,7 @@ class VideoPipeline(
             // facings, unmirrored), so the Mac only needs to undo the physical device
             // rotation: device turned counter-clockwise by r → content appears turned
             // clockwise by r → rotate by (360 − r) clockwise.
-            val r = when (DeviceOrientation.rotation) {
-                Surface.ROTATION_90 -> 90
-                Surface.ROTATION_180 -> 180
-                Surface.ROTATION_270 -> 270
-                else -> 0
-            }
-            // The front camera is un-mirrored in GL (horizontal flip), which inverts
-            // the rotation sense, so its rotation is r rather than 360 − r.
-            rotationDeg = if (facing == CameraSelector.LENS_FACING_FRONT) r else (360 - r) % 360
+            val r = updateRotationDeg()
             Log.i(TAG, "Rotation: target=$r camerax=${info.rotationDegrees} sensor=$sensorOrientation -> sent $rotationDeg")
         }
         request.provideSurface(relay.cameraSurface(), surfaceExecutor) { result ->
@@ -213,6 +242,20 @@ class VideoPipeline(
             Log.i(TAG, "Surface released by camera (result ${result.resultCode})")
             relay.release(releaseEncoder)
         }
+    }
+
+    /** Recomputes [rotationDeg] from the effective rotation; returns it in degrees. */
+    private fun updateRotationDeg(): Int {
+        val r = when (effectiveRotation) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        // The front camera is un-mirrored in GL (horizontal flip), which inverts
+        // the rotation sense, so its rotation is r rather than 360 − r.
+        rotationDeg = if (facing == CameraSelector.LENS_FACING_FRONT) r else (360 - r) % 360
+        return r
     }
 
     private fun createEncoder(size: Size, handler: Handler, withProfile: Boolean): MediaCodec {
