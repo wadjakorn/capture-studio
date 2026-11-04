@@ -163,7 +163,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         center.addObserver(self, selector: #selector(deviceWasDisconnected(_:)),
                            name: AVCaptureDevice.wasDisconnectedNotification, object: nil)
         center.addObserver(self, selector: #selector(sessionRuntimeError(_:)),
-                           name: .AVCaptureSessionRuntimeError, object: session)
+                           name: AVCaptureSession.runtimeErrorNotification, object: session)
     }
 
     @objc private func deviceWasDisconnected(_ note: Notification) {
@@ -394,7 +394,7 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             codec: "aac",
             deviceName: micDevice.localizedName,
             deviceID: micDevice.uniqueID,
-            truncated: truncated
+            truncated: queue.sync { truncated || micTruncated }
         )
     }
 
