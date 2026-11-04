@@ -16,9 +16,33 @@ android {
         versionName = "0.1"
     }
 
+    // Release signing comes from the environment only; nothing secret is committed.
+    // Without all four variables the release APK is built unsigned.
+    val releaseKeystore = System.getenv("CS_PHONE_KEYSTORE")
+    val releaseKeystorePassword = System.getenv("CS_PHONE_KEYSTORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("CS_PHONE_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("CS_PHONE_KEY_PASSWORD")
+    val hasReleaseSigning = listOf(
+        releaseKeystore, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword,
+    ).all { !it.isNullOrEmpty() }
+
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystore!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

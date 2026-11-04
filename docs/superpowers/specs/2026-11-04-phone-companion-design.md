@@ -1,8 +1,11 @@
 # Phone companion: built-in Android camera/mic over Wi-Fi — design
 
-Date: 2026-11-04. Status: draft v2 (after two review passes). Depends on
+Date: 2026-11-04. Status: draft v2.1 (after two review passes; v2.1: two post-implementation rulings, see Changelog). Depends on
 `2026-11-04-phone-camera-and-main-source-design.md` (Part B: `MainSource`,
 track roles, camera-main recording).
+
+Changelog: v2.1 (2026-11-04) - Writing rule 5 priming-trim conditions; Security
+"Busy handling" 120 s pairing deadline for a socket mid-pairing.
 
 ## Intent
 
@@ -129,7 +132,9 @@ and the Mac verifies it is talking to the phone it paired with.
   `AUTH_OK` or close. Revocation from the phone's "Paired computers" list.
 - **Busy handling:** only an *authenticated* session occupies the phone. A
   second authenticated client gets `ERROR busy`. Unauthenticated sockets are
-  dropped after 10 s. TCP keepalive on both sides.
+  dropped after 10 s, except a socket mid-pairing after a valid `PAIR_REVEAL`,
+  which instead gets a 120 s pairing deadline, then `PAIR_DENIED` and close.
+  TCP keepalive on both sides.
 - **Threats covered:** LAN stranger cannot start the camera (no token), cannot
   impersonate the phone (pin), cannot read the stream (TLS), cannot win the
   pairing with better than 1-in-a-million odds (commitment). Not covered: a
@@ -245,7 +250,10 @@ observed and left for a later slewing change. Minimum RTT > 100 ms → warning
    `requestMediaDataWhenReady`; overflow → `truncated` + warning.
 5. Audio (when riding this recorder) has its own anchor from the first
    accepted access unit (`hostPTS ≥ beginHostNs`), like `CameraRecorder`'s
-   `audioStartHostTime`, with the trim attachment on that first AU.
+   `audioStartHostTime`. The priming trim is attached only when that first
+   accepted AU is also the first AU the phone sent since `START`; a mid-stream
+   first AU gets no trim. When applied, the trim is capped per AU to the AU's
+   duration and the remainder is carried to the following AUs.
 6. `writtenPixelSize` is **post-rotation** (swap for 90/270) so
    `DisplayInfo.synthetic` describes what the viewer sees.
 7. Preview: a separate `CMSampleBuffer` copy per frame with
