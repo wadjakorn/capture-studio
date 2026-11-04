@@ -17,6 +17,8 @@ struct RecorderMenuView: View {
     @State private var captureAreaEnabled = AppSettings.captureAreaEnabled
     @State private var captureRegion: CGRect? = AppSettings.captureRegion
     @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
+    @State private var seededSelections = false
+    @State private var showPhoneHelp = false
     @State private var permissionGranted = Permissions.screenRecordingGranted()
     @State private var elapsed: TimeInterval = 0
     @State private var showDisplayMenu = false
@@ -99,8 +101,12 @@ struct RecorderMenuView: View {
             projectRows = rows
         }
         .onChange(of: selectedDisplayID) { _, id in AppSettings.lastDisplayID = id }
-        .onChange(of: selectedCameraID) { _, id in AppSettings.lastCameraID = id }
-        .onChange(of: selectedMicID) { _, id in AppSettings.lastMicID = id }
+        .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasConnectedNotification)) { _ in
+            Task { await refreshDevices() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasDisconnectedNotification)) { _ in
+            Task { await refreshDevices() }
+        }
         .onChange(of: systemAudioEnabled) { _, on in AppSettings.recordSystemAudio = on }
         .onChange(of: openStudioAfterRecording) { _, on in AppSettings.openStudioAfterRecording = on }
         .onChange(of: captureAreaEnabled) { _, on in AppSettings.captureAreaEnabled = on }
@@ -258,17 +264,47 @@ struct RecorderMenuView: View {
             }
             .padding(.top, 6)
 
-            dropdown("video", selection: deviceLabel(cameras, selectedCameraID),
-                     isPresented: $showCameraMenu) {
-                pickRow("None", selected: selectedCameraID == nil) {
-                    selectedCameraID = nil
-                    showCameraMenu = false
-                }
-                ForEach(cameras, id: \.uniqueID) { device in
-                    pickRow(device.localizedName, selected: selectedCameraID == device.uniqueID) {
-                        selectedCameraID = device.uniqueID
+            HStack(alignment: .top, spacing: 6) {
+                dropdown("video", selection: deviceLabel(cameras, selectedCameraID),
+                         isPresented: $showCameraMenu) {
+                    pickRow("None", selected: selectedCameraID == nil) {
+                        selectedCameraID = nil
+                        AppSettings.lastCameraID = nil
                         showCameraMenu = false
                     }
+                    let groups = DeviceDiscovery.grouped(cameras)
+                    ForEach(groups, id: \.kind) { group in
+                        if groups.count > 1 {
+                            Text(group.kind.groupTitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(group.devices, id: \.uniqueID) { device in
+                            pickRow(device.localizedName, selected: selectedCameraID == device.uniqueID) {
+                                selectedCameraID = device.uniqueID
+                                AppSettings.lastCameraID = device.uniqueID
+                                showCameraMenu = false
+                            }
+                        }
+                    }
+                }
+                Button {
+                    showPhoneHelp.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Use your phone as a camera")
+                .popover(isPresented: $showPhoneHelp) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Use your phone as a camera").bold()
+                        Text("Any Android phone: install Capture Studio Phone, join the same Wi-Fi, open the app — it appears here.")
+                        Text("Galaxy S26 (One UI 8.5+) can also plug in via USB-C: choose \"Webcam\" in the USB notification (video only, no mic).")
+                    }
+                    .font(.caption)
+                    .frame(width: 260, alignment: .leading)
+                    .padding(12)
                 }
             }
 
@@ -276,12 +312,22 @@ struct RecorderMenuView: View {
                      isPresented: $showMicMenu) {
                 pickRow("None", selected: selectedMicID == nil) {
                     selectedMicID = nil
+                    AppSettings.lastMicID = nil
                     showMicMenu = false
                 }
-                ForEach(microphones, id: \.uniqueID) { device in
-                    pickRow(device.localizedName, selected: selectedMicID == device.uniqueID) {
-                        selectedMicID = device.uniqueID
-                        showMicMenu = false
+                let groups = DeviceDiscovery.grouped(microphones)
+                ForEach(groups, id: \.kind) { group in
+                    if groups.count > 1 {
+                        Text(group.kind.groupTitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(group.devices, id: \.uniqueID) { device in
+                        pickRow(device.localizedName, selected: selectedMicID == device.uniqueID) {
+                            selectedMicID = device.uniqueID
+                            AppSettings.lastMicID = device.uniqueID
+                            showMicMenu = false
+                        }
                     }
                 }
             }
@@ -606,17 +652,20 @@ struct RecorderMenuView: View {
     private func openRecordingPanel() { StudioLauncher.promptAndOpen() }
 
     private func refreshDevices() async {
-        guard permissionGranted else { return }
         cameras = DeviceDiscovery.cameras()
         microphones = DeviceDiscovery.microphones()
-        if selectedCameraID == nil { selectedCameraID = AppSettings.lastCameraID }
-        if selectedMicID == nil { selectedMicID = AppSettings.lastMicID }
+        if !seededSelections {
+            seededSelections = true
+            selectedCameraID = AppSettings.lastCameraID
+            selectedMicID = AppSettings.lastMicID
+        }
         if let id = selectedCameraID, !cameras.contains(where: { $0.uniqueID == id }) {
             selectedCameraID = nil
         }
         if let id = selectedMicID, !microphones.contains(where: { $0.uniqueID == id }) {
             selectedMicID = nil
         }
+        guard permissionGranted else { return }
         do {
             let (items, _) = try await DeviceDiscovery.displays()
             displays = items
