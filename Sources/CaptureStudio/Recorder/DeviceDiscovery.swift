@@ -114,6 +114,30 @@ extension DeviceKind {
     }
 }
 
+// MARK: - Camera format choice
+
+struct CameraFormatCandidate: Equatable {
+    var width: Int
+    var height: Int
+    var maxFPS: Double
+    var index: Int
+}
+
+enum CameraFormatChooser {
+    /// Highest-resolution candidate with max(width,height) <= maxEdge; ties go to
+    /// highest maxFPS, then lowest index. nil if nothing qualifies.
+    static func best(_ candidates: [CameraFormatCandidate], maxEdge: Int = 1920) -> CameraFormatCandidate? {
+        candidates
+            .filter { max($0.width, $0.height) <= maxEdge }
+            .min { a, b in
+                let pa = a.width * a.height, pb = b.width * b.height
+                if pa != pb { return pa > pb }
+                if a.maxFPS != b.maxFPS { return a.maxFPS > b.maxFPS }
+                return a.index < b.index
+            }
+    }
+}
+
 enum DeviceDiscovery {
     /// Enumerates displays via ScreenCaptureKit. Throws if Screen Recording
     /// permission is missing (first call also triggers the TCC prompt).

@@ -49,6 +49,9 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private(set) var sessionStartHostTime: Double?
     /// Set true if the device disappeared mid-recording.
     private(set) var truncated = false
+    /// Pixel size from the settings dictionary actually handed to the writer
+    /// input (never inferred from `activeFormat`). Set in `beginWriting()`.
+    private(set) var writtenPixelSize: CGSize?
     /// Last PTS appended to each track. Adding a mic makes AVCaptureSession
     /// switch its master clock to the audio device clock once at startup, so
     /// video frames straddling the switch are non-monotonic; dropping any
@@ -101,11 +104,29 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             throw CameraError.deviceUnavailable
         }
         session.beginConfiguration()
-        session.sessionPreset = .high
-        guard session.canAddInput(deviceInput), session.canAddOutput(output) else {
+        guard session.canAddInput(deviceInput) else {
+            session.commitConfiguration()
             throw CameraError.deviceUnavailable
         }
         session.addInput(deviceInput)
+        // canSetSessionPreset is only meaningful once the input is attached.
+        // UVC/virtual cameras often reject .high; fall back to picking a
+        // sane (<= 1080p-edge) format by hand.
+        if session.canSetSessionPreset(.high) {
+            session.sessionPreset = .high
+        } else {
+            // `.inputPriority` is marked unavailable in the macOS SDK; use the
+            // raw preset string, gated on support, so the hand-picked format sticks.
+            let inputPriority = AVCaptureSession.Preset(rawValue: "AVCaptureSessionPresetInputPriority")
+            if session.canSetSessionPreset(inputPriority) {
+                session.sessionPreset = inputPriority
+            }
+            selectSafeFormat()
+        }
+        guard session.canAddOutput(output) else {
+            session.commitConfiguration()
+            throw CameraError.deviceUnavailable
+        }
         session.addOutput(output)
         output.setSampleBufferDelegate(self, queue: queue)
 
@@ -126,12 +147,53 @@ final class CameraRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
+    /// Picks the best <=1920-edge format and pins its frame rate (<= 30 fps).
+    /// Best-effort: on lock failure the device keeps its current format.
+    private func selectSafeFormat() {
+        let formats = device.formats
+        let candidates = formats.enumerated().map { index, format -> CameraFormatCandidate in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let fps = format.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+            return CameraFormatCandidate(width: Int(dims.width), height: Int(dims.height),
+                                         maxFPS: fps, index: index)
+        }
+        guard let pick = CameraFormatChooser.best(candidates) else { return }
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            return
+        }
+        defer { device.unlockForConfiguration() }
+        device.activeFormat = formats[pick.index]
+        let fps = min(pick.maxFPS, 30)
+        if fps > 0 {
+            let duration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+        }
+    }
+
     /// Creates the writers and begins accepting samples. Call after `warmUp()`
     /// (session already running, audio clock settled). The next delegate frame
     /// anchors `sessionStartHostTime`.
     func beginWriting() throws {
-        guard let settings = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) else {
-            throw CameraError.writerSetupFailed("no recommended settings")
+        let settings: [String: Any]
+        if let recommended = output.recommendedVideoSettingsForAssetWriter(writingTo: .mp4) {
+            settings = recommended
+        } else {
+            // Only reached on the .inputPriority path, where the active format's
+            // dimensions are the delivered buffer dimensions.
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            guard dims.width > 0, dims.height > 0 else {
+                throw CameraError.writerSetupFailed("no recommended settings")
+            }
+            settings = [AVVideoCodecKey: AVVideoCodecType.h264,
+                        AVVideoWidthKey: Int(dims.width),
+                        AVVideoHeightKey: Int(dims.height)]
+        }
+        if let w = (settings[AVVideoWidthKey] as? NSNumber)?.intValue,
+           let h = (settings[AVVideoHeightKey] as? NSNumber)?.intValue {
+            writtenPixelSize = CGSize(width: w, height: h)
         }
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
