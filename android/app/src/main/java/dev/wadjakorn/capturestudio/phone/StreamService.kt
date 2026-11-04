@@ -83,6 +83,7 @@ class StreamService : Service(), LifecycleOwner {
         }
         started = true
         instance = this
+        _running.value = true
         io.execute(::startServer)
         return START_NOT_STICKY
     }
@@ -116,6 +117,7 @@ class StreamService : Service(), LifecycleOwner {
     override fun onDestroy() {
         destroyed = true
         instance = null
+        _running.value = false
         advertiser?.unregister()
         advertiser = null
         server?.close()
@@ -308,7 +310,10 @@ class StreamService : Service(), LifecycleOwner {
         /** UI preferences, read at each START. */
         val settings = MutableStateFlow(StreamSettings())
 
-        val isRunning: Boolean get() = instance != null
+        private val _running = MutableStateFlow(false)
+        val running: StateFlow<Boolean> = _running.asStateFlow()
+
+        val isRunning: Boolean get() = _running.value
 
         /** Resolves the pending pairing only if it is still [sessionId] (from [pairingRequest]). */
         fun allowPairing(sessionId: Long) {

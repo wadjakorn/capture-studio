@@ -28,6 +28,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import dev.wadjakorn.capturestudio.phone.PairingCode
 import dev.wadjakorn.capturestudio.phone.PairingStore
 import dev.wadjakorn.capturestudio.phone.SessionState
 import dev.wadjakorn.capturestudio.phone.StreamService
+import kotlinx.coroutines.flow.update
 import java.text.DateFormat
 import java.util.Date
 
@@ -90,14 +92,14 @@ fun MainScreen() {
             )
         } else {
             Dashboard(
-                userStopped = userStopped,
+                onUserStopped = { userStopped = true },
                 onToggleService = { running ->
                     if (running) {
-                        StreamService.stop(context)
                         userStopped = true
+                        StreamService.stop(context)
                     } else {
-                        StreamService.start(context)
                         userStopped = false
+                        StreamService.start(context)
                     }
                 },
             )
@@ -107,7 +109,7 @@ fun MainScreen() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Dashboard(userStopped: Boolean, onToggleService: (running: Boolean) -> Unit) {
+private fun Dashboard(onUserStopped: () -> Unit, onToggleService: (running: Boolean) -> Unit) {
     val context = LocalContext.current
     val state by StreamService.sessionState.collectAsStateWithLifecycle()
     val request by StreamService.pairingRequest.collectAsStateWithLifecycle()
@@ -116,8 +118,13 @@ private fun Dashboard(userStopped: Boolean, onToggleService: (running: Boolean) 
     val paired by store.paired.collectAsStateWithLifecycle()
     val streaming = state is SessionState.Streaming
 
-    // The activity's running state isn't observable; track what this screen asked for.
-    val running = !userStopped
+    val running by StreamService.running.collectAsStateWithLifecycle()
+    // Service went away (notification Stop, startup failure): don't auto-restart on resume.
+    var wasRunning by remember { mutableStateOf(false) }
+    LaunchedEffect(running) {
+        if (wasRunning && !running) onUserStopped()
+        wasRunning = running
+    }
 
     val prefs = remember { context.getSharedPreferences("ui", Context.MODE_PRIVATE) }
     var keepOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", false)) }
@@ -137,7 +144,7 @@ private fun Dashboard(userStopped: Boolean, onToggleService: (running: Boolean) 
                 Text("Status", style = MaterialTheme.typography.titleMedium)
                 Text(
                     when {
-                        userStopped -> "Stopped"
+                        !running -> "Stopped"
                         state is SessionState.Streaming -> "Streaming to ${(state as SessionState.Streaming).macName}"
                         state is SessionState.Connected -> "Connected to ${(state as SessionState.Connected).macName}"
                         else -> "Advertising on Wi-Fi as ${Build.MODEL}"
@@ -154,14 +161,13 @@ private fun Dashboard(userStopped: Boolean, onToggleService: (running: Boolean) 
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Camera", style = MaterialTheme.typography.titleMedium)
-                val facing = settings.facing ?: "back"
+                val facing = settings.facing
                 Choice(listOf("back" to "Back", "front" to "Front"), facing, !streaming) { v ->
-                    StreamService.settings.value = StreamService.settings.value.copy(facing = v)
+                    StreamService.settings.update { it.copy(facing = v) }
                 }
-                val height = settings.height ?: 720
+                val height = settings.height
                 Choice(listOf(720 to "720p", 1080 to "1080p"), height, !streaming) { h ->
-                    StreamService.settings.value =
-                        StreamService.settings.value.copy(width = if (h == 1080) 1920 else 1280, height = h)
+                    StreamService.settings.update { it.copy(width = if (h == 1080) 1920 else 1280, height = h) }
                 }
                 if (streaming) Text("Settings apply to the next stream.", style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -206,7 +212,7 @@ private fun Dashboard(userStopped: Boolean, onToggleService: (running: Boolean) 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun <T> Choice(options: List<Pair<T, String>>, selected: T, enabled: Boolean, onSelect: (T) -> Unit) {
+private fun <T> Choice(options: List<Pair<T, String>>, selected: T?, enabled: Boolean, onSelect: (T) -> Unit) {
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         options.forEachIndexed { i, (value, label) ->
             SegmentedButton(
