@@ -126,6 +126,16 @@ final class RecordingSession: ObservableObject {
     private var cameraRecorder: CameraRecorder?
     private var micRecorder: MicRecorder?
     private var previewPanel: CameraPreviewPanel?
+    /// Camera-main mode: the camera recording the main video (`main-camera.mp4`).
+    /// Mandatory like the screen recorder; nil in display-main mode.
+    private var mainCameraRecorder: CameraRecorder?
+    /// Camera-main mode: large bottom-center live preview of the main camera.
+    private var mainPreviewPanel: CameraPreviewPanel?
+    /// Main source this session armed with. Set in `arm()`, cleared wherever
+    /// `armedDisplayID` is. Every branch that differs for camera-main switches on
+    /// it — `screenRecorder == nil` already means "area deferred" and must not
+    /// double as "camera-main".
+    private var armedMain: MainSource?
     private var regionOutline: RegionOutlineOverlay?
     private var areaOverlay: AreaSelectionOverlay?
     private var previewHUD: PreviewHUD?
@@ -163,7 +173,7 @@ final class RecordingSession: ObservableObject {
     /// SCStream is deferred to `beginRecording()` so no screen-recording
     /// indicator appears during preview. Moves the slow warm-up before the
     /// countdown so Record begins near-instantly. → `.armed`.
-    func arm(displayID: CGDirectDisplayID,
+    func arm(main: MainSource,
              cameraID: String? = nil,
              micID: String? = nil,
              systemAudio: Bool = false,
@@ -176,6 +186,15 @@ final class RecordingSession: ObservableObject {
         armGeneration &+= 1
         let generation = armGeneration
         warnings = []
+        let displayID: CGDirectDisplayID
+        switch main {
+        case .camera(let mainID):
+            await armCameraMain(main, mainID: mainID, cameraID: cameraID, micID: micID,
+                                previewControls: previewControls, generation: generation)
+            return
+        case .display(let id):
+            displayID = id
+        }
         Log.recorder.info("arm: display=\(displayID) camera=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) systemAudio=\(systemAudio) region=\(region != nil) controls=\(previewControls) area=\(String(describing: areaSelection), privacy: .public)")
 
         do {
@@ -292,6 +311,7 @@ final class RecordingSession: ObservableObject {
             self.displayInfo = item.displayInfo(region: region)
             self.armedRegion = region
             self.armedDisplayID = displayID
+            self.armedMain = main
             self.armedSystemAudio = systemAudio
             self.armedAreaSelection = areaSelection
             // Block Record until the user picks an area (Area mode, first use).
@@ -332,6 +352,180 @@ final class RecordingSession: ObservableObject {
             await tearDownArmed()
             if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
         }
+    }
+
+    /// `arm()` for a camera main source. No display discovery (works without
+    /// Screen Recording permission), no screen recorder, no region / area / system
+    /// audio. The main camera is mandatory; the overlay camera and mic stay
+    /// best-effort exactly as in display mode.
+    private func armCameraMain(_ main: MainSource, mainID: String, cameraID: String?,
+                               micID: String?, previewControls: Bool,
+                               generation: Int) async {
+        Log.recorder.info("arm: main camera=\(mainID, privacy: .public) overlay=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) controls=\(previewControls)")
+        let cameraIDs = availableCameraIDs()
+        if main.resolve(cameraIDs: cameraIDs, displayIDs: []) != nil {
+            state = .failed("Selected camera is no longer available.")
+            return
+        }
+        // The main camera can't also be the overlay: drop a duplicate selection.
+        let overlayID = RecorderSelection.resolvedFrontCamera(
+            cameraID,
+            candidates: RecorderSelection.frontCameraIDs(all: cameraIDs, main: main)
+        )
+
+        do {
+            try FileManager.default.createDirectory(
+                at: ProjectBundle.defaultRecordingsDirectory(),
+                withIntermediateDirectories: true
+            )
+            let bundle = try ProjectBundle.createNew()
+            pendingBundleURL = bundle.url
+            NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
+
+            let micDevice = micID.flatMap { id in
+                DeviceDiscovery.microphones().first { $0.uniqueID == id }
+            }
+            // Host the mic on the MAIN camera's session (same device-contention
+            // reasoning as display mode); fallback is a standalone mic session.
+            guard let mainRecorder = makeCameraSource(
+                id: mainID, outputURL: bundle.mainCameraURL,
+                micDevice: micDevice,
+                micOutputURL: micDevice != nil ? bundle.micURL : nil
+            ) else {
+                // Vanished between the availability check and the lookup.
+                await tearDownArmed()
+                if armIsCurrent(generation) {
+                    state = .failed("Selected camera is no longer available.")
+                }
+                return
+            }
+            mainRecorder.onDeviceLost = { [weak self] msg in
+                Task { @MainActor in self?.warnings.append(msg) }
+            }
+            do {
+                try await mainRecorder.warmUp()
+            } catch {
+                // Mandatory source: release the half-opened device, then fail
+                // the whole arm (outer catch tears down and deletes the bundle).
+                await mainRecorder.discard()
+                throw error
+            }
+            // Cancelled during warm-up: the recorder is still local, so cancel's
+            // teardown never saw it — discard it here.
+            guard armIsCurrent(generation) else {
+                await mainRecorder.discard()
+                abandonArm(bundle)
+                return
+            }
+            mainCameraRecorder = mainRecorder
+            let mainPanel = CameraPreviewPanel(
+                session: mainRecorder.captureSession,
+                onDisplay: nil,
+                placement: .bottomCenterLarge,
+                onCancel: { [weak self] in
+                    Task { @MainActor in await self?.cancelCountdownOrArming() }
+                })
+            mainPanel.show()
+            mainPreviewPanel = mainPanel
+            if let w = mainRecorder.micWarning {
+                Log.recorder.error("mic on main camera session failed: \(w, privacy: .public)")
+                if let micDevice {
+                    await warmUpStandaloneMic(micDevice, bundle: bundle, generation: generation)
+                }
+            }
+            guard armIsCurrent(generation) else {
+                abandonArm(bundle)
+                return
+            }
+
+            // Overlay camera: best-effort, no mic (the mic lives on the main
+            // camera or a standalone session).
+            if let overlayID,
+               let recorder = makeCameraSource(id: overlayID, outputURL: bundle.cameraURL,
+                                               micDevice: nil, micOutputURL: nil) {
+                recorder.onDeviceLost = { [weak self] msg in
+                    Task { @MainActor in self?.warnings.append(msg) }
+                }
+                do {
+                    try await recorder.warmUp()
+                    guard armIsCurrent(generation) else {
+                        await recorder.discard()
+                        abandonArm(bundle)
+                        return
+                    }
+                    cameraRecorder = recorder
+                    let panel = CameraPreviewPanel(
+                        session: recorder.captureSession,
+                        onDisplay: nil,
+                        placement: .corner,
+                        onCancel: { [weak self] in
+                            Task { @MainActor in await self?.cancelCountdownOrArming() }
+                        })
+                    panel.show()
+                    previewPanel = panel
+                } catch {
+                    guard armIsCurrent(generation) else {
+                        abandonArm(bundle)
+                        return
+                    }
+                    Log.recorder.error("overlay camera warm-up failed: \(error.localizedDescription, privacy: .public)")
+                    warnings.append("Camera not recorded: \(error.localizedDescription)")
+                }
+            }
+
+            self.bundle = bundle
+            self.screenRecorder = nil
+            self.displayInfo = nil
+            self.armedRegion = nil
+            self.armedDisplayID = nil
+            self.armedMain = main
+            self.armedSystemAudio = false
+            self.armedAreaSelection = .unavailable
+            self.refreshCanBeginArmed()
+
+            // Same HUD as display mode, minus Select Area; on NSScreen.main.
+            if previewControls {
+                let hud = PreviewHUD(
+                    onDisplay: nil,
+                    offersAreaSelection: false,
+                    canRecord: canBeginArmed,
+                    onToggleDragMode: { _ in },
+                    onRecord: { [weak self] in
+                        Task { await self?.startCountdownThenBegin() }
+                    },
+                    onCancel: { [weak self] in
+                        Task { @MainActor in await self?.cancelCountdownOrArming() }
+                    })
+                hud.show()
+                previewHUD = hud
+            }
+
+            state = .armed
+            Log.recorder.info("armed (camera main): \(bundle.url.lastPathComponent, privacy: .public)")
+        } catch {
+            guard armIsCurrent(generation) else { return }
+            Log.recorder.error("arm (camera main) failed: \(error.localizedDescription, privacy: .public)")
+            await tearDownArmed()
+            if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
+        }
+    }
+
+    /// Unique IDs of cameras that can be armed right now. Single source for
+    /// availability checks (Part C appends Wi-Fi phone sources here).
+    private func availableCameraIDs() -> [String] {
+        DeviceDiscovery.cameras().map(\.uniqueID)
+    }
+
+    /// Builds a camera recorder for a source id, or nil if it vanished. Single
+    /// factory so Part C can branch on non-AVCaptureDevice sources.
+    private func makeCameraSource(id: String, outputURL: URL,
+                                  micDevice: AVCaptureDevice?,
+                                  micOutputURL: URL?) -> CameraRecorder? {
+        guard let device = DeviceDiscovery.cameras().first(where: { $0.uniqueID == id }) else {
+            return nil
+        }
+        return CameraRecorder(device: device, outputURL: outputURL,
+                              micDevice: micDevice, micOutputURL: micOutputURL)
     }
 
     /// True while the arm() that took `generation` is still the live one.
@@ -380,6 +574,8 @@ final class RecordingSession: ObservableObject {
     /// `buildDeferredScreenRecorder()`. Camera/mic stay warm; no re-arm.
     func enterDragMode() {
         guard isArmed, !counting, areaOverlay == nil else { return }
+        // Camera-main has no area to select.
+        if armedMain?.isCamera == true { return }
 
         // Region is no longer final while dragging → defer the recorder. Drop
         // the eager one so `startCountdownThenBegin` rebuilds it at record time.
@@ -439,6 +635,8 @@ final class RecordingSession: ObservableObject {
     /// record time. Returns false (tearing the armed session down, then
     /// `.failed`) if the display vanished, or quietly if a cancel won the race.
     private func buildDeferredScreenRecorder() async -> Bool {
+        // Camera-main never builds a screen recorder.
+        if armedMain?.isCamera == true { return false }
         guard let bundle, let displayID = armedDisplayID else {
             await failArmed("No area selected.")
             return false
@@ -504,20 +702,36 @@ final class RecordingSession: ObservableObject {
     /// (mandatory) and the camera/mic writers (best-effort). Called by the view
     /// after the countdown. → `.recording`.
     func beginRecording() async {
-        guard isArmed, let bundle, let screenRecorder, let displayInfo else { return }
-        state = .preparing
+        guard isArmed, let bundle, let armedMain else { return }
 
-        do {
-            // Screen is mandatory — failure here aborts the recording.
-            try await screenRecorder.start()
-            if let warning = screenRecorder.systemAudioWarning {
-                warnings.append(warning)
+        if armedMain.isCamera {
+            guard let mainCameraRecorder else { return }
+            state = .preparing
+            do {
+                // Main camera is mandatory — failure here aborts the recording.
+                try mainCameraRecorder.beginWriting()
+            } catch {
+                Log.recorder.error("main camera beginWriting failed: \(error.localizedDescription, privacy: .public)")
+                await tearDownArmed()
+                state = .failed(error.localizedDescription)
+                return
             }
-        } catch {
-            Log.recorder.error("screen start failed: \(error.localizedDescription, privacy: .public)")
-            await tearDownArmed()
-            state = .failed(error.localizedDescription)
-            return
+        } else {
+            guard let screenRecorder, displayInfo != nil else { return }
+            state = .preparing
+
+            do {
+                // Screen is mandatory — failure here aborts the recording.
+                try await screenRecorder.start()
+                if let warning = screenRecorder.systemAudioWarning {
+                    warnings.append(warning)
+                }
+            } catch {
+                Log.recorder.error("screen start failed: \(error.localizedDescription, privacy: .public)")
+                await tearDownArmed()
+                state = .failed(error.localizedDescription)
+                return
+            }
         }
 
         // Warmed camera/mic now begin writing; the next frame anchors their
@@ -537,8 +751,10 @@ final class RecordingSession: ObservableObject {
             }
         }
 
-        eventTracker.start()
-        _ = displayInfo  // retained for stop(); already stored
+        // Cursor/click events only make sense against a captured display.
+        if !armedMain.isCamera {
+            eventTracker.start()
+        }
         _ = bundle
         state = .recording(startedAt: Date())
         // Content windows that opened/closed during `.preparing` changed after
@@ -566,27 +782,46 @@ final class RecordingSession: ObservableObject {
     /// AppSettings and toggles. `activateForPrompts` brings the app frontmost so
     /// any camera/mic TCC dialog is visible when triggered while unfocused.
     func toggleFromHotkey() async {
-        // Area mode can't pop an interactive selector from a hotkey → reuse the
-        // last saved region on its saved display. Full mode uses the picker's last
-        // display. If the saved area display is gone, arm() no-ops gracefully.
-        let area = AppSettings.captureAreaEnabled
-        let region = area ? AppSettings.captureRegion : nil
-        let displayID = area ? AppSettings.captureRegionDisplayID : AppSettings.lastDisplayID
-        // A hotkey can't open the area selector. If Area mode has NO saved area
-        // at all (no region and no saved display — a full-display area keeps its
-        // display), ignore a start rather than silently grabbing the whole
-        // display. A saved area (region, or a full-display area) records as usual.
-        if (state == .idle || isFailed), area, region == nil,
-           AppSettings.captureRegionDisplayID == nil { return }
-        // The guard above already rejected `.required`, so a hotkey start is
-        // either Full Display or Area mode with an area saved.
-        await toggle(displayID: displayID,
-                     cameraID: AppSettings.lastCameraID,
+        // The main source wins: a stored camera main ignores the Area toggle and
+        // the saved region entirely (camera-main has no area).
+        let stored = AppSettings.lastMainSource
+        let main: MainSource?
+        let region: CGRect?
+        let areaSelection: AreaSelection
+        var cameraID = AppSettings.lastCameraID
+        if let stored, stored.isCamera {
+            main = stored
+            region = nil
+            areaSelection = .unavailable
+            // The main camera can't double as the overlay camera.
+            cameraID = RecorderSelection.resolvedFrontCamera(
+                cameraID,
+                candidates: RecorderSelection.frontCameraIDs(all: availableCameraIDs(), main: stored)
+            )
+        } else {
+            // Area mode can't pop an interactive selector from a hotkey → reuse the
+            // last saved region on its saved display. Full mode uses the picker's last
+            // display. If the saved area display is gone, arm() no-ops gracefully.
+            let area = AppSettings.captureAreaEnabled
+            region = area ? AppSettings.captureRegion : nil
+            main = area ? AppSettings.captureRegionDisplayID.map(MainSource.display) : stored
+            // A hotkey can't open the area selector. If Area mode has NO saved area
+            // at all (no region and no saved display — a full-display area keeps its
+            // display), ignore a start rather than silently grabbing the whole
+            // display. A saved area (region, or a full-display area) records as usual.
+            if (state == .idle || isFailed), area, region == nil,
+               AppSettings.captureRegionDisplayID == nil { return }
+            // The guard above already rejected `.required`, so a hotkey start is
+            // either Full Display or Area mode with an area saved.
+            areaSelection = area ? .optional : .unavailable
+        }
+        await toggle(main: main,
+                     cameraID: cameraID,
                      micID: AppSettings.lastMicID,
                      systemAudio: AppSettings.recordSystemAudio,
                      region: region,
                      activateForPrompts: true,
-                     areaSelection: area ? .optional : .unavailable)
+                     areaSelection: areaSelection)
     }
 
     /// One action shared by the popup's primary button and the global hotkey.
@@ -600,7 +835,7 @@ final class RecordingSession: ObservableObject {
     /// `previewFirst` forces the armed/preview step even for screen-only configs
     /// (the GUI button uses this so every mode confirms before recording; the
     /// hotkey leaves it false to keep its one-press screen-only record).
-    func toggle(displayID: CGDirectDisplayID?, cameraID: String?, micID: String?,
+    func toggle(main: MainSource?, cameraID: String?, micID: String?,
                 systemAudio: Bool, region: CGRect? = nil, activateForPrompts: Bool,
                 previewFirst: Bool = false,
                 areaSelection: AreaSelection = .unavailable) async {
@@ -612,7 +847,7 @@ final class RecordingSession: ObservableObject {
         case .armed:
             await startCountdownThenBegin()
         case .idle, .failed:
-            await startFromIdle(displayID: displayID, cameraID: cameraID, micID: micID,
+            await startFromIdle(main: main, cameraID: cameraID, micID: micID,
                                 systemAudio: systemAudio, region: region,
                                 activateForPrompts: activateForPrompts,
                                 previewFirst: previewFirst,
@@ -622,27 +857,34 @@ final class RecordingSession: ObservableObject {
         }
     }
 
-    private func startFromIdle(displayID: CGDirectDisplayID?, cameraID: String?,
+    private func startFromIdle(main: MainSource?, cameraID: String?,
                                micID: String?, systemAudio: Bool, region: CGRect?,
                                activateForPrompts: Bool, previewFirst: Bool,
                                areaSelection: AreaSelection = .unavailable) async {
+        guard let main else { return }
         // Can't usefully prompt for screen recording from a hotkey — no-op.
-        guard Permissions.screenRecordingGranted() else { return }
-        guard let displayID else { return }
+        // Camera-main never touches the screen, so it doesn't need the grant.
+        if RecorderSelection.needsScreenPermission(for: main) {
+            guard Permissions.screenRecordingGranted() else { return }
+        }
 
         var camera = cameraID
         var mic = micID
-        if camera != nil || mic != nil, activateForPrompts {
+        if main.isCamera || camera != nil || mic != nil, activateForPrompts {
             NSApp.activate(ignoringOtherApps: true)  // TCC dialog frontmost
         }
-        if camera != nil, await !Permissions.requestCapture(.video) { camera = nil }
+        if main.isCamera || camera != nil, await !Permissions.requestCapture(.video) {
+            // Camera-main without camera access can't record anything.
+            if main.isCamera { return }
+            camera = nil
+        }
         if mic != nil, await !Permissions.requestCapture(.audio) { mic = nil }
 
         // Show the preview HUD (drag-mode toggle) whenever we'll pause on the
         // preview (camera flow, or the GUI's previewFirst). Screen-only records
         // start directly with no preview → no HUD.
-        let willPreview = camera != nil || previewFirst
-        await arm(displayID: displayID, cameraID: camera, micID: mic,
+        let willPreview = main.isCamera || camera != nil || previewFirst
+        await arm(main: main, cameraID: camera, micID: mic,
                   systemAudio: systemAudio, region: region,
                   previewControls: willPreview,
                   areaSelection: areaSelection)
@@ -651,7 +893,7 @@ final class RecordingSession: ObservableObject {
         // GUI button) stays armed with its preview, awaiting the Record button /
         // a second trigger — for area mode this is the user's chance to adjust
         // the live selection before capture starts.
-        if camera == nil, !previewFirst, isArmed {
+        if !main.isCamera, camera == nil, !previewFirst, isArmed {
             await startCountdownThenBegin()
         }
     }
@@ -666,7 +908,8 @@ final class RecordingSession: ObservableObject {
         counting = true
 
         // Interactive area defers the screen recorder until the region is final.
-        if screenRecorder == nil {
+        // Camera-main has no screen recorder at all — never rebuild one.
+        if armedMain?.isCamera == false, screenRecorder == nil {
             guard await buildDeferredScreenRecorder() else {
                 counting = false
                 return
@@ -708,6 +951,8 @@ final class RecordingSession: ObservableObject {
     private func tearDownArmed() async {
         previewPanel?.close()
         previewPanel = nil
+        mainPreviewPanel?.close()
+        mainPreviewPanel = nil
         regionOutline?.close()
         regionOutline = nil
         previewHUD?.close()
@@ -723,17 +968,21 @@ final class RecordingSession: ObservableObject {
         // racing a failure path) then finds nothing left, so nothing is discarded
         // or deleted twice. The bundle is deleted via `pendingBundleURL` because
         // `bundle` is still nil during warm-up.
+        let mainCamera = mainCameraRecorder
         let camera = cameraRecorder
         let mic = micRecorder
         let bundleURL = pendingBundleURL
         bundle = nil
         pendingBundleURL = nil
         screenRecorder = nil
+        mainCameraRecorder = nil
         cameraRecorder = nil
         micRecorder = nil
         displayInfo = nil
         armedRegion = nil
         armedDisplayID = nil
+        armedMain = nil
+        await mainCamera?.discard()
         await camera?.discard()
         await mic?.discard()
         if let bundleURL {
@@ -747,6 +996,17 @@ final class RecordingSession: ObservableObject {
     func stop(streamError: Error? = nil) async {
         guard isRecording else { return }
         state = .finishing
+
+        if armedMain?.isCamera == true {
+            guard let bundle, let mainCameraRecorder else {
+                state = .failed("Internal error: no active recording.")
+                return
+            }
+            await finishCameraMain(bundle: bundle, mainRecorder: mainCameraRecorder,
+                                   streamError: streamError)
+            clearAfterStop()
+            return
+        }
 
         guard let bundle, let screenRecorder, let displayInfo else {
             state = .failed("Internal error: no active recording.")
@@ -793,34 +1053,106 @@ final class RecordingSession: ObservableObject {
                 app: .current(),
                 display: displayInfo,
                 tracks: tracks,
-                recordedAt: Date()
+                recordedAt: Date(),
+                mainSource: "display"
             )
-            try bundle.writeMeta(meta)
-            // Fire-and-forget: warms the Dashboard thumbnail without delaying stop().
-            ThumbnailStore.shared.prefetch(bundleURL: bundle.url)
-            Log.recorder.info("stop OK: \(bundle.url.lastPathComponent, privacy: .public) tracks=\(tracks.count) warnings=\(self.warnings.count)")
-            lastBundleURL = bundle.url
-            RecentProjectsStore.shared.noteRecorded(bundle.url)
-            state = .idle
-            switch PostRecordingAction.decide(
-                openStudioAfterRecording: AppSettings.openStudioAfterRecording,
-                studioWindowVisible: StudioLauncher.hasVisibleStudioWindow
-            ) {
-            case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
-            case .openStudioBehind: StudioLauncher.open(bundleURL: bundle.url, placement: .behindCurrent)
-            case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
-            }
-            if let streamError {
-                state = .failed("Recording saved, but capture stopped early: \(streamError.localizedDescription)")
-            }
+            try completeSave(bundle: bundle, meta: meta, streamError: streamError)
         } catch {
             Log.recorder.error("stop failed: \(error.localizedDescription, privacy: .public)")
             eventTracker.cancel()
             state = .failed(error.localizedDescription)
         }
 
+        clearAfterStop()
+    }
+
+    /// Camera-main `stop()`: finalizes the main camera (anchor), overlay camera
+    /// and standalone mic, then writes a v2 meta with synthetic display geometry
+    /// sized to the main video. No events.jsonl — there is no captured display.
+    private func finishCameraMain(bundle: ProjectBundle, mainRecorder: CameraRecorder,
+                                  streamError: Error?) async {
+        let mainResult: CameraRecorder.Result
+        do {
+            mainResult = try await mainRecorder.stop()
+        } catch {
+            // The anchor track is lost — nothing to save. Release the other
+            // still-running capture sessions instead of leaking them.
+            Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
+            await cameraRecorder?.discard()
+            await micRecorder?.discard()
+            state = .failed(error.localizedDescription)
+            return
+        }
+        do {
+            var mainTrack = mainResult.camera
+            mainTrack.role = .main
+            var tracks = [mainTrack]
+            if let micTrack = mainResult.mic { tracks.append(micTrack) }
+            if let w = mainRecorder.micWarning, !warnings.contains(w) { warnings.append(w) }
+
+            if let cameraRecorder {
+                do {
+                    let result = try await cameraRecorder.stop()
+                    var overlayTrack = result.camera
+                    overlayTrack.role = .overlay
+                    tracks.append(overlayTrack)
+                    if let micTrack = result.mic { tracks.append(micTrack) }
+                } catch {
+                    warnings.append("Camera track lost: \(error.localizedDescription)")
+                }
+            }
+            if let micRecorder {
+                do { tracks.append(try await micRecorder.stop()) }
+                catch { warnings.append("Microphone track lost: \(error.localizedDescription)") }
+            }
+
+            let size = mainRecorder.writtenPixelSize ?? CGSize(width: 1920, height: 1080)
+            let meta = ProjectMeta(
+                schemaVersion: 2,
+                app: .current(),
+                display: .synthetic(width: Int(size.width), height: Int(size.height)),
+                tracks: tracks,
+                recordedAt: Date(),
+                mainSource: "camera"
+            )
+            try completeSave(bundle: bundle, meta: meta, streamError: streamError)
+        } catch {
+            Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
+            state = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Writes meta.json LAST (its presence marks the bundle valid), then runs the
+    /// post-recording action. Shared by display- and camera-main `stop()`.
+    private func completeSave(bundle: ProjectBundle, meta: ProjectMeta,
+                              streamError: Error?) throws {
+        try bundle.writeMeta(meta)
+        // Fire-and-forget: warms the Dashboard thumbnail without delaying stop().
+        ThumbnailStore.shared.prefetch(bundleURL: bundle.url)
+        Log.recorder.info("stop OK: \(bundle.url.lastPathComponent, privacy: .public) tracks=\(meta.tracks.count) warnings=\(self.warnings.count)")
+        lastBundleURL = bundle.url
+        RecentProjectsStore.shared.noteRecorded(bundle.url)
+        state = .idle
+        switch PostRecordingAction.decide(
+            openStudioAfterRecording: AppSettings.openStudioAfterRecording,
+            studioWindowVisible: StudioLauncher.hasVisibleStudioWindow
+        ) {
+        case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
+        case .openStudioBehind: StudioLauncher.open(bundleURL: bundle.url, placement: .behindCurrent)
+        case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
+        }
+        if let streamError {
+            state = .failed("Recording saved, but capture stopped early: \(streamError.localizedDescription)")
+        }
+    }
+
+    /// Post-stop cleanup (success and failure alike): close every panel/overlay
+    /// and drop all recorders and armed state.
+    private func clearAfterStop() {
         previewPanel?.close()
         previewPanel = nil
+        mainPreviewPanel?.close()
+        mainPreviewPanel = nil
         regionOutline?.close()
         regionOutline = nil
         previewHUD?.close()
@@ -833,11 +1165,13 @@ final class RecordingSession: ObservableObject {
         self.bundle = nil
         self.pendingBundleURL = nil
         self.screenRecorder = nil
+        self.mainCameraRecorder = nil
         self.cameraRecorder = nil
         self.micRecorder = nil
         self.displayInfo = nil
         self.armedRegion = nil
         self.armedDisplayID = nil
+        self.armedMain = nil
         NotificationCenter.default.post(name: .projectLibraryDidChange, object: nil)
     }
 
@@ -877,6 +1211,8 @@ final class RecordingSession: ObservableObject {
     func tearDownForQuit() {
         previewPanel?.close()
         previewPanel = nil
+        mainPreviewPanel?.close()
+        mainPreviewPanel = nil
         regionOutline?.close()
         regionOutline = nil
         previewHUD?.close()

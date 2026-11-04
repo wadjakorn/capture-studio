@@ -381,7 +381,7 @@ struct RecorderMenuView: View {
                 // torn down by the close doesn't matter.
                 TrayPopupOpener.closePopup()
                 Task {
-                    await session.toggle(displayID: useDisplay,
+                    await session.toggle(main: useDisplay.map(MainSource.display),
                                          cameraID: selectedCameraID,
                                          micID: selectedMicID,
                                          systemAudio: systemAudioEnabled,

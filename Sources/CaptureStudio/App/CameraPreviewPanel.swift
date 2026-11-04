@@ -17,21 +17,45 @@ final class CameraPreviewPanel: NSObject {
     private let previewLayer: AVCaptureVideoPreviewLayer
     private var mirrored: Bool
 
+    /// Where the panel opens. `.corner` is the overlay-camera preview (bottom
+    /// right); `.bottomCenterLarge` is the camera-main preview — larger, centered,
+    /// and stacked above the `PreviewHUD` so the two never overlap.
+    enum Placement {
+        case corner
+        case bottomCenterLarge
+    }
+
     /// `onCancel` fires on ESC while the preview is the key window, so cancelling
     /// works even when the user last clicked (focused) the camera preview.
     init(session: AVCaptureSession, onDisplay displayID: CGDirectDisplayID?,
+         placement: Placement = .corner,
          onCancel: @escaping () -> Void = {}) {
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
                 .uint32Value == displayID
         } ?? NSScreen.main ?? NSScreen.screens.first!
 
-        let size = NSSize(width: 320, height: 240)
-        let margin: CGFloat = 24
-        let origin = NSPoint(
-            x: screen.frame.maxX - size.width - margin,
-            y: screen.frame.minY + margin
-        )
+        let size: NSSize
+        let origin: NSPoint
+        switch placement {
+        case .corner:
+            size = NSSize(width: 320, height: 240)
+            let margin: CGFloat = 24
+            origin = NSPoint(
+                x: screen.frame.maxX - size.width - margin,
+                y: screen.frame.minY + margin
+            )
+        case .bottomCenterLarge:
+            size = NSSize(width: 640, height: 480)
+            // `PreviewHUD` sits 130 pt above the screen bottom; clear its
+            // height (~56 pt) plus a gap so the panel stacks above it.
+            let hudTop: CGFloat = 130 + 56
+            let gap: CGFloat = 24
+            origin = NSPoint(
+                x: screen.frame.midX - size.width / 2,
+                y: screen.frame.minY + hudTop + gap
+            )
+        }
         panel = CameraPanel(
             contentRect: NSRect(origin: origin, size: size),
             styleMask: [.titled, .resizable, .nonactivatingPanel, .fullSizeContentView],
