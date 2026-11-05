@@ -201,6 +201,9 @@ struct StudioView: View {
                                 .frame(width: contentWidth, height: laneHeight(lane), alignment: .leading)
                         }
                     }
+                    .overlay(alignment: .topLeading) {
+                        CutPreviewOverlay(preview: model.hoverPreview, duration: model.duration, width: contentWidth, style: .dim)
+                    }
                 }
                 .scrollPosition($timelineScroll)
                 .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.x } action: { _, x in
@@ -343,8 +346,7 @@ struct StudioView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(.tint)
                         .frame(width: width, height: 6)
-                        .offset(x: 0)
-                    // Cut (hidden) segments: greyed over the kept region; split
+                    // Cut (hidden) segments: greyed over the timeline; split
                     // boundaries: hairline ticks. Non-destructive — Reset restores.
                     ForEach(model.segments) { seg in
                         if seg.hidden {
@@ -360,6 +362,7 @@ struct StudioView: View {
                                 .offset(x: fraction(seg.start) * width)
                         }
                     }
+                    CutPreviewOverlay(preview: model.hoverPreview, duration: model.duration, width: width, style: .lane)
                     // Playhead.
                     Rectangle()
                         .fill(.primary)
