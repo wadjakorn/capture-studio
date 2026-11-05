@@ -45,4 +45,11 @@ struct ExportLockTests {
         m.cancelExport()
         #expect(m.exportState == .idle)
     }
+
+    @Test func togglePlayIsNoOpWhileExporting() {
+        let m = makeModel()
+        m.beginExportLockForTests()
+        m.togglePlay()
+        #expect(!m.isPlaying)
+    }
 }

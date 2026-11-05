@@ -2680,7 +2680,7 @@ final class StudioModel: ObservableObject {
     // MARK: - Playback
 
     func togglePlay() {
-        guard let player else { return }
+        guard !isExporting, let player else { return }
         if player.timeControlStatus == .playing {
             player.pause()
         } else {
@@ -2947,6 +2947,7 @@ final class StudioModel: ObservableObject {
             range = CMTimeRange(start: ts(start), end: ts(max(start + 0.05, end)))
         }
 
+        player?.pause()
         exportState = .exporting(0)
         let audioMix = buildAudioMix()
         exportTask = Task {
