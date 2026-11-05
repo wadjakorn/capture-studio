@@ -506,4 +506,15 @@ import Foundation
         #expect(decoded.zoomBlocks.count == 1)
         #expect(decoded.zoomBlocks[0].sensitivity == nil)
     }
+
+    @Test func savedEditWritesLegacyTrimDefaults() throws {
+        let state = EditState(segments: [TimelineSegment(start: 0, end: 5, hidden: true),
+                                         TimelineSegment(start: 5, end: 10)])
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(EditState.self, from: data)
+        #expect(decoded.trimIn == 0)
+        #expect(decoded.trimOut == nil)
+        #expect(decoded.committedTrimStart == 0)
+        #expect(decoded.committedTrimEnd == nil)
+    }
 }
