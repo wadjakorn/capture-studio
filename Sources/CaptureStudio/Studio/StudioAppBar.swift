@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-/// Top app-bar chrome: filename, undo/redo + presets + preview/speed
+/// Top app-bar chrome: filename, undo/redo, presets + preview/speed
 /// placeholders, a Reveal-in-Finder button for the master files, and the real
 /// export control (kept live so Stop is reachable mid-export).
 struct StudioAppBar: View {
@@ -17,10 +17,10 @@ struct StudioAppBar: View {
             Spacer(minLength: 12)
 
             HStack(spacing: 4) {
-                Button { } label: { Image(systemName: "arrow.uturn.backward") }
-                    .comingSoon()
-                Button { } label: { Image(systemName: "arrow.uturn.forward") }
-                    .comingSoon()
+                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                    .disabled(!model.canUndo).help("Undo")
+                Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                    .disabled(!model.canRedo).help("Redo")
             }
 
             Button("Presets") { }.comingSoon()

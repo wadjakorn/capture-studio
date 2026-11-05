@@ -92,6 +92,8 @@ struct StudioView: View {
             }
             // Block window close while exporting (minimize stays allowed).
             StudioWindowCloseGuard(isExporting: { model.isExporting })
+            // ⌘Z / ⇧⌘Z → edit history (text fields keep their own undo).
+            UndoKeyCatcher(model: model)
         }
     }
 
