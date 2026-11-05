@@ -123,4 +123,40 @@ enum TimelineSegments {
     static func hiddenRange(containing t: Double, in segments: [TimelineSegment]) -> Range<Double>? {
         cutRanges(segments).first { $0.lowerBound <= t && t < $0.upperBound }
     }
+
+    /// Hide `[range.lowerBound, range.upperBound)`: split at each bound that lies
+    /// strictly inside a segment (a bound within `minWidth` of an existing
+    /// boundary snaps to that boundary instead of splitting), then mark every
+    /// segment fully inside the (snapped) range hidden. Returns the input
+    /// unchanged when the range is empty after snapping or when no visible
+    /// segment would remain.
+    static func cut(_ segments: [TimelineSegment], range: Range<Double>,
+                    minWidth: Double = splitMinWidth) -> [TimelineSegment] {
+        /// Snap `b` to a nearby boundary, else split there (when allowed).
+        func apply(_ b: Double, _ segs: [TimelineSegment]) -> (Double, [TimelineSegment]) {
+            let bounds = segs.flatMap { [$0.start, $0.end] }
+            if let x = bounds.first(where: { abs($0 - b) < minWidth }) { return (x, segs) }
+            return (b, split(segs, at: b, minWidth: minWidth).segments)
+        }
+        let (lo, afterLo) = apply(range.lowerBound, segments.sorted { $0.start < $1.start })
+        let (hi, afterHi) = apply(range.upperBound, afterLo)
+        guard hi - lo > 1e-9 else { return segments }
+        let out = afterHi.map { seg -> TimelineSegment in
+            guard seg.start >= lo - 1e-9, seg.end <= hi + 1e-9 else { return seg }
+            return TimelineSegment(id: seg.id, start: seg.start, end: seg.end, hidden: true)
+        }
+        return visibleCount(out) == 0 ? segments : out
+    }
+
+    /// First and last visible instants: `(start, end)` with `start` = end of a
+    /// leading hidden run (else 0), `end` = start of a trailing hidden run
+    /// (else `duration`).
+    static func visibleBounds(_ segments: [TimelineSegment], duration: Double)
+        -> (start: Double, end: Double) {
+        let sorted = segments.sorted { $0.start < $1.start }
+        guard let first = sorted.firstIndex(where: { !$0.hidden }),
+              let last = sorted.lastIndex(where: { !$0.hidden }) else { return (0, duration) }
+        return (first == 0 ? 0 : sorted[first].start,
+                last == sorted.count - 1 ? duration : sorted[last].end)
+    }
 }

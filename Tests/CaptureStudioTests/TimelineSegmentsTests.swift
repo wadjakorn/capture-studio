@@ -120,4 +120,46 @@ import Foundation
         #expect(TimelineSegments.hiddenRange(containing: 2, in: s) == nil)
         #expect(TimelineSegments.hiddenRange(containing: 8, in: s) == nil)  // upperBound is exclusive
     }
+
+    // MARK: cut(range:) / visibleBounds
+
+    @Test func cutHeadProducesHiddenLeadingSegment() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<3)
+        #expect(s.count == 2); #expect(s[0].hidden && s[0].end == 3); #expect(!s[1].hidden)
+    }
+    @Test func cutTailProducesHiddenTrailingSegment() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 7..<10)
+        #expect(s.count == 2); #expect(!s[0].hidden); #expect(s[1].hidden && s[1].start == 7)
+    }
+    @Test func cutMiddleSplitsTwice() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 2..<5)
+        #expect(s.map(\.hidden) == [false, true, false]); #expect(s[1].start == 2 && s[1].end == 5)
+    }
+    @Test func cutSnapsToNearbyBoundary() {
+        var s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        s = TimelineSegments.cut(s, range: 0..<4.02)             // within splitMinWidth of 4
+        #expect(s.count == 2); #expect(s[0].hidden && s[0].end == 4)
+    }
+    @Test func cutRefusesToHideEverything() {
+        let full = TimelineSegments.full(duration: 10)
+        #expect(TimelineSegments.cut(full, range: 0..<10) == full)
+    }
+    @Test func cutEmptyRangeIsNoOp() {
+        let full = TimelineSegments.full(duration: 10)
+        #expect(TimelineSegments.cut(full, range: 3..<3.01) == full)
+    }
+    @Test func cutPreservesExistingHiddenInsideRange() {
+        var s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 2).segments
+        s = TimelineSegments.setHidden(s, id: s[0].id, true)     // [0,2) hidden
+        s = TimelineSegments.cut(s, range: 0..<5)
+        #expect(TimelineSegments.cutRanges(s) == [0..<5])
+    }
+    @Test func visibleBoundsSkipLeadingAndTrailingCuts() {
+        var s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<2)
+        s = TimelineSegments.cut(s, range: 8..<10)
+        let b = TimelineSegments.visibleBounds(s, duration: 10)
+        #expect(b.start == 2 && b.end == 8)
+        let e = TimelineSegments.visibleBounds([], duration: 10)
+        #expect(e.start == 0 && e.end == 10)
+    }
 }
