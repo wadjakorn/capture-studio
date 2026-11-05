@@ -3,7 +3,7 @@ import Foundation
 /// One piece of the master timeline produced by splitting. Segments partition the
 /// whole timeline `[0, duration]` contiguously (`segment[i].end == segment[i+1].start`,
 /// first `start == 0`, last `end == duration`). `hidden` marks a segment cut from
-/// the output — non-destructively, exactly like the live `trimIn`/`trimOut` markers:
+/// the output — non-destructively:
 /// nothing is removed from the masters or the blocks, the cut is just stored and
 /// applied at play/export time and can be restored (`hidden = false`) or reset.
 struct TimelineSegment: Codable, Equatable, Identifiable {

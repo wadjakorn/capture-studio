@@ -338,12 +338,12 @@ struct StudioView: View {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(.quaternary)
                     .frame(height: 6)
-                // Kept (trimmed) region.
+                // Full timeline (cuts are greyed over it below).
                 if model.duration > 0 {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(.tint)
-                        .frame(width: max(0, fraction(model.trimOut - model.trimIn) * width), height: 6)
-                        .offset(x: fraction(model.trimIn) * width)
+                        .frame(width: width, height: 6)
+                        .offset(x: 0)
                     // Cut (hidden) segments: greyed over the kept region; split
                     // boundaries: hairline ticks. Non-destructive — Reset restores.
                     ForEach(model.segments) { seg in

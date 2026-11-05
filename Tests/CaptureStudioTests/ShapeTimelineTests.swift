@@ -198,19 +198,4 @@ import Foundation
         let decoded = try JSONDecoder().decode(EditState.self, from: data)
         #expect(decoded.shapeBlocks == edit.shapeBlocks)
     }
-
-    // MARK: trim rebase
-
-    @Test func trimRebasesShapeBlocksAndDropsOutside() {
-        var edit = EditState()
-        edit.shapeBlocks = [
-            ShapeBlock(begin: 0, end: 1, kind: .rectangle),   // before window → dropped
-            ShapeBlock(begin: 3, end: 6, kind: .blur),        // inside → shifted to [1, 4]
-        ]
-        let out = TrimTimeline.apply(edit, in: 2, out: 8, duration: 10)
-        #expect(out.shapeBlocks.count == 1)
-        #expect(out.shapeBlocks[0].kind == .blur)
-        #expect(out.shapeBlocks[0].begin == 1)
-        #expect(out.shapeBlocks[0].end == 4)
-    }
 }

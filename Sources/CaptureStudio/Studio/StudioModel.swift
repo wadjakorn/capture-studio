@@ -30,40 +30,6 @@ final class StudioModel: ObservableObject {
     /// Transient: while true, dragging the preview pans the reframed video
     /// (see CropPanOverlay). Not persisted; reset when the reframe isn't pannable.
     @Published var panVideoMode = false
-    @Published private(set) var trimIn: Double = 0
-    @Published private(set) var trimOut: Double = 0
-    /// Committed trim window in absolute master seconds (the masters are cut to
-    /// `[committedTrimStart, committedTrimEnd)` to form this timeline). `nil` end
-    /// = master end. Persisted; drives composition re-derivation on load and is
-    /// narrowed by `applyTrim()`. See `TrimTimeline`.
-    private(set) var committedTrimStart: Double = 0
-    private(set) var committedTrimEnd: Double? = nil
-    /// One-level undo snapshot of the whole edit state captured right before the
-    /// last `applyTrim()`. `resetTrim()` restores it, bringing the full (un-cut)
-    /// timeline and every block/cursor edit back. Session-only (in-memory);
-    /// cleared once consumed. `nil` when no applied trim is pending undo.
-    private var trimUndo: TrimUndoState? = nil
-    /// Everything `applyTrim()` mutates, so `resetTrim()` can put it all back.
-    /// `composition` is a `mutableCopy()` of the pre-trim composition (edit lists
-    /// only — no re-encode), so swapping it back restores the full-length video.
-    private struct TrimUndoState {
-        var composition: AVMutableComposition
-        var committedTrimStart: Double
-        var committedTrimEnd: Double?
-        var duration: Double
-        var cameraBlocks: [CameraBlock]
-        var layoutBlocks: [LayoutBlock]
-        var zoomBlocks: [ZoomBlock]
-        var textBlocks: [TextBlock]
-        var shapeBlocks: [ShapeBlock]
-        var subtitles: SubtitleTrack?
-        var cursorSamples: [CursorSample]
-        var clickSamples: [ClickSample]
-        var segments: [TimelineSegment]
-    }
-    /// True once any in/out markers carve a sub-range of the current timeline —
-    /// gates the "Apply Trim" affordance.
-    var canApplyTrim: Bool { trimIn > 0.001 || trimOut < duration - 0.001 }
     @Published private(set) var exportState: ExportState = .idle
     /// True while an export runs. The editor hard-locks: every mutating control
     /// is disabled and the window refuses to close until the export finishes or
@@ -536,35 +502,11 @@ final class StudioModel: ObservableObject {
             }
             let meta = try bundle.loadMeta()
             let built = try await Self.makeComposition(bundle: bundle, meta: meta)
-            let edit = bundle.loadEdit()
-            // Re-derive the trimmed timeline: cut the masters down to the
-            // committed window before anything observes the composition. Blocks
-            // and cursor samples are then expressed relative to this window's
-            // t = 0 (committedTrimStart). No re-encode — removeTimeRange edits
-            // the composition's edit lists.
-            let fullDuration = built.composition.duration.seconds
-            committedTrimStart = max(0, min(edit.committedTrimStart, fullDuration))
-            let committedEnd = min(edit.committedTrimEnd ?? fullDuration, fullDuration)
-            // Clamp to the master length so the in-memory window can't exceed the
-            // composition we actually cut; keep nil ("to master end") as nil.
-            committedTrimEnd = edit.committedTrimEnd.map { min($0, fullDuration) }
-            // Remove the tail first, then the head: the tail range sits at higher
-            // timestamps, so cutting it leaves the head range's coordinates (at
-            // t = 0) untouched. Cutting the head first would shift everything left
-            // and invalidate the still-absolute tail coordinates.
-            if committedEnd > committedTrimStart,
-               committedTrimStart > 0.001 || committedEnd < fullDuration - 0.001 {
-                if committedEnd < fullDuration - 0.001 {
-                    built.composition.removeTimeRange(CMTimeRange(
-                        start: CMTime(seconds: committedEnd, preferredTimescale: 600),
-                        end: CMTime(seconds: fullDuration, preferredTimescale: 600)))
-                }
-                if committedTrimStart > 0.001 {
-                    built.composition.removeTimeRange(CMTimeRange(
-                        start: .zero,
-                        end: CMTime(seconds: committedTrimStart, preferredTimescale: 600)))
-                }
-            }
+            // Legacy committed trim / In-Out markers become hidden segments on the
+            // full master timeline (blocks rebased by the migration), so the
+            // composition is always the uncut masters.
+            let edit = LegacyTrimMigration.migrate(
+                bundle.loadEdit(), masterDuration: built.composition.duration.seconds)
             let item = AVPlayerItem(asset: built.composition)
             let player = AVPlayer(playerItem: item)
 
@@ -582,9 +524,6 @@ final class StudioModel: ObservableObject {
             self.player = player
             self.duration = built.composition.duration.seconds
 
-            trimIn = min(max(0, edit.trimIn), duration)
-            trimOut = min(edit.trimOut ?? duration, duration)
-            if trimOut <= trimIn { trimIn = 0; trimOut = duration }
             cameraHomeLayout = edit.cameraHomeLayout
             cameraCenterX = edit.cameraCenterX
             cameraCenterY = edit.cameraCenterY
@@ -645,6 +584,8 @@ final class StudioModel: ObservableObject {
             // Build the preview item: full composition, or a collapsed copy when the
             // loaded edit already has cuts (applies the video composition + audio).
             rebuildPreview()
+            // A bundle with a leading cut opens on its first visible frame.
+            seek(to: visibleBounds.start)
 
             let token = player.addPeriodicTimeObserver(
                 forInterval: CMTime(value: 1, timescale: 30),
@@ -654,8 +595,11 @@ final class StudioModel: ObservableObject {
                     guard let self else { return }
                     // The player runs on collapsed time when cuts are active; map it
                     // back to the timeline so the playhead hops over the cut regions.
-                    self.currentTime = self.previewCuts.isEmpty ? time.seconds
+                    let unmapped = self.previewCuts.isEmpty ? time.seconds
                         : TimelineCut.unmap(time.seconds, cuts: self.previewCuts)
+                    // `unmap` resolves the collapsed end onto `duration`, i.e. inside
+                    // a trailing cut — clamp to the last visible instant.
+                    self.currentTime = min(unmapped, self.visibleBounds.end)
                 }
             }
             observerCleanup = { player.removeTimeObserver(token) }
@@ -793,20 +737,11 @@ final class StudioModel: ObservableObject {
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
-        // events.jsonl is in absolute master time; rebase onto the committed
-        // trim window (t = 0 at committedTrimStart) and drop samples outside it.
-        let head = committedTrimStart, dur = duration
-        cursorSamples = s.cursor.compactMap { sample in
-            let t = sample.t - head
-            guard t >= -0.001, t <= dur + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-        clickSamples = s.clicks.compactMap { sample in
-            let t = sample.t - head
-            // Keep clicks whose expanding ring still overlaps the window.
-            guard t >= -CursorOverlay.ringDuration, t <= dur + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
+        // events.jsonl is in absolute master time, which is the timeline (the
+        // composition is always the uncut masters); drop samples past the end.
+        let dur = duration
+        cursorSamples = s.cursor.filter { $0.t <= dur + 0.001 }
+        clickSamples = s.clicks.filter { $0.t <= dur + 0.001 }
 
         var glyphs: [String: CursorGlyph] = [:]
         for name in Set(cursorSamples.map(\.cursor)) {
@@ -1416,8 +1351,8 @@ final class StudioModel: ObservableObject {
         setSegments(TimelineSegments.setHidden(effectiveSegments, id: id, false))
     }
 
-    /// Clear all splits and cuts back to a single uncut timeline (mirrors
-    /// `resetTrim`). No-op when already uncut.
+    /// Clear all splits and cuts back to a single uncut timeline. No-op when
+    /// already uncut.
     func resetSegments() {
         guard !isExporting, !segments.isEmpty else { return }
         segments = []
@@ -2684,12 +2619,19 @@ final class StudioModel: ObservableObject {
         if player.timeControlStatus == .playing {
             player.pause()
         } else {
-            if currentTime >= duration - 0.05 { seek(to: trimIn) }
+            let (start, end) = visibleBounds
+            if currentTime >= end - 0.05 { seek(to: start) }
             player.play()
         }
     }
 
     var isPlaying: Bool { player?.timeControlStatus == .playing }
+
+    /// First and last visible instants of the timeline (hidden segments at the
+    /// head/tail excluded). Playback restarts from `start` and parks at `end`.
+    var visibleBounds: (start: Double, end: Double) {
+        TimelineSegments.visibleBounds(segments, duration: duration)
+    }
 
     func seek(to seconds: Double) {
         let clamped = min(max(0, seconds), duration)
@@ -2702,153 +2644,6 @@ final class StudioModel: ObservableObject {
         currentTime = clamped
     }
 
-    // MARK: - Trim (persisted to edit.json; masters untouched)
-
-    func setTrimIn(_ value: Double) {
-        guard !isExporting else { return }
-        trimIn = min(max(0, value), trimOut - 0.1)
-        saveEdit()
-    }
-
-    func setTrimOut(_ value: Double) {
-        guard !isExporting else { return }
-        trimOut = max(min(duration, value), trimIn + 0.1)
-        saveEdit()
-    }
-
-    func resetTrim() {
-        guard !isExporting else { return }
-        // If a trim was applied (destructive cut), undo it: restore the full-length
-        // composition and every block/cursor edit from the pre-apply snapshot.
-        if let undo = trimUndo {
-            restoreTrimUndo(undo)
-            return
-        }
-        // Otherwise there is only a live In/Out selection — reset the markers.
-        trimIn = 0
-        trimOut = duration
-        saveEdit()
-    }
-
-    /// Put back everything the last `applyTrim()` changed: swap the pre-trim
-    /// composition (edit lists) back in, restore committed window, blocks, cursor
-    /// / click samples, splits, and duration, then rebuild the preview so the
-    /// player shows the full-length timeline again. Consumes the snapshot.
-    private func restoreTrimUndo(_ s: TrimUndoState) {
-        composition = s.composition
-        committedTrimStart = s.committedTrimStart
-        committedTrimEnd = s.committedTrimEnd
-        cameraBlocks = s.cameraBlocks
-        layoutBlocks = s.layoutBlocks
-        zoomBlocks = s.zoomBlocks
-        textBlocks = s.textBlocks
-        shapeBlocks = s.shapeBlocks
-        subtitles = s.subtitles
-        cursorSamples = s.cursorSamples
-        clickSamples = s.clickSamples
-        segments = s.segments
-        duration = s.duration
-        // Clear the live In/Out selection: the pre-apply markers described the cut
-        // we just undid, so keeping them would leave `canApplyTrim` true and let a
-        // later export/apply re-trim the now-restored full timeline.
-        trimIn = 0
-        trimOut = duration
-        trimUndo = nil
-        // Rebuild the player item from the restored composition (re-collapses any
-        // restored cuts, rebuilds overlays + audio), then park at the start.
-        rebuildPreview()
-        seek(to: 0)
-        saveEdit()
-        Log.studio.info("resetTrim: restored pre-apply timeline, duration=\(self.duration, format: .fixed(precision: 2))s")
-    }
-
-    /// Commit the current in/out markers: cut the head `[0, trimIn)` and tail
-    /// `[trimOut, duration)` off the timeline, shrink the project duration, and
-    /// rebase every lane + cursor overlay so the clip starts at the in-point.
-    /// Destructive — blocks outside the window are dropped, straddlers clamped.
-    /// The masters are untouched; the committed window is persisted so the cut
-    /// survives reload. Reversible in-session: `resetTrim()` restores the
-    /// pre-apply snapshot captured below (full length + every block/cursor edit).
-    func applyTrim() {
-        guard let composition, duration > 0, canApplyTrim else { return }
-        let inP = min(max(0, trimIn), duration)
-        let outP = min(max(inP + 0.1, trimOut), duration)
-        let oldDuration = duration
-        let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
-
-        // Snapshot the full pre-trim state (composition edit lists + all edits) so
-        // Reset can undo this destructive cut. `mutableCopy()` is cheap — it copies
-        // edit lists only, no media. Capture BEFORE the removeTimeRange calls below.
-        let undo = TrimUndoState(
-            composition: composition.mutableCopy() as! AVMutableComposition,
-            committedTrimStart: committedTrimStart,
-            committedTrimEnd: committedTrimEnd,
-            duration: duration,
-            cameraBlocks: cameraBlocks,
-            layoutBlocks: layoutBlocks,
-            zoomBlocks: zoomBlocks,
-            textBlocks: textBlocks,
-            shapeBlocks: shapeBlocks,
-            subtitles: subtitles,
-            cursorSamples: cursorSamples,
-            clickSamples: clickSamples,
-            segments: segments)
-
-        // Cut the composition (tail first so the head cut's coordinates hold).
-        if outP < oldDuration - 0.001 {
-            composition.removeTimeRange(CMTimeRange(start: ts(outP), end: ts(oldDuration)))
-        }
-        if inP > 0.001 {
-            composition.removeTimeRange(CMTimeRange(start: .zero, end: ts(inP)))
-        }
-
-        // Rebase the edit model through the pure transform, then read it back.
-        let trimmed = TrimTimeline.apply(currentEdit(), in: inP, out: outP, duration: oldDuration)
-        committedTrimStart = trimmed.committedTrimStart
-        committedTrimEnd = trimmed.committedTrimEnd
-        cameraBlocks = trimmed.cameraBlocks
-        layoutBlocks = trimmed.layoutBlocks
-        zoomBlocks = trimmed.zoomBlocks
-        textBlocks = trimmed.textBlocks
-        shapeBlocks = trimmed.shapeBlocks
-        subtitles = trimmed.subtitles
-
-        // Rebase cursor / click overlays onto the new t = 0.
-        let newDuration = composition.duration.seconds
-        cursorSamples = cursorSamples.compactMap { sample in
-            let t = sample.t - inP
-            guard t >= -0.001, t <= newDuration + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-        clickSamples = clickSamples.compactMap { sample in
-            let t = sample.t - inP
-            guard t >= -CursorOverlay.ringDuration, t <= newDuration + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-
-        duration = newDuration
-        trimIn = 0
-        trimOut = newDuration
-        // A committed trim rewrites the timeline; the old split partition no longer
-        // maps onto it, so clear splits/cuts (mirrors resetting the markers).
-        segments = []
-        // Drop selections that pointed at now-removed blocks.
-        if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
-        if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
-        if let id = selectedShapeBlockID, !shapeBlocks.contains(where: { $0.id == id }) { selectedShapeBlockID = nil }
-        if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
-        if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
-
-        // Swap in a fresh player item for the mutated composition (segments were
-        // cleared above, so this rebuilds the uncut preview + overlays + audio and
-        // resets `previewCuts`), then park at the new start.
-        rebuildPreview()
-        seek(to: 0)
-        trimUndo = undo
-        saveEdit()
-        Log.studio.info("applyTrim: window [\(self.committedTrimStart, format: .fixed(precision: 2)), \(self.committedTrimEnd ?? -1, format: .fixed(precision: 2))] newDuration=\(newDuration, format: .fixed(precision: 2))s")
-    }
-
     private func saveEdit() {
         try? bundle.writeEdit(currentEdit())
     }
@@ -2856,10 +2651,6 @@ final class StudioModel: ObservableObject {
     /// Snapshot the live model into an `EditState` for persistence / transforms.
     private func currentEdit() -> EditState {
         EditState(
-            trimIn: trimIn,
-            trimOut: trimOut >= duration - 0.001 ? nil : trimOut,
-            committedTrimStart: committedTrimStart,
-            committedTrimEnd: committedTrimEnd,
             cameraVisible: cameraVisible,
             cameraHomeLayout: cameraHomeLayout,
             cameraCenterX: cameraCenterX,
@@ -2933,18 +2724,16 @@ final class StudioModel: ObservableObject {
         if cuts.isEmpty {
             exportComposition = composition
             (videoComposition, avPresetOverride) = buildVC()
-            range = CMTimeRange(start: ts(trimIn), end: ts(trimOut))
+            range = CMTimeRange(start: .zero, end: ts(duration))
         } else {
-            let origDuration = duration
             let cutComp = cutComposition(composition, cuts: cuts)
             (videoComposition, avPresetOverride) = withCollapsedTimeline(cuts: cuts,
                                                                          cutComposition: cutComp) {
                 buildVC()
             }
             exportComposition = cutComp
-            let start = TimelineCut.map(min(max(0, trimIn), origDuration), cuts: cuts)
-            let end = TimelineCut.map(min(max(0, trimOut), origDuration), cuts: cuts)
-            range = CMTimeRange(start: ts(start), end: ts(max(start + 0.05, end)))
+            range = CMTimeRange(start: .zero,
+                                end: ts(TimelineCut.remainingDuration(duration, cuts: cuts)))
         }
 
         player?.pause()

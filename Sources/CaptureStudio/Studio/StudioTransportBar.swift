@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Bottom transport chrome: play/pause + timecode, trim controls, plus a
+/// Bottom transport chrome: play/pause + timecode, split & cut controls, plus a
 /// speed placeholder and a "timelines visible" label. Mirrors the bottom
-/// bar's `transportControls` + `trimControls`. Not yet wired into
+/// bar's `transportControls`. Not yet wired into
 /// `StudioView` — Task 5 swaps the layout to use this.
 struct StudioTransportBar: View {
     @ObservedObject var model: StudioModel
@@ -10,8 +10,6 @@ struct StudioTransportBar: View {
     var body: some View {
         HStack(spacing: 12) {
             transportControls
-            Divider().frame(height: 16)
-            trimControls
             Divider().frame(height: 16)
             splitControls
             Divider().frame(height: 16)
@@ -35,19 +33,6 @@ struct StudioTransportBar: View {
 
         Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
             .font(.body.monospacedDigit())
-            .foregroundStyle(.secondary)
-    }
-
-    @ViewBuilder private var trimControls: some View {
-        Button("Set In") { model.setTrimIn(model.currentTime) }
-        Button("Set Out") { model.setTrimOut(model.currentTime) }
-        Button { model.resetTrim() } label: { Image(systemName: "arrow.uturn.backward") }
-            .help("Reset trim")
-        Button { model.applyTrim() } label: { Image(systemName: "scissors") }
-            .disabled(!model.canApplyTrim)
-            .help("Apply trim — cut everything outside In/Out off the timeline")
-        Text("\(timecode(model.trimIn)) – \(timecode(model.trimOut))")
-            .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
     }
 
