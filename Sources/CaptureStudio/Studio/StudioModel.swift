@@ -1296,6 +1296,19 @@ final class StudioModel: ObservableObject {
         segments.isEmpty ? TimelineSegments.full(duration: duration) : segments
     }
 
+    /// The cut-type transport button currently hovered (nil when none). Cleared by
+    /// each button's action and when an export starts.
+    @Published var hoverAction: CutAction?
+
+    /// What the hovered action would do, drawn on the timeline. Derived (never
+    /// stored) so it tracks the playhead during playback and goes nil by itself
+    /// when the action would change nothing.
+    var hoverPreview: CutPreview? {
+        hoverAction.flatMap {
+            TimelineSegments.preview(for: $0, segments: segments, at: currentTime, duration: duration)
+        }
+    }
+
     /// Any cut in effect (a hidden segment). Drives whether playback/export differ
     /// from the raw timeline.
     var hasCutSegments: Bool { segments.contains { $0.hidden } }
@@ -2783,6 +2796,7 @@ final class StudioModel: ObservableObject {
         }
 
         player?.pause()
+        hoverAction = nil
         exportState = .exporting(0)
         let audioMix = buildAudioMix()
         exportTask = Task {

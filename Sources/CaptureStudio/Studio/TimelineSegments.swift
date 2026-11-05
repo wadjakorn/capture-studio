@@ -160,3 +160,64 @@ enum TimelineSegments {
                 last == sorted.count - 1 ? duration : sorted[last].end)
     }
 }
+
+/// A cut-type transport action whose effect can be previewed on the timeline
+/// while its button is hovered.
+enum CutAction: Equatable { case cutSegment, restoreSegment, trimStart, trimEnd, clearAll }
+
+/// What a hovered `CutAction` would do: the ranges it would hide (`.cut`) or
+/// reveal (`.restore`), plus any split it would have to create first.
+struct CutPreview: Equatable {
+    enum Kind { case cut, restore }
+    var ranges: [Range<Double>]
+    var kind: Kind
+    /// A split that the action would create (not yet a boundary) — drawn as a marker.
+    var pendingSplitAt: Double?
+}
+
+extension TimelineSegments {
+    /// Preview of `action` applied at playhead `t`. nil when the action would
+    /// change nothing (mirrors the button's disabled state). An empty `segments`
+    /// list is the implicit single full segment.
+    static func preview(for action: CutAction, segments: [TimelineSegment],
+                        at t: Double, duration: Double) -> CutPreview? {
+        // Materialise once: `full(duration:)` mints a fresh id per call, so every
+        // "did it change?" comparison below must be against this same instance.
+        let s = (segments.isEmpty ? full(duration: duration) : segments)
+            .sorted { $0.start < $1.start }
+        let dur = max(0, duration)
+        let t = min(max(t, 0), dur)
+        let bounds = s.flatMap { [$0.start, $0.end] }
+        /// Mirrors `cut`'s snapping: a bound within `splitMinWidth` of an existing
+        /// boundary lands on it instead of splitting.
+        func snapped(_ b: Double) -> (value: Double, isBoundary: Bool) {
+            if let x = bounds.first(where: { abs($0 - b) < splitMinWidth }) { return (x, true) }
+            return (b, false)
+        }
+        let under = s.first { $0.start <= t && t < $0.end }
+
+        switch action {
+        case .cutSegment:
+            guard let seg = under, !seg.hidden,
+                  setHidden(s, id: seg.id, true) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .cut)
+        case .restoreSegment:
+            guard let seg = under, seg.hidden,
+                  setHidden(s, id: seg.id, false) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .restore)
+        case .trimStart:
+            guard cut(s, range: 0 ..< t) != s else { return nil }
+            let hi = snapped(t)
+            return CutPreview(ranges: [snapped(0).value ..< hi.value], kind: .cut,
+                              pendingSplitAt: hi.isBoundary ? nil : t)
+        case .trimEnd:
+            guard cut(s, range: t ..< dur) != s else { return nil }
+            let lo = snapped(t)
+            return CutPreview(ranges: [lo.value ..< snapped(dur).value], kind: .cut,
+                              pendingSplitAt: lo.isBoundary ? nil : t)
+        case .clearAll:
+            let ranges = cutRanges(s)
+            return ranges.isEmpty ? nil : CutPreview(ranges: ranges, kind: .restore)
+        }
+    }
+}

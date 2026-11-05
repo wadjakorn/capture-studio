@@ -162,4 +162,43 @@ import Foundation
         let e = TimelineSegments.visibleBounds([], duration: 10)
         #expect(e.start == 0 && e.end == 10)
     }
+
+    @Test func previewTrimStartIsHeadRangeWithPendingSplit() {
+        let p = TimelineSegments.preview(for: .trimStart, segments: TimelineSegments.full(duration: 10),
+                                         at: 3, duration: 10)
+        #expect(p == CutPreview(ranges: [0..<3], kind: .cut, pendingSplitAt: 3))
+    }
+    @Test func previewTrimStartOnExistingBoundaryHasNoPendingSplit() {
+        let s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 3).segments
+        let p = TimelineSegments.preview(for: .trimStart, segments: s, at: 3, duration: 10)
+        #expect(p == CutPreview(ranges: [0..<3], kind: .cut, pendingSplitAt: nil))
+    }
+    @Test func previewCutSegmentIsSegmentUnderPlayhead() {
+        let s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        let p = TimelineSegments.preview(for: .cutSegment, segments: s, at: 5, duration: 10)
+        #expect(p == CutPreview(ranges: [4..<10], kind: .cut, pendingSplitAt: nil))
+    }
+    @Test func previewRestoreOnlyForHiddenSegment() {
+        var s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        #expect(TimelineSegments.preview(for: .restoreSegment, segments: s, at: 5, duration: 10) == nil)
+        s = TimelineSegments.setHidden(s, id: s[1].id, true)
+        let p = TimelineSegments.preview(for: .restoreSegment, segments: s, at: 5, duration: 10)
+        #expect(p == CutPreview(ranges: [4..<10], kind: .restore, pendingSplitAt: nil))
+    }
+    @Test func previewClearAllListsEveryHiddenRun() {
+        var s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<2)
+        s = TimelineSegments.cut(s, range: 6..<8)
+        let p = TimelineSegments.preview(for: .clearAll, segments: s, at: 5, duration: 10)
+        #expect(p == CutPreview(ranges: [0..<2, 6..<8], kind: .restore, pendingSplitAt: nil))
+        let none = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        #expect(TimelineSegments.preview(for: .clearAll, segments: none, at: 5, duration: 10) == nil)
+    }
+    @Test func previewIsNilWhenActionWouldNotChangeAnything() {
+        let full = TimelineSegments.full(duration: 10)
+        #expect(TimelineSegments.preview(for: .trimStart, segments: full, at: 0, duration: 10) == nil)
+        #expect(TimelineSegments.preview(for: .trimEnd, segments: full, at: 10, duration: 10) == nil)
+        // Empty (uncut) list materialises once — fresh-UUID trap must not yield a false preview.
+        #expect(TimelineSegments.preview(for: .trimStart, segments: [], at: 0, duration: 10) == nil)
+        #expect(TimelineSegments.preview(for: .cutSegment, segments: [], at: 5, duration: 10) == nil)
+    }
 }

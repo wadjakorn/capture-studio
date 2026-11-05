@@ -11,7 +11,7 @@ struct StudioTransportBar: View {
         HStack(spacing: 12) {
             transportControls
             Divider().frame(height: 16)
-            splitControls
+            cutControls
             Divider().frame(height: 16)
             zoomControls
             Spacer()
@@ -36,24 +36,48 @@ struct StudioTransportBar: View {
             .foregroundStyle(.secondary)
     }
 
-    /// Split the master timeline at the playhead, then cut (hide) / restore the
-    /// segment under the playhead — non-destructive, cleared by Reset.
-    @ViewBuilder private var splitControls: some View {
+    /// Split / cut controls for the master timeline, all non-destructive. Hovering
+    /// a cut-type button previews its effect on the timeline (`hoverAction`).
+    @ViewBuilder private var cutControls: some View {
         Button { model.splitAtPlayhead() } label: {
             Image(systemName: "square.split.2x1")
         }
         .disabled(!model.canSplitAtPlayhead)
         .help("Split the timeline at the playhead")
 
-        Button { model.toggleCutAtPlayhead() } label: {
+        Button {
+            model.hoverAction = nil
+            model.toggleCutAtPlayhead()
+        } label: {
             Image(systemName: cutIsRestore ? "eye" : "eye.slash")
         }
         .disabled(!model.canToggleCutAtPlayhead)
         .help(cutIsRestore ? "Restore this segment" : "Cut this segment from the video")
+        .onHover { model.hoverAction = $0 ? (cutIsRestore ? .restoreSegment : .cutSegment) : nil }
 
-        Button { model.resetSegments() } label: { Image(systemName: "arrow.uturn.backward") }
+        Button {
+            model.hoverAction = nil
+            model.trimStartAtPlayhead()
+        } label: { Text("Trim Start") }
+            .disabled(!model.canTrimStartAtPlayhead)
+            .help("Cut everything before the playhead")
+            .onHover { model.hoverAction = $0 ? .trimStart : nil }
+
+        Button {
+            model.hoverAction = nil
+            model.trimEndAtPlayhead()
+        } label: { Text("Trim End") }
+            .disabled(!model.canTrimEndAtPlayhead)
+            .help("Cut everything after the playhead")
+            .onHover { model.hoverAction = $0 ? .trimEnd : nil }
+
+        Button {
+            model.hoverAction = nil
+            model.resetSegments()
+        } label: { Image(systemName: "xmark.circle") }
             .disabled(!model.canResetSegments)
-            .help("Clear all splits and cuts")
+            .help("Clear all splits & cuts")
+            .onHover { model.hoverAction = $0 ? .clearAll : nil }
 
         if model.hasCutSegments {
             Text("\(model.segments.filter(\.hidden).count) cut")
