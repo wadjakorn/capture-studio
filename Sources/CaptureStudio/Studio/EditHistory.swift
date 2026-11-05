@@ -32,6 +32,10 @@ struct EditHistory<State: Equatable> {
     /// `coalescingKey` collapse into one step: `current` is overwritten without
     /// pushing a new undo entry.
     mutating func record(_ state: State, coalescingKey: String?) {
+        // An unkeyed record always ends a coalescing run — even a no-op one
+        // (e.g. a selection change saving an unchanged state), so the next keyed
+        // edit starts a fresh step. A keyed no-op keeps the run alive.
+        if coalescingKey == nil { lastKey = nil }
         guard state != current else { return }
         defer { lastKey = coalescingKey }
         if let key = coalescingKey, key == lastKey {

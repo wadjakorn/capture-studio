@@ -96,4 +96,12 @@ import Testing
         h.record(5, coalescingKey: "c")
         #expect(h.undo() == 0)
     }
+
+    @Test func equalUnkeyedRecordBreaksCoalescing() {
+        var h = EditHistory(initial: 0)
+        h.record(1, coalescingKey: "c")
+        h.record(1)                       // equal state, unkeyed: still ends the run
+        h.record(2, coalescingKey: "c")
+        #expect(h.undo() == 1)
+    }
 }

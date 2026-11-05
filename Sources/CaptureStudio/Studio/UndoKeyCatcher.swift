@@ -8,7 +8,9 @@ import AppKit
 /// while exporting, while a text field / text view is first responder (the
 /// caption editor's own undo must win), and for every other key.
 struct UndoKeyCatcher: NSViewRepresentable {
-    @ObservedObject var model: StudioModel
+    /// Plain reference (not observed): the view never re-renders on model
+    /// changes, so `updateNSView` isn't re-run on every playback tick.
+    let model: StudioModel
 
     func makeNSView(context: Context) -> UndoKeyCatcherView {
         let view = UndoKeyCatcherView()

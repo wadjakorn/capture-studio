@@ -88,4 +88,31 @@ struct StudioModelCutTests {
         m.beginExportLockForTests()
         #expect(!m.canUndo)
     }
+
+    @Test func trimInsideHiddenRunIsDisabled() {
+        let m = model(); m.seek(to: 3); m.trimStartAtPlayhead()
+        m.seek(to: 1)
+        #expect(!m.canTrimStartAtPlayhead)
+        m.trimStartAtPlayhead()
+        #expect(TimelineSegments.cutRanges(m.segments) == [0..<3])
+    }
+
+    @Test func colourEditsOnDifferentBlocksAreSeparateSteps() {
+        let m = model()
+        m.seek(to: 1); m.addTextBlock()
+        m.seek(to: 6); m.addTextBlock()
+        #expect(m.textBlocks.count == 2)
+        let a = m.textBlocks[0].id, b = m.textBlocks[1].id
+        let aHex = m.textBlocks[0].colorHex, bHex = m.textBlocks[1].colorHex
+        func hex(_ id: UUID) -> String? { m.textBlocks.first { $0.id == id }?.colorHex }
+
+        m.selectTextBlock(a); m.setTextColorHex("#FF0000")
+        m.selectTextBlock(b); m.setTextColorHex("#00FF00")
+
+        m.undo()
+        #expect(hex(b) == bHex)
+        #expect(hex(a) == "#FF0000")
+        m.undo()
+        #expect(hex(a) == aHex)
+    }
 }

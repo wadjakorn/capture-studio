@@ -34,11 +34,15 @@ struct CutPreviewOverlay: View {
                         .offset(x: x0)
                 }
                 if let at = preview.pendingSplitAt {
-                    Rectangle()
+                    // Dashed vertical line at the would-be split, full lane height.
+                    GeometryReader { g in
+                        let x = px(at)
+                        Path { p in
+                            p.move(to: CGPoint(x: x, y: 0))
+                            p.addLine(to: CGPoint(x: x, y: g.size.height))
+                        }
                         .stroke(Color.primary, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
-                        .frame(width: 0)
-                        .frame(maxHeight: .infinity)
-                        .offset(x: px(at))
+                    }
                 }
             }
             .frame(width: width, alignment: .leading)

@@ -18,7 +18,8 @@ enum ExportPreset: String, CaseIterable, Identifiable {
 }
 
 enum Exporter {
-    /// Exports the trimmed composition to an MP4. Masters are read-only inputs.
+    /// Exports the composition (optionally collapsed to the kept segments when
+    /// cuts are applied) to an MP4. Masters are read-only inputs.
     /// `avPresetOverride` replaces the preset's session preset — used when
     /// reframing, where output size comes from the video composition's
     /// renderSize and the session preset must not impose its own dimensions.

@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Bottom transport chrome: play/pause + timecode, split & cut controls, plus a
-/// speed placeholder and a "timelines visible" label. Mirrors the bottom
-/// bar's `transportControls`. Not yet wired into
-/// `StudioView` — Task 5 swaps the layout to use this.
+/// speed placeholder and a "timelines visible" label. The split & cut controls
+/// (Split, Cut/Restore segment, Trim Start/End at playhead, Clear cuts) drive
+/// the non-destructive segment model on `StudioModel`.
 struct StudioTransportBar: View {
     @ObservedObject var model: StudioModel
 

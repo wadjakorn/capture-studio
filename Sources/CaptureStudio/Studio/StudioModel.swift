@@ -1392,14 +1392,16 @@ final class StudioModel: ObservableObject {
     var canTrimStartAtPlayhead: Bool {
         guard !isExporting else { return false }
         let s = effectiveSegments
-        return TimelineSegments.cut(s, range: 0..<currentTime) != s
+        let c = TimelineSegments.cut(s, range: 0..<currentTime)
+        return TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s)
     }
 
     /// Whether Trim End (cut `playhead..<duration`) would change anything.
     var canTrimEndAtPlayhead: Bool {
         guard !isExporting else { return false }
         let s = effectiveSegments
-        return TimelineSegments.cut(s, range: currentTime..<duration) != s
+        let c = TimelineSegments.cut(s, range: currentTime..<duration)
+        return TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s)
     }
 
     /// Hide everything before the playhead (split-and-cut).
@@ -1407,7 +1409,9 @@ final class StudioModel: ObservableObject {
         guard !isExporting, currentTime > 0 else { return }
         let s = effectiveSegments
         let c = TimelineSegments.cut(s, range: 0..<currentTime)
-        guard c != s else { return }
+        // Compare hidden material, not segment lists: a trim that only adds a
+        // boundary inside an already-hidden run changes nothing visible.
+        guard TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s) else { return }
         setSegments(c)
         settlePlayhead()
     }
@@ -1417,7 +1421,9 @@ final class StudioModel: ObservableObject {
         guard !isExporting, currentTime < duration else { return }
         let s = effectiveSegments
         let c = TimelineSegments.cut(s, range: currentTime..<duration)
-        guard c != s else { return }
+        // Compare hidden material, not segment lists: a trim that only adds a
+        // boundary inside an already-hidden run changes nothing visible.
+        guard TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s) else { return }
         setSegments(c)
         settlePlayhead()
     }
@@ -1581,8 +1587,10 @@ final class StudioModel: ObservableObject {
         applyVideoComposition()
     }
 
-    func commitTextEdit() {
-        saveEdit()
+    /// Persist a text edit. `key` coalesces continuous controls (e.g. the
+    /// font-size stepper's auto-repeat) into one undo step.
+    func commitTextEdit(coalescing key: String? = nil) {
+        saveEdit(coalescing: key)
     }
 
     /// Mutate one block in place (preserves array order / z-order) and refresh
@@ -1878,7 +1886,9 @@ final class StudioModel: ObservableObject {
                                      _ mutate: (inout ShapeBlock) -> Void) {
         guard let id = selectedShapeBlockID else { return }
         updateShapeBlock(id, mutate)
-        if commit { saveEdit(coalescing: key) }
+        // Scope the coalescing key to the block so colour drags on two
+        // different blocks never merge into one undo step.
+        if commit { saveEdit(coalescing: key.map { "\($0):\(id.uuidString)" }) }
     }
 
     func setShapeKind(_ kind: ShapeKind) { updateSelectedShape(commit: true) { $0.kind = kind } }
@@ -1899,7 +1909,9 @@ final class StudioModel: ObservableObject {
                                      _ mutate: (inout TextBlock) -> Void) {
         guard let id = selectedTextBlockID else { return }
         updateTextBlock(id, mutate)
-        if commit { saveEdit(coalescing: key) }
+        // Scope the coalescing key to the block so colour drags on two
+        // different blocks never merge into one undo step.
+        if commit { saveEdit(coalescing: key.map { "\($0):\(id.uuidString)" }) }
     }
 
     func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
@@ -1911,7 +1923,7 @@ final class StudioModel: ObservableObject {
     func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textBoxHex") { $0.boxHex = hex } }
     func setTextBoxOpacity(_ v: Double) { updateSelectedText(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
-    func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
+    func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textStrokeHex") { $0.strokeHex = hex } }
     func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
     func setTextBoxWidth(_ v: Double) { updateSelectedText(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
     func setTextAutoWrap(_ on: Bool) { updateSelectedText(commit: true) { $0.autoWrap = on } }
@@ -2034,7 +2046,7 @@ final class StudioModel: ObservableObject {
     func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleBoxHex") { $0.boxHex = hex } }
     func setSubtitleBoxOpacity(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
-    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
+    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleStrokeHex") { $0.strokeHex = hex } }
     func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
     func setSubtitleBoxWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
 

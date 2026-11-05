@@ -206,12 +206,12 @@ extension TimelineSegments {
                   setHidden(s, id: seg.id, false) != s else { return nil }
             return CutPreview(ranges: [seg.start ..< seg.end], kind: .restore)
         case .trimStart:
-            guard cut(s, range: 0 ..< t) != s else { return nil }
+            guard cutRanges(cut(s, range: 0 ..< t)) != cutRanges(s) else { return nil }
             let hi = snapped(t)
             return CutPreview(ranges: [snapped(0).value ..< hi.value], kind: .cut,
                               pendingSplitAt: hi.isBoundary ? nil : t)
         case .trimEnd:
-            guard cut(s, range: t ..< dur) != s else { return nil }
+            guard cutRanges(cut(s, range: t ..< dur)) != cutRanges(s) else { return nil }
             let lo = snapped(t)
             return CutPreview(ranges: [lo.value ..< snapped(dur).value], kind: .cut,
                               pendingSplitAt: lo.isBoundary ? nil : t)
