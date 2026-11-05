@@ -532,63 +532,8 @@ final class StudioModel: ObservableObject {
             self.player = player
             self.duration = built.composition.duration.seconds
 
-            cameraHomeLayout = edit.cameraHomeLayout
-            cameraCenterX = edit.cameraCenterX
-            cameraCenterY = edit.cameraCenterY
-            cameraScale = edit.cameraScale
-            cameraZoom = min(max(1, edit.cameraZoom), 4)
-            cameraFeedX = min(max(0, edit.cameraFeedX), 1)
-            cameraFeedY = min(max(0, edit.cameraFeedY), 1)
-            cameraShape = edit.cameraShape
-            cameraCornerRadius = min(max(0, edit.cameraCornerRadius), 1)
-            cameraBorderWidth = min(max(0, edit.cameraBorderWidth), 0.1)
-            cameraBorderHex = edit.cameraBorderHex
-            cameraShadow = edit.cameraShadow
-            cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
-            cameraAspect = edit.cameraAspect
-            cameraRotation = ((edit.cameraRotation / 90 % 4) + 4) % 4 * 90
-            micVolume = min(max(0, edit.micVolume), 3)
-            systemVolume = min(max(0, edit.systemVolume), 1)
-            showCursor = edit.showCursor
-            clickFeedback = edit.clickFeedback
+            applyEdit(edit)
             loadOverlayData(display: meta.display)
-            cropAspect = edit.cropAspect
-            cropCenterX = min(max(0, edit.cropCenterX), 1)
-            cropCenterY = min(max(0, edit.cropCenterY), 1)
-            cropZoom = min(max(0.2, edit.cropZoom), 1)
-            canvasBackground = edit.canvasBackground
-            canvasBackgroundBlur = min(max(0, edit.canvasBackgroundBlur), 0.2)
-            canvasBackgroundImage = edit.canvasBackgroundImage
-            loadBackgroundImage()
-            cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
-            // Stored verbatim — array order is the z-order, never re-sorted.
-            textBlocks = edit.textBlocks
-            shapeBlocks = edit.shapeBlocks
-            // Keep cues raw; the offset is applied at consumption. A track whose
-            // cues all fall outside the clip (after offset) loads as no subtitles
-            // (the .srt file is left in the bundle).
-            if let track = edit.subtitles {
-                let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
-                                                           duration: duration)
-                subtitles = surviving.isEmpty ? nil
-                    : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
-                                    cues: track.cues, offset: track.offset)
-            }
-            zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
-            layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
-            // Empty stays empty (uncut); a stored partition is renormalized onto
-            // the current duration (which may have changed since it was saved).
-            segments = edit.segments.isEmpty ? []
-                : TimelineSegments.normalized(edit.segments, duration: duration)
-            frameEnabled = edit.frameEnabled
-            let frame = FrameMath.clamped(centerX: edit.frameCenterX,
-                                          centerY: edit.frameCenterY,
-                                          width: edit.frameWidth,
-                                          height: edit.frameHeight)
-            frameCenterX = frame.centerX
-            frameCenterY = frame.centerY
-            frameWidth = frame.width
-            frameHeight = frame.height
             // Build the preview item: full composition, or a collapsed copy when the
             // loaded edit already has cuts (applies the video composition + audio).
             rebuildPreview()
@@ -617,6 +562,69 @@ final class StudioModel: ObservableObject {
             Log.studio.error("StudioModel.load failed: \(error.localizedDescription, privacy: .public)")
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    /// Push `edit`'s fields into the model (camera, crop, background, blocks,
+    /// subtitles, segments, frame, volumes, cursor flags). Does not persist, does
+    /// not touch history, does not rebuild the preview — callers do. Used by
+    /// `load()` and by undo/redo.
+    private func applyEdit(_ edit: EditState) {
+        cameraHomeLayout = edit.cameraHomeLayout
+        cameraCenterX = edit.cameraCenterX
+        cameraCenterY = edit.cameraCenterY
+        cameraScale = edit.cameraScale
+        cameraZoom = min(max(1, edit.cameraZoom), 4)
+        cameraFeedX = min(max(0, edit.cameraFeedX), 1)
+        cameraFeedY = min(max(0, edit.cameraFeedY), 1)
+        cameraShape = edit.cameraShape
+        cameraCornerRadius = min(max(0, edit.cameraCornerRadius), 1)
+        cameraBorderWidth = min(max(0, edit.cameraBorderWidth), 0.1)
+        cameraBorderHex = edit.cameraBorderHex
+        cameraShadow = edit.cameraShadow
+        cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
+        cameraAspect = edit.cameraAspect
+        cameraRotation = ((edit.cameraRotation / 90 % 4) + 4) % 4 * 90
+        micVolume = min(max(0, edit.micVolume), 3)
+        systemVolume = min(max(0, edit.systemVolume), 1)
+        showCursor = edit.showCursor
+        clickFeedback = edit.clickFeedback
+        cropAspect = edit.cropAspect
+        cropCenterX = min(max(0, edit.cropCenterX), 1)
+        cropCenterY = min(max(0, edit.cropCenterY), 1)
+        cropZoom = min(max(0.2, edit.cropZoom), 1)
+        canvasBackground = edit.canvasBackground
+        canvasBackgroundBlur = min(max(0, edit.canvasBackgroundBlur), 0.2)
+        canvasBackgroundImage = edit.canvasBackgroundImage
+        loadBackgroundImage()
+        cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
+        // Stored verbatim — array order is the z-order, never re-sorted.
+        textBlocks = edit.textBlocks
+        shapeBlocks = edit.shapeBlocks
+        // Keep cues raw; the offset is applied at consumption. A track whose
+        // cues all fall outside the clip (after offset) loads as no subtitles
+        // (the .srt file is left in the bundle).
+        if let track = edit.subtitles {
+            let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
+                                                       duration: duration)
+            subtitles = surviving.isEmpty ? nil
+                : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
+                                cues: track.cues, offset: track.offset)
+        }
+        zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
+        layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
+        // Empty stays empty (uncut); a stored partition is renormalized onto
+        // the current duration (which may have changed since it was saved).
+        segments = edit.segments.isEmpty ? []
+            : TimelineSegments.normalized(edit.segments, duration: duration)
+        frameEnabled = edit.frameEnabled
+        let frame = FrameMath.clamped(centerX: edit.frameCenterX,
+                                      centerY: edit.frameCenterY,
+                                      width: edit.frameWidth,
+                                      height: edit.frameHeight)
+        frameCenterX = frame.centerX
+        frameCenterY = frame.centerY
+        frameWidth = frame.width
+        frameHeight = frame.height
     }
 
     private struct BuiltComposition {
