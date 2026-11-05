@@ -46,6 +46,14 @@ final class StudioModel: ObservableObject {
     /// Test seam: enter the export lock without running a real AVFoundation
     /// export (which needs a loaded composition). Used only by unit tests.
     func beginExportLockForTests() { exportState = .exporting(0) }
+
+    /// Test seam: set duration/segments/playhead without touching AVFoundation
+    /// (`player` stays nil).
+    func loadForTests(duration: Double, segments: [TimelineSegment] = []) {
+        self.duration = duration
+        self.segments = segments.isEmpty ? [] : TimelineSegments.normalized(segments, duration: duration)
+        self.currentTime = 0
+    }
     #endif
 
     // Camera PiP — center normalized 0–1 in render space, scale = width
@@ -1339,10 +1347,48 @@ final class StudioModel: ObservableObject {
         let updated = TimelineSegments.setHidden(effectiveSegments, id: id, true)
         guard updated != segments else { return }
         setSegments(updated)
-        // If the playhead now sits inside the freshly-hidden range, hop past it.
-        if let r = TimelineSegments.hiddenRange(containing: currentTime, in: updated) {
-            seek(to: r.upperBound)
-        }
+        settlePlayhead()
+    }
+
+    /// If the playhead sits inside a hidden range, hop past it — or back to its
+    /// start when the range runs to the end of the timeline.
+    private func settlePlayhead() {
+        guard let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments) else { return }
+        seek(to: r.upperBound >= duration - 1e-6 ? r.lowerBound : r.upperBound)
+    }
+
+    /// Whether Trim Start (cut `0..<playhead`) would change anything.
+    var canTrimStartAtPlayhead: Bool {
+        guard !isExporting else { return false }
+        let s = effectiveSegments
+        return TimelineSegments.cut(s, range: 0..<currentTime) != s
+    }
+
+    /// Whether Trim End (cut `playhead..<duration`) would change anything.
+    var canTrimEndAtPlayhead: Bool {
+        guard !isExporting else { return false }
+        let s = effectiveSegments
+        return TimelineSegments.cut(s, range: currentTime..<duration) != s
+    }
+
+    /// Hide everything before the playhead (split-and-cut).
+    func trimStartAtPlayhead() {
+        guard !isExporting, currentTime > 0 else { return }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: 0..<currentTime)
+        guard c != s else { return }
+        setSegments(c)
+        settlePlayhead()
+    }
+
+    /// Hide everything after the playhead (split-and-cut).
+    func trimEndAtPlayhead() {
+        guard !isExporting, currentTime < duration else { return }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: currentTime..<duration)
+        guard c != s else { return }
+        setSegments(c)
+        settlePlayhead()
     }
 
     /// Restore a previously hidden segment.

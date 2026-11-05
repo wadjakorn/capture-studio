@@ -19,9 +19,11 @@ struct ExportLockTests {
 
     @Test func mutatorsNoOpWhileExporting() {
         let m = makeModel()
+        m.loadForTests(duration: 10)
+        m.seek(to: 3)
         m.beginExportLockForTests()
         // The export guard must leave the edit model untouched.
-        m.resetSegments()
+        m.trimStartAtPlayhead()
         #expect(m.segments.isEmpty)
 
         let zoomBefore = m.canvasZoom
