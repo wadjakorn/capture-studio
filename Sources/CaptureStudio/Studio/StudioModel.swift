@@ -41,6 +41,12 @@ final class StudioModel: ObservableObject {
     }
     /// The running export task, retained so `cancelExport` can stop it.
     private var exportTask: Task<Void, Never>?
+    /// In-memory undo/redo stack of saved edits (never persisted). `saveEdit()`
+    /// records every committed change; `@Published` so the undo/redo controls
+    /// refresh. Reset on load.
+    @Published private var history = EditHistory(initial: EditState())
+    var canUndo: Bool { !isExporting && history.canUndo }
+    var canRedo: Bool { !isExporting && history.canRedo }
 
     #if DEBUG
     /// Test seam: enter the export lock without running a real AVFoundation
@@ -53,6 +59,7 @@ final class StudioModel: ObservableObject {
         self.duration = duration
         self.segments = segments.isEmpty ? [] : TimelineSegments.normalized(segments, duration: duration)
         self.currentTime = 0
+        history.reset(to: currentEdit())
     }
     #endif
 
@@ -534,6 +541,7 @@ final class StudioModel: ObservableObject {
 
             applyEdit(edit)
             loadOverlayData(display: meta.display)
+            history.reset(to: currentEdit())
             // Build the preview item: full composition, or a collapsed copy when the
             // loaded edit already has cuts (applies the video composition + audio).
             rebuildPreview()
@@ -609,6 +617,8 @@ final class StudioModel: ObservableObject {
             subtitles = surviving.isEmpty ? nil
                 : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
                                 cues: track.cues, offset: track.offset)
+        } else {
+            subtitles = nil
         }
         zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
         layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
@@ -2360,7 +2370,7 @@ final class StudioModel: ObservableObject {
 
     /// Remove the uploaded photo and revert the background to black.
     func deleteBackgroundImage() {
-        bundle.deleteBackgroundImages()
+        // Leave the file on disk so undo can restore the reference; the next upload overwrites it.
         canvasBackgroundImage = nil
         backgroundCIImage = nil
         applyOverlayChange { canvasBackground = .black }
@@ -2712,7 +2722,44 @@ final class StudioModel: ObservableObject {
     }
 
     private func saveEdit() {
-        try? bundle.writeEdit(currentEdit())
+        let e = currentEdit()
+        history.record(e)
+        try? bundle.writeEdit(e)
+    }
+
+    /// Step back one saved edit. No-op while exporting or at the bottom of the stack.
+    func undo() {
+        guard canUndo, let s = history.undo() else { return }
+        applyHistorySnapshot(s)
+    }
+
+    /// Re-apply the next undone edit. No-op while exporting or with nothing to redo.
+    func redo() {
+        guard canRedo, let s = history.redo() else { return }
+        applyHistorySnapshot(s)
+    }
+
+    /// Shared undo/redo tail: push the snapshot into the model, rebuild the
+    /// preview, re-derive transient UI state, then record + persist what was
+    /// actually applied (`applyEdit` normalises/clamps). Never calls `saveEdit()`,
+    /// which would push a new step and wipe the redo stack.
+    private func applyHistorySnapshot(_ s: EditState) {
+        applyEdit(s)
+        // Unconditional: crop-aspect / compositor / segment changes all need a
+        // fresh player item, and a paused frame won't repaint otherwise.
+        rebuildPreview()
+        templateGuideVisible = (cropAspect == .nineBySixteenTemplate)
+        if !cropPannable { panVideoMode = false }
+        if subtitles == nil { subtitleSelected = false }
+        if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
+        if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
+        if let id = selectedShapeBlockID, !shapeBlocks.contains(where: { $0.id == id }) { selectedShapeBlockID = nil }
+        if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
+        if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
+        settlePlayhead()
+        let e = currentEdit()
+        history.replaceCurrent(e)
+        try? bundle.writeEdit(e)
     }
 
     /// Snapshot the live model into an `EditState` for persistence / transforms.
