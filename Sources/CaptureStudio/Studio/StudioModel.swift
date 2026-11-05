@@ -1874,16 +1874,17 @@ final class StudioModel: ObservableObject {
     /// Mutate the selected shape block live. Discrete edits pass `commit: true`
     /// to persist immediately; slider drags pass `false` and persist on end via
     /// `commitShapeEdit`.
-    private func updateSelectedShape(commit: Bool, _ mutate: (inout ShapeBlock) -> Void) {
+    private func updateSelectedShape(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout ShapeBlock) -> Void) {
         guard let id = selectedShapeBlockID else { return }
         updateShapeBlock(id, mutate)
-        if commit { saveEdit() }
+        if commit { saveEdit(coalescing: key) }
     }
 
     func setShapeKind(_ kind: ShapeKind) { updateSelectedShape(commit: true) { $0.kind = kind } }
-    func setShapeFillHex(_ hex: String) { updateSelectedShape(commit: true) { $0.fillHex = hex } }
+    func setShapeFillHex(_ hex: String) { updateSelectedShape(commit: true, coalescing: "shapeFillHex") { $0.fillHex = hex } }
     func setShapeFillOpacity(_ v: Double) { updateSelectedShape(commit: false) { $0.fillOpacity = min(max(0, v), 1) } }
-    func setShapeStrokeHex(_ hex: String) { updateSelectedShape(commit: true) { $0.strokeHex = hex } }
+    func setShapeStrokeHex(_ hex: String) { updateSelectedShape(commit: true, coalescing: "shapeStrokeHex") { $0.strokeHex = hex } }
     func setShapeStrokeWidth(_ v: Double) { updateSelectedShape(commit: false) { $0.strokeWidth = min(max(0, v), 0.1) } }
     func setShapeCornerRadius(_ v: Double) { updateSelectedShape(commit: false) { $0.cornerRadius = min(max(0, v), 0.5) } }
     func setShapeBlurStyle(_ s: ShapeBlurStyle) { updateSelectedShape(commit: true) { $0.blurStyle = s } }
@@ -1894,19 +1895,20 @@ final class StudioModel: ObservableObject {
     /// Mutate the selected text block live. Discrete edits pass `commit: true`
     /// to persist immediately; slider drags pass `false` and persist on end via
     /// `commitTextEdit`.
-    private func updateSelectedText(commit: Bool, _ mutate: (inout TextBlock) -> Void) {
+    private func updateSelectedText(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout TextBlock) -> Void) {
         guard let id = selectedTextBlockID else { return }
         updateTextBlock(id, mutate)
-        if commit { saveEdit() }
+        if commit { saveEdit(coalescing: key) }
     }
 
     func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
     func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.005, v), 0.5) } }
     func setTextWeight(_ w: TextWeight) { updateSelectedText(commit: true) { $0.fontWeight = w } }
-    func setTextColorHex(_ hex: String) { updateSelectedText(commit: true) { $0.colorHex = hex } }
+    func setTextColorHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textColorHex") { $0.colorHex = hex } }
     func setTextAlignment(_ a: TextAlignmentH) { updateSelectedText(commit: true) { $0.alignment = a } }
     func setTextBoxEnabled(_ on: Bool) { updateSelectedText(commit: true) { $0.boxEnabled = on } }
-    func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true) { $0.boxHex = hex } }
+    func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textBoxHex") { $0.boxHex = hex } }
     func setTextBoxOpacity(_ v: Double) { updateSelectedText(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
     func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
@@ -1968,6 +1970,8 @@ final class StudioModel: ObservableObject {
     }
 
     /// Remove the subtitle track + its `.srt` and hide the lane. Loader-gated.
+    /// Deleting the `.srt` is harmless for undo: the cues live in `EditState`,
+    /// so undo restores the track from the snapshot.
     func removeSubtitles() {
         guard subtitleState == .idle, subtitles != nil else { return }
         subtitleState = .removing
@@ -2013,20 +2017,21 @@ final class StudioModel: ObservableObject {
     /// Mutate the shared subtitle style live (applies to every cue). Discrete
     /// edits commit immediately; slider drags pass `commit: false` and persist on
     /// end via `commitSubtitleEdit`.
-    private func updateSubtitleStyle(commit: Bool, _ mutate: (inout SubtitleStyle) -> Void) {
+    private func updateSubtitleStyle(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout SubtitleStyle) -> Void) {
         guard subtitles != nil else { return }
         mutate(&subtitles!.style)
         applyVideoComposition()
-        if commit { saveEdit() }
+        if commit { saveEdit(coalescing: key) }
     }
 
     func setSubtitleFontName(_ name: String) { updateSubtitleStyle(commit: true) { $0.fontName = name } }
     func setSubtitleFontSize(_ v: Double) { updateSubtitleStyle(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
     func setSubtitleWeight(_ w: TextWeight) { updateSubtitleStyle(commit: true) { $0.fontWeight = w } }
-    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.colorHex = hex } }
+    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleColorHex") { $0.colorHex = hex } }
     func setSubtitleAlignment(_ a: TextAlignmentH) { updateSubtitleStyle(commit: true) { $0.alignment = a } }
     func setSubtitleBoxEnabled(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.boxEnabled = on } }
-    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.boxHex = hex } }
+    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleBoxHex") { $0.boxHex = hex } }
     func setSubtitleBoxOpacity(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
     func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
@@ -2043,7 +2048,7 @@ final class StudioModel: ObservableObject {
         guard subtitles != nil else { return }
         subtitles!.offset = min(max(-86_400, seconds), 86_400)
         applyVideoComposition()
-        saveEdit()
+        saveEdit(coalescing: "subtitleOffset")
     }
 
     /// Align cue #1 (the smallest raw `begin`) to the current playhead.
@@ -2174,7 +2179,7 @@ final class StudioModel: ObservableObject {
 
     func setCameraBorderHex(_ hex: String) {
         applyCameraStyle { cameraBorderHex = hex }
-        saveEdit()
+        saveEdit(coalescing: "cameraBorderHex")
     }
 
     func setCameraShadow(_ on: Bool) {
@@ -2721,9 +2726,11 @@ final class StudioModel: ObservableObject {
         currentTime = clamped
     }
 
-    private func saveEdit() {
+    /// Persist + record the current edit. `key` coalesces continuous controls
+    /// (colour wheel drags, stepper auto-repeat) into one undo step.
+    private func saveEdit(coalescing key: String? = nil) {
         let e = currentEdit()
-        history.record(e)
+        history.record(e, coalescingKey: key)
         try? bundle.writeEdit(e)
     }
 
@@ -2740,9 +2747,10 @@ final class StudioModel: ObservableObject {
     }
 
     /// Shared undo/redo tail: push the snapshot into the model, rebuild the
-    /// preview, re-derive transient UI state, then record + persist what was
-    /// actually applied (`applyEdit` normalises/clamps). Never calls `saveEdit()`,
-    /// which would push a new step and wipe the redo stack.
+    /// preview, re-derive transient UI state, then overwrite the history's
+    /// current entry (`replaceCurrent`, no new step) with what was actually
+    /// applied (`applyEdit` normalises/clamps) and persist it. Never calls
+    /// `saveEdit()`, which would push a new step and wipe the redo stack.
     private func applyHistorySnapshot(_ s: EditState) {
         applyEdit(s)
         // Unconditional: crop-aspect / compositor / segment changes all need a

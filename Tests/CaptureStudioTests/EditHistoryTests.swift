@@ -70,4 +70,30 @@ import Testing
         #expect(!h.canUndo)
         #expect(!h.canRedo)
     }
+
+    @Test func keyedRecordsCoalesceIntoOneStep() {
+        var h = EditHistory(initial: 0)
+        h.record(1, coalescingKey: "c"); h.record(2, coalescingKey: "c"); h.record(3, coalescingKey: "c")
+        #expect(h.undo() == 0)
+    }
+
+    @Test func differentKeyBreaksCoalescing() {
+        var h = EditHistory(initial: 0)
+        h.record(1, coalescingKey: "a"); h.record(2, coalescingKey: "b")
+        #expect(h.undo() == 1)
+    }
+
+    @Test func unkeyedRecordBreaksCoalescing() {
+        var h = EditHistory(initial: 0)
+        h.record(1, coalescingKey: "c"); h.record(2); h.record(3, coalescingKey: "c")
+        #expect(h.undo() == 2)
+    }
+
+    @Test func undoClearsCoalescingKey() {
+        var h = EditHistory(initial: 0)
+        h.record(1, coalescingKey: "c")
+        _ = h.undo()
+        h.record(5, coalescingKey: "c")
+        #expect(h.undo() == 0)
+    }
 }

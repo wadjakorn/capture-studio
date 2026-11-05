@@ -7,6 +7,9 @@ struct EditHistory<State: Equatable> {
     private var undoStack: [State] = []
     private var redoStack: [State] = []
     private let cap: Int
+    /// Key of the last `record`, for coalescing continuous edits (colour wheel
+    /// drags, stepper auto-repeat). Cleared by undo/redo/reset and by unkeyed records.
+    private var lastKey: String?
 
     /// The state the editor is currently in.
     private(set) var current: State
@@ -22,7 +25,19 @@ struct EditHistory<State: Equatable> {
     /// Commit `state` as the new current. No-op when equal to `current`; otherwise
     /// the old `current` becomes an undo step and the redo stack is cleared.
     mutating func record(_ state: State) {
+        record(state, coalescingKey: nil)
+    }
+
+    /// As `record(_:)`, but consecutive records with the same non-nil
+    /// `coalescingKey` collapse into one step: `current` is overwritten without
+    /// pushing a new undo entry.
+    mutating func record(_ state: State, coalescingKey: String?) {
         guard state != current else { return }
+        defer { lastKey = coalescingKey }
+        if let key = coalescingKey, key == lastKey {
+            current = state
+            return
+        }
         undoStack.append(current)
         if undoStack.count > cap { undoStack.removeFirst(undoStack.count - cap) }
         redoStack.removeAll()
@@ -33,6 +48,7 @@ struct EditHistory<State: Equatable> {
     /// nil when there is nothing to undo.
     mutating func undo() -> State? {
         guard let previous = undoStack.popLast() else { return nil }
+        lastKey = nil
         redoStack.append(current)
         current = previous
         return current
@@ -42,6 +58,7 @@ struct EditHistory<State: Equatable> {
     /// there is nothing to redo.
     mutating func redo() -> State? {
         guard let next = redoStack.popLast() else { return nil }
+        lastKey = nil
         undoStack.append(current)
         current = next
         return current
@@ -50,6 +67,7 @@ struct EditHistory<State: Equatable> {
     /// Set `current` and clear both stacks (used on load).
     mutating func reset(to state: State) {
         current = state
+        lastKey = nil
         undoStack.removeAll()
         redoStack.removeAll()
     }
