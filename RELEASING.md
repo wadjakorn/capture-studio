@@ -122,7 +122,7 @@ tests. Needs Java 17 and the Android SDK 34 (`ANDROID_HOME` or
   developer" prompt (right-click → Open clears it). The **Homebrew** path is
   clean because `brew` strips the quarantine flag. Removing the prompt for direct
   downloads needs a paid Apple Developer ID + notarization.
-- **Apple-silicon only** for now (the `macos-15` runner builds `arm64`). For a
+- **Apple-silicon only** for now (the `macos-26` runner builds `arm64`). For a
   universal build, switch `build-app.sh` to `swift build --arch arm64 --arch
   x86_64` and adjust the binary path.
 - **No in-app auto-update.** capz gets this from Tauri's updater; the equivalent

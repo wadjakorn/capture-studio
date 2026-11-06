@@ -8,11 +8,13 @@ on:
 
 jobs:
   build:
-    # macOS 15 runner: matches LSMinimumSystemVersion 15.0 and ships the SDK the
-    # app targets. The Xcode toolchain here is a superset of Command Line Tools,
-    # so the CLT-pinned deps (swift-testing 0.12, KeyboardShortcuts 1.10) resolve
-    # and build fine via Package.resolved.
-    runs-on: macos-15
+    # macOS 26 runner: its default Xcode (26.x) is close to the local
+    # toolchain, so CI compiles what local builds compile (Xcode 16.4 on the
+    # macos-15 image rejected code Swift 6.3+/6.4 accepts). The deployment
+    # target stays macOS 15 (LSMinimumSystemVersion 15.0 / Package.swift), so
+    # the app still runs on macOS 15. CLT-pinned deps (swift-testing 0.12,
+    # KeyboardShortcuts 1.10) resolve via Package.resolved.
+    runs-on: macos-26
     permissions:
       contents: write
     steps:
@@ -47,6 +49,9 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" login.keychain
           security default-keychain -s "$KEYCHAIN"
           rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
 
       - name: Build app
         run: scripts/build-app.sh release
