@@ -51,9 +51,48 @@ import Foundation
         #expect(out[1].id == id)           // right half is the new id
     }
 
-    @Test func splitPreservesHiddenFlag() {
-        let (out, _) = TimelineSegments.split([seg(0, 10, hidden: true)], at: 4)
-        #expect(out.allSatisfy { $0.hidden })
+    // MARK: hidden-run invariant
+
+    @Test func splitRefusedInsideHiddenSegment() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<4)
+        #expect(!TimelineSegments.canSplit(s, at: 2))
+        #expect(TimelineSegments.split(s, at: 2).id == nil)
+        #expect(TimelineSegments.canSplit(s, at: 6))
+    }
+    @Test func coalescedHiddenMergesRunsKeepingFirstId() {
+        let a = seg(0, 2, hidden: true), b = seg(2, 5, hidden: true), c = seg(5, 7), d = seg(7, 9, hidden: true), e = seg(9, 10, hidden: true)
+        let out = TimelineSegments.coalescedHidden([a, b, c, d, e])
+        #expect(out.map(\.start) == [0, 5, 7]); #expect(out.map(\.end) == [5, 7, 10])
+        #expect(out.map(\.hidden) == [true, false, true])
+        #expect(out[0].id == a.id && out[2].id == d.id && out[1] == c)
+    }
+    @Test func coalescedHiddenIsIdentityWhenNothingAdjacent() {
+        let s = [seg(0, 2, hidden: true), seg(2, 5), seg(5, 10, hidden: true)]
+        #expect(TimelineSegments.coalescedHidden(s) == s)
+        #expect(TimelineSegments.coalescedHidden(TimelineSegments.coalescedHidden(s)) == s)
+    }
+    @Test func normalizedCoalescesAdjacentHidden() {
+        let s = [seg(0, 2, hidden: true), seg(2, 4, hidden: true), seg(4, 10)]
+        let n = TimelineSegments.normalized(s, duration: 10)
+        #expect(n.count == 2); #expect(n[0].hidden && n[0].end == 4)
+    }
+    @Test func cutAdjacentToHiddenRunMergesIntoIt() {
+        var s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<2)
+        s = TimelineSegments.cut(s, range: 2..<5)
+        #expect(s.count == 2); #expect(s[0].hidden && s[0].start == 0 && s[0].end == 5)
+    }
+    @Test func setHiddenMergesWithNeighbours() {
+        var s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 3).segments
+        s = TimelineSegments.split(s, at: 6).segments
+        s = TimelineSegments.setHidden(s, id: s[0].id, true)
+        s = TimelineSegments.setHidden(s, id: s[1].id, true)
+        #expect(s.count == 2); #expect(s[0].hidden && s[0].end == 6); #expect(!s[1].hidden)
+    }
+    @Test func cutOverSplitsCollapsesThemIntoOneHiddenSegment() {
+        var s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 2).segments
+        s = TimelineSegments.split(s, at: 4).segments
+        let t = TimelineSegments.cut(s, range: 0..<6)
+        #expect(t.count == 2); #expect(t[0].hidden && t[0].end == 6); #expect(t[1].start == 6)
     }
 
     @Test func multipleSplitsSupported() {

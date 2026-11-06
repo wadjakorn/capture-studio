@@ -6,6 +6,7 @@ import Foundation
 /// the output — non-destructively:
 /// nothing is removed from the masters or the blocks, the cut is just stored and
 /// applied at play/export time and can be restored (`hidden = false`) or reset.
+/// Adjacent hidden segments are always merged (`TimelineSegments.coalescedHidden`).
 struct TimelineSegment: Codable, Equatable, Identifiable {
     var id: UUID = UUID()
     var start: Double
@@ -58,26 +59,43 @@ enum TimelineSegments {
             }
         }
         if dur - cursor > 1e-9 { out.append(TimelineSegment(start: cursor, end: dur)) }
-        return out.isEmpty ? full(duration: dur) : out
+        return out.isEmpty ? full(duration: dur) : coalescedHidden(out)
+    }
+
+    /// Sort, then merge each maximal run of consecutive hidden segments into one
+    /// `[run.first.start, run.last.end)` segment keeping the first segment's id.
+    /// Visible segments are untouched. Idempotent; returns the input when nothing merges.
+    static func coalescedHidden(_ segments: [TimelineSegment]) -> [TimelineSegment] {
+        let sorted = segments.sorted { $0.start < $1.start }
+        var out: [TimelineSegment] = []
+        for seg in sorted {
+            if seg.hidden, let last = out.last, last.hidden {
+                out[out.count - 1].end = seg.end
+            } else {
+                out.append(seg)
+            }
+        }
+        return out.count == segments.count ? segments : out
     }
 
     /// True when a split at `t` would land strictly inside a segment with at least
     /// `minWidth` on each side (drives the Split control's enabled state).
     static func canSplit(_ segments: [TimelineSegment], at t: Double,
                          minWidth: Double = splitMinWidth) -> Bool {
-        segments.contains { $0.start < t && t < $0.end
+        segments.contains { !$0.hidden && $0.start < t && t < $0.end
             && t - $0.start >= minWidth && $0.end - t >= minWidth }
     }
 
     /// Split the segment spanning `t` into two touching segments at `t`. The left
     /// half keeps the original id (and hidden flag); the right half gets a new id
-    /// (returned so the caller can select it) and inherits the hidden flag. No-op
-    /// (nil id) when no segment strictly spans `t` or either piece would be narrower
-    /// than `minWidth`.
+    /// (returned so the caller can select it). No-op (nil id) when no segment
+    /// strictly spans `t`, the spanning segment is hidden (refused inside a hidden
+    /// segment), or either piece would be narrower than `minWidth`.
     static func split(_ segments: [TimelineSegment], at t: Double,
                       minWidth: Double = splitMinWidth) -> (segments: [TimelineSegment], id: UUID?) {
         let sorted = segments.sorted { $0.start < $1.start }
         guard let i = sorted.firstIndex(where: { $0.start < t && t < $0.end }),
+              !sorted[i].hidden,
               t - sorted[i].start >= minWidth,
               sorted[i].end - t >= minWidth else { return (sorted, nil) }
         var left = sorted[i]; left.end = t
@@ -99,8 +117,9 @@ enum TimelineSegments {
         -> [TimelineSegment] {
         guard segments.contains(where: { $0.id == id }) else { return segments }
         if hidden && visibleCount(segments.filter { $0.id != id }) == 0 { return segments }
-        return segments.map { $0.id == id ? TimelineSegment(id: $0.id, start: $0.start,
-                                                            end: $0.end, hidden: hidden) : $0 }
+        let out = segments.map { $0.id == id ? TimelineSegment(id: $0.id, start: $0.start,
+                                                               end: $0.end, hidden: hidden) : $0 }
+        return hidden ? coalescedHidden(out) : out
     }
 
     /// The hidden runs merged into `[begin, end)` ranges (adjacent hidden segments
@@ -129,7 +148,9 @@ enum TimelineSegments {
     /// boundary snaps to that boundary instead of splitting), then mark every
     /// segment fully inside the (snapped) range hidden. Returns the input
     /// unchanged when the range is empty after snapping or when no visible
-    /// segment would remain.
+    /// segment would remain. A bound inside a hidden run no longer splits; the run
+    /// simply absorbs the cut: `[0,4)h [4,10)` cut `2..<6` → `[0,6)h [6,10)`, cut
+    /// `2..<3` → unchanged.
     static func cut(_ segments: [TimelineSegment], range: Range<Double>,
                     minWidth: Double = splitMinWidth) -> [TimelineSegment] {
         /// Snap `b` to a nearby boundary, else split there (when allowed).
@@ -145,7 +166,7 @@ enum TimelineSegments {
             guard seg.start >= lo - 1e-9, seg.end <= hi + 1e-9 else { return seg }
             return TimelineSegment(id: seg.id, start: seg.start, end: seg.end, hidden: true)
         }
-        return visibleCount(out) == 0 ? segments : out
+        return visibleCount(out) == 0 ? segments : coalescedHidden(out)
     }
 
     /// First and last visible instants: `(start, end)` with `start` = end of a
