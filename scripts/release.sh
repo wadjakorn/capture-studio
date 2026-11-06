@@ -39,5 +39,7 @@ fi
 
 git add "$PLIST"
 git commit -m "chore(release): $tag"
-git tag "$tag"
+# Annotated: `git push --follow-tags` only pushes annotated tags; a lightweight
+# tag stays local and CI never runs.
+git tag -a "$tag" -m "Capture Studio $tag"
 echo "done. push with: git push --follow-tags"

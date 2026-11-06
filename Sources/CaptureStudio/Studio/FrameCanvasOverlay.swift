@@ -99,13 +99,16 @@ struct FrameCanvasOverlay: View {
                 // Capture the fixed anchor + dragged-corner start ONCE, so the
                 // anchor can't drift as the frame mutates through the drag.
                 if resizeAnchor == nil {
+                    // Explicit Double: mixing the CGFloat corner with the
+                    // Double frame values is ambiguous to Swift 6.1 (CI's Xcode 16.4).
                     let halfW = model.frameWidth / 2, halfH = model.frameHeight / 2
+                    let opposite = corner.opposite, unit = corner.unit
                     resizeAnchor = CGPoint(
-                        x: model.frameCenterX + (corner.opposite.x - 0.5) * 2 * halfW,
-                        y: model.frameCenterY + (corner.opposite.y - 0.5) * 2 * halfH)
+                        x: model.frameCenterX + (Double(opposite.x) - 0.5) * 2 * halfW,
+                        y: model.frameCenterY + (Double(opposite.y) - 0.5) * 2 * halfH)
                     resizeStartDragged = CGPoint(
-                        x: model.frameCenterX + (corner.unit.x - 0.5) * 2 * halfW,
-                        y: model.frameCenterY + (corner.unit.y - 0.5) * 2 * halfH)
+                        x: model.frameCenterX + (Double(unit.x) - 0.5) * 2 * halfW,
+                        y: model.frameCenterY + (Double(unit.y) - 0.5) * 2 * halfH)
                 }
                 guard let anchor = resizeAnchor, let start = resizeStartDragged else { return }
                 let dx = Double(value.translation.width / viewScale) / model.renderSize.width
