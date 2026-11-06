@@ -7,6 +7,10 @@ struct StudioView: View {
     @State private var activeTab: RailTab = .frame
     @State private var timelineScroll = ScrollPosition(edge: .leading)
     @State private var timelineScrollX: CGFloat = 0
+    /// Split mark (by right-hand segment id) whose popover is open on the lane.
+    @State private var openSplitID: UUID?
+    /// Split mark (by right-hand segment id) under the pointer on the lane.
+    @State private var hoveredSplitID: UUID?
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -358,10 +362,11 @@ struct StudioView: View {
                                 .offset(x: fraction(seg.start) * width)
                         }
                         if seg.start > 0.0001 {
+                            let active = seg.id == hoveredSplitID || seg.id == openSplitID
                             Rectangle()
-                                .fill(.secondary)
-                                .frame(width: 1, height: 10)
-                                .offset(x: fraction(seg.start) * width)
+                                .fill(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                                .frame(width: active ? 3 : 1, height: 10)
+                                .offset(x: fraction(seg.start) * width - (active ? 1 : 0))
                         }
                     }
                     CutPreviewOverlay(preview: model.hoverPreview, duration: model.duration, width: width, style: .lane)
@@ -370,6 +375,7 @@ struct StudioView: View {
                         .fill(.primary)
                         .frame(width: 2, height: 16)
                         .offset(x: fraction(model.currentTime) * width - 1)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(maxHeight: .infinity)
@@ -381,8 +387,61 @@ struct StudioView: View {
                         model.seek(to: t)
                     }
             )
+            // Split-mark hit targets sit above the seek gesture view, so a press on a
+            // mark is hit-tested here and never reaches the seek drag.
+            .overlay(alignment: .leading) {
+                if model.duration > 0 {
+                    let marks = model.segments.filter { $0.start > 0.0001 }
+                    let xs = marks.map { fraction($0.start) * width }
+                    let rects = SplitMarkHitTest.rects(xs: xs, width: width)
+                    ForEach(Array(marks.enumerated()), id: \.element.id) { i, seg in
+                        Color.clear
+                            .frame(width: rects[i].upperBound - rects[i].lowerBound, height: 18)
+                            .contentShape(Rectangle())
+                            .pointerStyle(.link)                       // macOS 15: no NSCursor push/pop to balance
+                            .onHover { hoveredSplitID = $0 ? seg.id : (hoveredSplitID == seg.id ? nil : hoveredSplitID) }
+                            .onTapGesture { openSplitID = seg.id }
+                            .popover(isPresented: Binding(get: { openSplitID == seg.id },
+                                                          set: { if !$0 { openSplitID = nil } }),
+                                     arrowEdge: .bottom) { splitMarkPopover(rightID: seg.id) }
+                            .offset(x: rects[i].lowerBound)
+                    }
+                }
+            }
         }
         .frame(height: 18)
+        .onChange(of: openSplitID) { _, id in
+            if id != nil {
+                if model.isPlaying { model.togglePlay() }
+            } else {
+                model.hoverAction = nil
+            }
+        }
+        .onChange(of: model.segments) { _, segments in
+            // The open mark vanished (merged, undone, trimmed away): close its popover.
+            if let openSplitID, !segments.dropFirst().contains(where: { $0.id == openSplitID }) {
+                self.openSplitID = nil
+            }
+        }
+    }
+
+    /// Per-mark actions for the split whose right-hand segment is `rightID`.
+    private func splitMarkPopover(rightID: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(model.splitMarkItems(rightID: rightID) ?? []) { item in
+                Button(item.title) {
+                    model.perform(item.action)
+                    openSplitID = nil
+                }
+                .disabled(!item.enabled)
+                .help(item.help ?? "")
+                .onHover { model.hoverAction = $0 ? item.action : nil }
+            }
+        }
+        .padding(8)
+        .onAppear {
+            if model.splitMarkItems(rightID: rightID) == nil { openSplitID = nil }
+        }
     }
 
     private func fraction(_ seconds: Double) -> CGFloat {

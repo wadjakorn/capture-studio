@@ -52,7 +52,8 @@ final class UndoKeyCatcherView: NSView {
 
     /// Returns nil to consume an event we handled, else the event to pass on.
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard let model, let window, event.window == window else { return event }
+        // A key NSPopover is a child window of the editor; ⌘Z must still reach the model.
+        guard let model, let window, let w = event.window, w == window || w.parent == window else { return event }
         guard !model.isExporting else { return event }
         // Text editing (caption field, any NSTextView/field editor) keeps its own undo.
         guard !(window.firstResponder is NSText) else { return event }
