@@ -6,10 +6,14 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
 
 ## Build / test / run
 
-- **Toolchain: Command Line Tools only — no Xcode.app.** This pins two deps:
-  swift-testing `0.12.0` (exact) and KeyboardShortcuts `1.10.0` (exact). Later
-  versions need the `#Preview` macro plugin / Testing interop libs CLT lacks. Do
-  not bump these.
+- **Toolchain: Xcode 27.1 (Swift 6.4) is selected (`xcode-select -p` →
+  `/Applications/Xcode.app`); Command Line Tools are still installed.** The
+  package must keep building under CLT too: verify with
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools swift test` before merging.
+  Two deps stay pinned for that reason: swift-testing `0.12.0` (exact) and
+  KeyboardShortcuts `1.10.0` (exact) — later versions need the `#Preview` macro
+  plugin / Testing interop libs CLT lacks. Do not bump them and do not add
+  `#Preview` unless the CLT requirement is dropped deliberately.
 - `swift build` / `swift test` (keep them green).
 - `scripts/build-app.sh [debug|release]` → packages `dist/CaptureStudio.app`.
   Signs with the local `Capture Studio Dev` cert if present (keeps TCC grants
