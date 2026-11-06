@@ -60,7 +60,7 @@ struct StudioTransportBar: View {
             model.trimStartAtPlayhead()
         } label: { Text("Trim Start") }
             .disabled(!model.canTrimStartAtPlayhead)
-            .help("Cut everything before the playhead")
+            .help("Cut everything before the playhead (merges into one cut)")
             .onHover { model.hoverAction = $0 ? .trimStart : nil }
 
         Button {
@@ -68,7 +68,7 @@ struct StudioTransportBar: View {
             model.trimEndAtPlayhead()
         } label: { Text("Trim End") }
             .disabled(!model.canTrimEndAtPlayhead)
-            .help("Cut everything after the playhead")
+            .help("Cut everything after the playhead (merges into one cut)")
             .onHover { model.hoverAction = $0 ? .trimEnd : nil }
 
         Button {

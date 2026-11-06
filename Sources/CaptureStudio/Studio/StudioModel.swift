@@ -1335,7 +1335,8 @@ final class StudioModel: ObservableObject {
     var canResetSegments: Bool { !segments.isEmpty }
 
     /// Whether a split at the playhead is allowed — it must land strictly inside a
-    /// segment with at least `splitMinWidth` on each side. Drives the Split control.
+    /// visible segment with at least `splitMinWidth` on each side (never inside a
+    /// cut). Drives the Split control.
     var canSplitAtPlayhead: Bool {
         !isExporting && TimelineSegments.canSplit(effectiveSegments, at: currentTime)
     }
@@ -1404,7 +1405,8 @@ final class StudioModel: ObservableObject {
         return TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s)
     }
 
-    /// Hide everything before the playhead (split-and-cut).
+    /// Hide everything before the playhead. Splits in the head collapse into one
+    /// cut (adjacent hidden segments always merge).
     func trimStartAtPlayhead() {
         guard !isExporting, currentTime > 0 else { return }
         let s = effectiveSegments
@@ -1416,7 +1418,8 @@ final class StudioModel: ObservableObject {
         settlePlayhead()
     }
 
-    /// Hide everything after the playhead (split-and-cut).
+    /// Hide everything after the playhead. Splits in the tail collapse into one
+    /// cut (adjacent hidden segments always merge).
     func trimEndAtPlayhead() {
         guard !isExporting, currentTime < duration else { return }
         let s = effectiveSegments
@@ -1446,8 +1449,9 @@ final class StudioModel: ObservableObject {
     /// Store a new segment partition and persist. Rebuilds the preview only when the
     /// cut set changed (a plain split doesn't cut anything), so playback plays the
     /// collapsed composition — the cuts are skipped seamlessly with no seek.
+    /// A single visible segment is the uncut timeline, stored as `[]`.
     private func setSegments(_ list: [TimelineSegment]) {
-        segments = list
+        segments = (list.count == 1 && !list[0].hidden) ? [] : list
         syncPreviewToCuts()
         saveEdit()
     }

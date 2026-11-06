@@ -115,4 +115,54 @@ struct StudioModelCutTests {
         m.undo()
         #expect(hex(a) == aHex)
     }
+
+    @Test func trimStartCollapsesSplitsInHead() {
+        let m = model()
+        m.seek(to: 2); m.splitAtPlayhead()
+        m.seek(to: 4); m.splitAtPlayhead()
+        m.seek(to: 6); m.trimStartAtPlayhead()
+        #expect(m.segments.count == 2)
+        #expect(m.segments[0].hidden && m.segments[0].start == 0 && m.segments[0].end == 6)
+        #expect(m.currentTime == 6)
+    }
+    @Test func trimEndCollapsesSplitsInTail() {
+        let m = model()
+        m.seek(to: 6); m.splitAtPlayhead()
+        m.seek(to: 8); m.splitAtPlayhead()
+        m.seek(to: 4); m.trimEndAtPlayhead()
+        #expect(m.segments.count == 2)
+        #expect(m.segments[1].hidden && m.segments[1].start == 4 && m.segments[1].end == 10)
+        #expect(m.currentTime == 4)
+    }
+    @Test func trimStartGrowsHiddenHeadIntoOneSegment() {
+        let m = model()
+        m.seek(to: 2); m.trimStartAtPlayhead()
+        m.seek(to: 8); m.splitAtPlayhead()
+        m.seek(to: 5); m.trimStartAtPlayhead()
+        #expect(m.segments.map(\.start) == [0, 5, 8]); #expect(m.segments[0].hidden)
+    }
+    @Test func splitDisabledInsideCut() {
+        let m = model()
+        m.seek(to: 4); m.trimStartAtPlayhead()
+        m.seek(to: 2)
+        #expect(!m.canSplitAtPlayhead)
+        m.splitAtPlayhead()
+        #expect(m.segments.count == 2)
+    }
+    @Test func loadCoalescesLegacyAdjacentHidden() {
+        let m = StudioModel(bundleURL: URL(fileURLWithPath: "/tmp/cut-test-legacy.capturestudio"))
+        m.loadForTests(duration: 10, segments: [TimelineSegment(start: 0, end: 2, hidden: true),
+                                                TimelineSegment(start: 2, end: 4, hidden: true),
+                                                TimelineSegment(start: 4, end: 10)])
+        #expect(m.segments.count == 2)
+    }
+    @Test func trimStartIsOneUndoStep() {
+        let m = model()
+        m.seek(to: 2); m.splitAtPlayhead()
+        m.seek(to: 4); m.splitAtPlayhead()
+        let before = m.segments
+        m.seek(to: 6); m.trimStartAtPlayhead()
+        m.undo()
+        #expect(m.segments == before)
+    }
 }
