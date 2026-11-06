@@ -56,7 +56,7 @@ final class UndoKeyCatcherView: NSView {
         guard let model, let window, let w = event.window, w == window || w.parent == window else { return event }
         guard !model.isExporting else { return event }
         // Text editing (caption field, any NSTextView/field editor) keeps its own undo.
-        guard !(window.firstResponder is NSText) else { return event }
+        guard !(w.firstResponder is NSText) else { return event }
         guard event.keyCode == Self.zKeyCode else { return event }
 
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

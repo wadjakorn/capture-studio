@@ -402,7 +402,7 @@ struct StudioView: View {
                             .onHover { hoveredSplitID = $0 ? seg.id : (hoveredSplitID == seg.id ? nil : hoveredSplitID) }
                             .onTapGesture { openSplitID = seg.id }
                             .popover(isPresented: Binding(get: { openSplitID == seg.id },
-                                                          set: { if !$0 { openSplitID = nil } }),
+                                                          set: { if !$0, openSplitID == seg.id { openSplitID = nil } }),
                                      arrowEdge: .bottom) { splitMarkPopover(rightID: seg.id) }
                             .offset(x: rects[i].lowerBound)
                     }
@@ -418,9 +418,14 @@ struct StudioView: View {
             }
         }
         .onChange(of: model.segments) { _, segments in
-            // The open mark vanished (merged, undone, trimmed away): close its popover.
-            if let openSplitID, !segments.dropFirst().contains(where: { $0.id == openSplitID }) {
+            // The open/hovered mark vanished (merged, undone, trimmed away): close its
+            // popover and drop the hover (its onHover(false) never fires once removed).
+            let boundaries = segments.dropFirst()
+            if let openSplitID, !boundaries.contains(where: { $0.id == openSplitID }) {
                 self.openSplitID = nil
+            }
+            if let hoveredSplitID, !boundaries.contains(where: { $0.id == hoveredSplitID }) {
+                self.hoveredSplitID = nil
             }
         }
     }
