@@ -24,12 +24,16 @@ import Testing
         return url
     }
 
+    /// Test models never use the real Trash: "trashing" deletes the temp bundle.
     private func makeModel(dir: URL, locked: @escaping (URL) -> Bool = { _ in false },
-                           active: URL? = nil) -> (DashboardModel, RecentProjectsStore) {
+                           active: URL? = nil,
+                           trashItem: @escaping (URL) throws -> Void = {
+                               try FileManager.default.removeItem(at: $0)
+                           }) -> (DashboardModel, RecentProjectsStore) {
         let recents = RecentProjectsStore(defaults: UserDefaults(suiteName: UUID().uuidString)!,
                                           recordingsDirectory: dir, noteSystemRecent: { _ in })
         let model = DashboardModel(directory: dir, recents: recents, isOpen: locked,
-                                   activeRecording: { active })
+                                   activeRecording: { active }, trashItem: trashItem)
         return (model, recents)
     }
 
@@ -270,6 +274,61 @@ import Testing
         #expect(r.status == .recording)
         #expect(rec.isLocked(r))
         #expect(throws: DashboardError.self) { try rec.moveToTrash(r) }
+    }
+
+    @Test func batchTrashSkipsLockedAndTrashesRest() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let a = try makeProject("A", in: dir)
+        let b = try makeProject("B", in: dir)
+        let c = try makeProject("C", in: dir)
+        let (model, _) = makeModel(dir: dir, locked: { $0.lastPathComponent == "B.capturestudio" })
+        await model.reloadAndWait()
+        let all = model.projects.sorted { $0.name < $1.name }
+
+        let partition = model.trashPartition(all)
+        #expect(partition.allowed.map(\.name) == ["A", "C"])
+        #expect(partition.locked.map(\.name) == ["B"])
+
+        let result = model.moveToTrash(all)
+        #expect(result.trashed.map(\.name) == ["A", "C"])
+        #expect(result.skipped.map(\.name) == ["B"])
+        #expect(result.failed.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: a.path))
+        #expect(FileManager.default.fileExists(atPath: b.path))
+        #expect(!FileManager.default.fileExists(atPath: c.path))
+        await model.reloadAndWait()
+        #expect(model.projects.map(\.name) == ["B"])
+    }
+
+    @Test func batchTrashContinuesPastFailure() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try makeProject("A", in: dir)
+        let b = try makeProject("B", in: dir)
+        _ = try makeProject("C", in: dir)
+        let (model, _) = makeModel(dir: dir, trashItem: { url in
+            if url.lastPathComponent == "B.capturestudio" { throw CocoaError(.fileNoSuchFile) }
+            try FileManager.default.removeItem(at: url)
+        })
+        await model.reloadAndWait()
+        let result = model.moveToTrash(model.projects.sorted { $0.name < $1.name })
+        #expect(result.trashed.map(\.name) == ["A", "C"])
+        #expect(result.failed.map(\.project.name) == ["B"])
+        #expect(result.skipped.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: b.path))
+    }
+
+    @Test func batchTrashRemovesExternalFromRecents() async throws {
+        let dir = try makeDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let ext = try makeDir(); defer { try? FileManager.default.removeItem(at: ext) }
+        let outside = try makeProject("Out", in: ext)
+        let (model, recents) = makeModel(dir: dir)
+        recents.noteOpened(outside)
+        await model.reloadAndWait()
+        let o = try #require(model.projects.first { $0.name == "Out" })
+        let result = model.moveToTrash([o])
+        #expect(result.trashed.map(\.name) == ["Out"])
+        #expect(recents.externalProjects.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: outside.path))
     }
 
     @Test func removeFromLibraryOnlyForExternal() async throws {

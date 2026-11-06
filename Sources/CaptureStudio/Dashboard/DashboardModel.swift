@@ -63,6 +63,18 @@ enum ProjectLockReason: Equatable {
     }
 }
 
+/// Outcome of a batch move-to-trash: what went, what was locked (skipped),
+/// what failed on disk. Order follows the input.
+struct TrashBatchResult: Equatable {
+    struct Failure: Equatable {
+        var project: ProjectSummary
+        var message: String
+    }
+    var trashed: [ProjectSummary] = []
+    var skipped: [ProjectSummary] = []
+    var failed: [Failure] = []
+}
+
 @MainActor
 final class DashboardModel: ObservableObject {
     @Published var query = ""
@@ -77,13 +89,15 @@ final class DashboardModel: ObservableObject {
     private let isOpen: (URL) -> Bool
     private let activeRecording: () -> URL?
     private let copyItem: @Sendable (URL, URL) throws -> Void
+    private let trashItem: (URL) throws -> Void
     private var loadTask: Task<Void, Never>?
 
     init(directory: URL = ProjectBundle.defaultRecordingsDirectory(),
          recents: RecentProjectsStore? = nil,
          isOpen: ((URL) -> Bool)? = nil,
          activeRecording: (() -> URL?)? = nil,
-         copyItem: (@Sendable (URL, URL) throws -> Void)? = nil) {
+         copyItem: (@Sendable (URL, URL) throws -> Void)? = nil,
+         trashItem: ((URL) throws -> Void)? = nil) {
         self.directory = directory
         self.recents = recents ?? .shared
         // Defaults resolved here: default-argument closures are nonisolated and
@@ -92,6 +106,8 @@ final class DashboardModel: ObservableObject {
         self.activeRecording = activeRecording ?? { RecordingSession.shared?.activeBundleURL }
         // Injectable so tests can fail or stall a copy deterministically.
         self.copyItem = copyItem ?? { try FileManager.default.copyItem(at: $0, to: $1) }
+        // Injectable so tests never touch the user's real Trash.
+        self.trashItem = trashItem ?? { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
     }
 
     var visible: [ProjectSummary] {
@@ -247,9 +263,40 @@ final class DashboardModel: ObservableObject {
 
     func moveToTrash(_ project: ProjectSummary) throws {
         try ensureUnlocked(project)
-        try FileManager.default.trashItem(at: project.url, resultingItemURL: nil)
+        try trashItem(project.url)
         recents.remove(project.url)
         reload()
+    }
+
+    /// Splits `projects` into those that can be trashed now and those locked
+    /// (duplicating / recording / open in Studio). Order preserved.
+    func trashPartition(_ projects: [ProjectSummary]) -> (allowed: [ProjectSummary], locked: [ProjectSummary]) {
+        var allowed: [ProjectSummary] = [], locked: [ProjectSummary] = []
+        for project in projects {
+            if lockReason(project, for: .trash) == nil { allowed.append(project) } else { locked.append(project) }
+        }
+        return (allowed, locked)
+    }
+
+    /// Trashes every unlocked project, re-checking locks now (one may have
+    /// started recording since the confirmation opened). One failure doesn't
+    /// stop the rest. Reloads once at the end.
+    @discardableResult
+    func moveToTrash(_ projects: [ProjectSummary]) -> TrashBatchResult {
+        var result = TrashBatchResult()
+        let (allowed, locked) = trashPartition(projects)
+        result.skipped = locked
+        for project in allowed {
+            do {
+                try trashItem(project.url)
+                recents.remove(project.url)
+                result.trashed.append(project)
+            } catch {
+                result.failed.append(.init(project: project, message: error.localizedDescription))
+            }
+        }
+        if !result.trashed.isEmpty { reload() }
+        return result
     }
 
     /// Forgets an external project; the files stay where they are.
