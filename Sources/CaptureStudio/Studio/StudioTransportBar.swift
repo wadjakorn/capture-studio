@@ -49,7 +49,7 @@ struct StudioTransportBar: View {
             model.hoverAction = nil
             model.toggleCutAtPlayhead()
         } label: {
-            Image(systemName: cutIsRestore ? "eye" : "eye.slash")
+            Image(systemName: cutIsRestore ? "rectangle.badge.plus" : "scissors")
         }
         .disabled(!model.canToggleCutAtPlayhead)
         .help(cutIsRestore ? "Restore this segment" : "Cut this segment from the video")
