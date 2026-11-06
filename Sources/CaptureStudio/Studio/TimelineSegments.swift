@@ -122,6 +122,21 @@ enum TimelineSegments {
         return hidden ? coalescedHidden(out) : out
     }
 
+    /// Remove the split mark at the left edge of segment `rightID`, merging it with
+    /// its left neighbour (keeps the left id and flag). Refused (input returned) when
+    /// `rightID` is first, unknown, or the neighbours' hidden flags differ.
+    static func join(_ segments: [TimelineSegment], atBoundaryOf rightID: UUID)
+        -> [TimelineSegment] {
+        guard let i = segments.firstIndex(where: { $0.id == rightID }), i > 0,
+              segments[i - 1].hidden == segments[i].hidden else { return segments }
+        let left = segments[i - 1]
+        var out = segments
+        out[i - 1] = TimelineSegment(id: left.id, start: left.start,
+                                     end: segments[i].end, hidden: left.hidden)
+        out.remove(at: i)
+        return out
+    }
+
     /// The hidden runs merged into `[begin, end)` ranges (adjacent hidden segments
     /// coalesce). These are the ranges playback skips and export removes.
     static func cutRanges(_ segments: [TimelineSegment]) -> [Range<Double>] {
@@ -184,16 +199,22 @@ enum TimelineSegments {
 
 /// A cut-type transport action whose effect can be previewed on the timeline
 /// while its button is hovered.
-enum CutAction: Equatable { case cutSegment, restoreSegment, trimStart, trimEnd, clearAll }
+enum CutAction: Equatable {
+    case cutSegment, restoreSegment, trimStart, trimEnd, clearAll
+    /// Id-based variants: act on a specific segment, independent of the playhead.
+    case removeSplit(rightID: UUID), hideSegmentID(UUID), restoreSegmentID(UUID)
+}
 
 /// What a hovered `CutAction` would do: the ranges it would hide (`.cut`) or
 /// reveal (`.restore`), plus any split it would have to create first.
 struct CutPreview: Equatable {
-    enum Kind { case cut, restore }
+    enum Kind { case cut, restore, merge }
     var ranges: [Range<Double>]
     var kind: Kind
     /// A split that the action would create (not yet a boundary) — drawn as a marker.
     var pendingSplitAt: Double?
+    /// A split mark that the action would remove (`.merge`) — drawn as a marker.
+    var removingSplitAt: Double? = nil
 }
 
 extension TimelineSegments {
@@ -239,6 +260,18 @@ extension TimelineSegments {
         case .clearAll:
             let ranges = cutRanges(s)
             return ranges.isEmpty ? nil : CutPreview(ranges: ranges, kind: .restore)
+        case .removeSplit(let rightID):
+            guard let right = s.first(where: { $0.id == rightID }),
+                  join(s, atBoundaryOf: rightID) != s else { return nil }
+            return CutPreview(ranges: [], kind: .merge, removingSplitAt: right.start)
+        case .hideSegmentID(let id):
+            guard let seg = s.first(where: { $0.id == id }),
+                  setHidden(s, id: id, true) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .cut)
+        case .restoreSegmentID(let id):
+            guard let seg = s.first(where: { $0.id == id }), seg.hidden,
+                  setHidden(s, id: id, false) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .restore)
         }
     }
 }

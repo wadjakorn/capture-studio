@@ -240,4 +240,32 @@ import Foundation
         #expect(TimelineSegments.preview(for: .trimStart, segments: [], at: 0, duration: 10) == nil)
         #expect(TimelineSegments.preview(for: .cutSegment, segments: [], at: 5, duration: 10) == nil)
     }
+
+    @Test func joinMergesVisibleNeighboursKeepingLeftId() {
+        let s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        let j = TimelineSegments.join(s, atBoundaryOf: s[1].id)
+        #expect(j.count == 1); #expect(j[0].id == s[0].id); #expect(j[0].start == 0 && j[0].end == 10 && !j[0].hidden)
+    }
+    @Test func joinRefusedForMixedFlagsFirstSegmentAndUnknownId() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<4)   // [0,4)h [4,10)
+        #expect(TimelineSegments.join(s, atBoundaryOf: s[1].id) == s)
+        #expect(TimelineSegments.join(s, atBoundaryOf: s[0].id) == s)
+        #expect(TimelineSegments.join(s, atBoundaryOf: UUID()) == s)
+    }
+    @Test func previewRemoveSplitIsMergeMarker() {
+        let s = TimelineSegments.split(TimelineSegments.full(duration: 10), at: 4).segments
+        let p = TimelineSegments.preview(for: .removeSplit(rightID: s[1].id), segments: s, at: 0, duration: 10)
+        #expect(p == CutPreview(ranges: [], kind: .merge, removingSplitAt: 4))
+        let mixed = TimelineSegments.cut(s, range: 0..<4)
+        #expect(TimelineSegments.preview(for: .removeSplit(rightID: mixed[1].id), segments: mixed, at: 0, duration: 10) == nil)
+    }
+    @Test func previewHideSegmentIDNilForLastVisible() {
+        let s = TimelineSegments.cut(TimelineSegments.full(duration: 10), range: 0..<4)
+        #expect(TimelineSegments.preview(for: .hideSegmentID(s[1].id), segments: s, at: 0, duration: 10) == nil)
+        #expect(TimelineSegments.preview(for: .restoreSegmentID(s[0].id), segments: s, at: 9, duration: 10)
+                == CutPreview(ranges: [0..<4], kind: .restore))
+        let two = TimelineSegments.split(s, at: 7).segments
+        #expect(TimelineSegments.preview(for: .hideSegmentID(two[1].id), segments: two, at: 0, duration: 10)
+                == CutPreview(ranges: [4..<7], kind: .cut))
+    }
 }

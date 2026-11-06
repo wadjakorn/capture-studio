@@ -19,6 +19,14 @@ struct CutPreviewOverlay: View {
 
     @ViewBuilder private func content(_ preview: CutPreview) -> some View {
         let isCut = preview.kind == .cut
+        let isMerge = preview.kind == .merge
+        let markerAt = isMerge ? preview.removingSplitAt : preview.pendingSplitAt
+        let markerColor: Color = isMerge ? .accentColor : .primary
+        let tint: Color = switch preview.kind {
+        case .cut: .red
+        case .restore: .green
+        case .merge: .clear
+        }
         switch style {
         case .lane:
             ZStack(alignment: .leading) {
@@ -26,14 +34,14 @@ struct CutPreviewOverlay: View {
                     let x0 = px(r.lowerBound)
                     let w = max(0, px(r.upperBound) - x0)
                     Rectangle()
-                        .fill((isCut ? Color.red : Color.green).opacity(isCut ? 0.28 : 0.25))
+                        .fill(tint.opacity(isCut ? 0.28 : 0.25))
                         .overlay(
-                            Rectangle().strokeBorder((isCut ? Color.red : Color.green).opacity(0.8), lineWidth: 1)
+                            Rectangle().strokeBorder(tint.opacity(0.8), lineWidth: 1)
                         )
                         .frame(width: w, height: 10)
                         .offset(x: x0)
                 }
-                if let at = preview.pendingSplitAt {
+                if let at = markerAt {
                     // Dashed vertical line at the would-be split, full lane height.
                     GeometryReader { g in
                         let x = px(at)
@@ -41,7 +49,7 @@ struct CutPreviewOverlay: View {
                             p.move(to: CGPoint(x: x, y: 0))
                             p.addLine(to: CGPoint(x: x, y: g.size.height))
                         }
-                        .stroke(Color.primary, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+                        .stroke(markerColor, style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
                     }
                 }
             }
