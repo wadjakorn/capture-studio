@@ -57,7 +57,8 @@ final class StudioModel: ObservableObject {
     /// (`player` stays nil).
     func loadForTests(duration: Double, segments: [TimelineSegment] = []) {
         self.duration = duration
-        self.segments = segments.isEmpty ? [] : TimelineSegments.normalized(segments, duration: duration)
+        self.segments = segments.isEmpty ? []
+            : TimelineSegments.uncutIfSingleVisible(TimelineSegments.normalized(segments, duration: duration))
         self.currentTime = 0
         history.reset(to: currentEdit())
     }
@@ -625,7 +626,8 @@ final class StudioModel: ObservableObject {
         // Empty stays empty (uncut); a stored partition is renormalized onto
         // the current duration (which may have changed since it was saved).
         segments = edit.segments.isEmpty ? []
-            : TimelineSegments.normalized(edit.segments, duration: duration)
+            : TimelineSegments.uncutIfSingleVisible(
+                TimelineSegments.normalized(edit.segments, duration: duration))
         frameEnabled = edit.frameEnabled
         let frame = FrameMath.clamped(centerX: edit.frameCenterX,
                                       centerY: edit.frameCenterY,
@@ -1469,7 +1471,7 @@ final class StudioModel: ObservableObject {
     /// Popover items for the split mark at the start of segment `rightID`; nil
     /// when uncut or `rightID` is not a boundary.
     func splitMarkItems(rightID: UUID) -> [SplitMarkItem]? {
-        guard !segments.isEmpty else { return nil }
+        guard !isExporting, !segments.isEmpty else { return nil }
         return SplitMarkMenu.items(segments: effectiveSegments, rightID: rightID)
     }
 
@@ -1487,7 +1489,7 @@ final class StudioModel: ObservableObject {
     /// collapsed composition — the cuts are skipped seamlessly with no seek.
     /// A single visible segment is the uncut timeline, stored as `[]`.
     private func setSegments(_ list: [TimelineSegment]) {
-        segments = (list.count == 1 && !list[0].hidden) ? [] : list
+        segments = TimelineSegments.uncutIfSingleVisible(list)
         syncPreviewToCuts()
         saveEdit()
     }

@@ -195,4 +195,19 @@ struct StudioModelCutTests {
         m.perform(.removeSplit(rightID: before[1].id))
         #expect(m.segments == before)
     }
+
+    @Test func splitMarkItemsNilWhileExporting() {
+        let m = model()
+        m.seek(to: 4); m.splitAtPlayhead()
+        let id = m.segments[1].id
+        #expect(m.splitMarkItems(rightID: id) != nil)
+        m.beginExportLockForTests()
+        #expect(m.splitMarkItems(rightID: id) == nil)
+    }
+
+    @Test func loadSingleVisibleSegmentIsUncut() {
+        let m = StudioModel(bundleURL: URL(fileURLWithPath: "/tmp/cut-test-single.capturestudio"))
+        m.loadForTests(duration: 10, segments: [TimelineSegment(start: 0, end: 10)])
+        #expect(m.segments.isEmpty); #expect(!m.canResetSegments)
+    }
 }

@@ -268,4 +268,12 @@ import Foundation
         #expect(TimelineSegments.preview(for: .hideSegmentID(two[1].id), segments: two, at: 0, duration: 10)
                 == CutPreview(ranges: [4..<7], kind: .cut))
     }
+
+    @Test func uncutIfSingleVisibleCollapsesOnlyTheTrivialList() {
+        let full = TimelineSegments.full(duration: 10)
+        #expect(TimelineSegments.uncutIfSingleVisible(full).isEmpty)
+        let cut = TimelineSegments.cut(full, range: 0..<4)
+        #expect(TimelineSegments.uncutIfSingleVisible(cut) == cut)
+        #expect(TimelineSegments.uncutIfSingleVisible([]).isEmpty)
+    }
 }

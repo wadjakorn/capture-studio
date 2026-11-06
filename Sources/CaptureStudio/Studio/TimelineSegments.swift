@@ -62,9 +62,16 @@ enum TimelineSegments {
         return out.isEmpty ? full(duration: dur) : coalescedHidden(out)
     }
 
+    /// The uncut representation is `[]`: a list that is exactly one visible segment
+    /// collapses to it; anything else is returned as-is.
+    static func uncutIfSingleVisible(_ segments: [TimelineSegment]) -> [TimelineSegment] {
+        (segments.count == 1 && !segments[0].hidden) ? [] : segments
+    }
+
     /// Sort, then merge each maximal run of consecutive hidden segments into one
     /// `[run.first.start, run.last.end)` segment keeping the first segment's id.
-    /// Visible segments are untouched. Idempotent; returns the input when nothing merges.
+    /// Visible segments are untouched. Idempotent; returns the input instance (unsorted if it was unsorted) when
+    /// nothing merges; callers always pass sorted lists.
     static func coalescedHidden(_ segments: [TimelineSegment]) -> [TimelineSegment] {
         let sorted = segments.sorted { $0.start < $1.start }
         var out: [TimelineSegment] = []

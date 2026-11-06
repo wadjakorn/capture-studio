@@ -47,7 +47,7 @@ enum LegacyTrimMigration {
         e.committedTrimEnd = nil
         e.trimIn = 0
         e.trimOut = nil
-        e.segments = (segs.count == 1 && !segs[0].hidden) ? [] : segs
+        e.segments = TimelineSegments.uncutIfSingleVisible(segs)
         return e
     }
 }

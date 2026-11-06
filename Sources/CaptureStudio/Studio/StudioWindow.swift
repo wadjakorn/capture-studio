@@ -411,11 +411,8 @@ struct StudioView: View {
         }
         .frame(height: 18)
         .onChange(of: openSplitID) { _, id in
-            if id != nil {
-                if model.isPlaying { model.togglePlay() }
-            } else {
-                model.hoverAction = nil
-            }
+            model.hoverAction = nil
+            if id != nil, model.isPlaying { model.togglePlay() }
         }
         .onChange(of: model.segments) { _, segments in
             // The open/hovered mark vanished (merged, undone, trimmed away): close its
