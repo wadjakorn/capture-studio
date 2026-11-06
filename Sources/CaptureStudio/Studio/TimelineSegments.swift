@@ -3,9 +3,10 @@ import Foundation
 /// One piece of the master timeline produced by splitting. Segments partition the
 /// whole timeline `[0, duration]` contiguously (`segment[i].end == segment[i+1].start`,
 /// first `start == 0`, last `end == duration`). `hidden` marks a segment cut from
-/// the output — non-destructively, exactly like the live `trimIn`/`trimOut` markers:
+/// the output — non-destructively:
 /// nothing is removed from the masters or the blocks, the cut is just stored and
 /// applied at play/export time and can be restored (`hidden = false`) or reset.
+/// Adjacent hidden segments are always merged (`TimelineSegments.coalescedHidden`).
 struct TimelineSegment: Codable, Equatable, Identifiable {
     var id: UUID = UUID()
     var start: Double
@@ -58,26 +59,50 @@ enum TimelineSegments {
             }
         }
         if dur - cursor > 1e-9 { out.append(TimelineSegment(start: cursor, end: dur)) }
-        return out.isEmpty ? full(duration: dur) : out
+        return out.isEmpty ? full(duration: dur) : coalescedHidden(out)
+    }
+
+    /// The uncut representation is `[]`: a list that is exactly one visible segment
+    /// collapses to it; anything else is returned as-is.
+    static func uncutIfSingleVisible(_ segments: [TimelineSegment]) -> [TimelineSegment] {
+        (segments.count == 1 && !segments[0].hidden) ? [] : segments
+    }
+
+    /// Sort, then merge each maximal run of consecutive hidden segments into one
+    /// `[run.first.start, run.last.end)` segment keeping the first segment's id.
+    /// Visible segments are untouched. Idempotent; returns the input instance (unsorted if it was unsorted) when
+    /// nothing merges; callers always pass sorted lists.
+    static func coalescedHidden(_ segments: [TimelineSegment]) -> [TimelineSegment] {
+        let sorted = segments.sorted { $0.start < $1.start }
+        var out: [TimelineSegment] = []
+        for seg in sorted {
+            if seg.hidden, let last = out.last, last.hidden {
+                out[out.count - 1].end = seg.end
+            } else {
+                out.append(seg)
+            }
+        }
+        return out.count == segments.count ? segments : out
     }
 
     /// True when a split at `t` would land strictly inside a segment with at least
     /// `minWidth` on each side (drives the Split control's enabled state).
     static func canSplit(_ segments: [TimelineSegment], at t: Double,
                          minWidth: Double = splitMinWidth) -> Bool {
-        segments.contains { $0.start < t && t < $0.end
+        segments.contains { !$0.hidden && $0.start < t && t < $0.end
             && t - $0.start >= minWidth && $0.end - t >= minWidth }
     }
 
     /// Split the segment spanning `t` into two touching segments at `t`. The left
     /// half keeps the original id (and hidden flag); the right half gets a new id
-    /// (returned so the caller can select it) and inherits the hidden flag. No-op
-    /// (nil id) when no segment strictly spans `t` or either piece would be narrower
-    /// than `minWidth`.
+    /// (returned so the caller can select it). No-op (nil id) when no segment
+    /// strictly spans `t`, the spanning segment is hidden (refused inside a hidden
+    /// segment), or either piece would be narrower than `minWidth`.
     static func split(_ segments: [TimelineSegment], at t: Double,
                       minWidth: Double = splitMinWidth) -> (segments: [TimelineSegment], id: UUID?) {
         let sorted = segments.sorted { $0.start < $1.start }
         guard let i = sorted.firstIndex(where: { $0.start < t && t < $0.end }),
+              !sorted[i].hidden,
               t - sorted[i].start >= minWidth,
               sorted[i].end - t >= minWidth else { return (sorted, nil) }
         var left = sorted[i]; left.end = t
@@ -99,8 +124,24 @@ enum TimelineSegments {
         -> [TimelineSegment] {
         guard segments.contains(where: { $0.id == id }) else { return segments }
         if hidden && visibleCount(segments.filter { $0.id != id }) == 0 { return segments }
-        return segments.map { $0.id == id ? TimelineSegment(id: $0.id, start: $0.start,
-                                                            end: $0.end, hidden: hidden) : $0 }
+        let out = segments.map { $0.id == id ? TimelineSegment(id: $0.id, start: $0.start,
+                                                               end: $0.end, hidden: hidden) : $0 }
+        return hidden ? coalescedHidden(out) : out
+    }
+
+    /// Remove the split mark at the left edge of segment `rightID`, merging it with
+    /// its left neighbour (keeps the left id and flag). Refused (input returned) when
+    /// `rightID` is first, unknown, or the neighbours' hidden flags differ.
+    static func join(_ segments: [TimelineSegment], atBoundaryOf rightID: UUID)
+        -> [TimelineSegment] {
+        guard let i = segments.firstIndex(where: { $0.id == rightID }), i > 0,
+              segments[i - 1].hidden == segments[i].hidden else { return segments }
+        let left = segments[i - 1]
+        var out = segments
+        out[i - 1] = TimelineSegment(id: left.id, start: left.start,
+                                     end: segments[i].end, hidden: left.hidden)
+        out.remove(at: i)
+        return out
     }
 
     /// The hidden runs merged into `[begin, end)` ranges (adjacent hidden segments
@@ -122,5 +163,122 @@ enum TimelineSegments {
     /// during playback by seeking to its `upperBound`.
     static func hiddenRange(containing t: Double, in segments: [TimelineSegment]) -> Range<Double>? {
         cutRanges(segments).first { $0.lowerBound <= t && t < $0.upperBound }
+    }
+
+    /// Hide `[range.lowerBound, range.upperBound)`: split at each bound that lies
+    /// strictly inside a segment (a bound within `minWidth` of an existing
+    /// boundary snaps to that boundary instead of splitting), then mark every
+    /// segment fully inside the (snapped) range hidden. Returns the input
+    /// unchanged when the range is empty after snapping or when no visible
+    /// segment would remain. A bound inside a hidden run no longer splits; the run
+    /// simply absorbs the cut: `[0,4)h [4,10)` cut `2..<6` → `[0,6)h [6,10)`, cut
+    /// `2..<3` → unchanged.
+    static func cut(_ segments: [TimelineSegment], range: Range<Double>,
+                    minWidth: Double = splitMinWidth) -> [TimelineSegment] {
+        /// Snap `b` to a nearby boundary, else split there (when allowed).
+        func apply(_ b: Double, _ segs: [TimelineSegment]) -> (Double, [TimelineSegment]) {
+            let bounds = segs.flatMap { [$0.start, $0.end] }
+            if let x = bounds.first(where: { abs($0 - b) < minWidth }) { return (x, segs) }
+            return (b, split(segs, at: b, minWidth: minWidth).segments)
+        }
+        let (lo, afterLo) = apply(range.lowerBound, segments.sorted { $0.start < $1.start })
+        let (hi, afterHi) = apply(range.upperBound, afterLo)
+        guard hi - lo > 1e-9 else { return segments }
+        let out = afterHi.map { seg -> TimelineSegment in
+            guard seg.start >= lo - 1e-9, seg.end <= hi + 1e-9 else { return seg }
+            return TimelineSegment(id: seg.id, start: seg.start, end: seg.end, hidden: true)
+        }
+        return visibleCount(out) == 0 ? segments : coalescedHidden(out)
+    }
+
+    /// First and last visible instants: `(start, end)` with `start` = end of a
+    /// leading hidden run (else 0), `end` = start of a trailing hidden run
+    /// (else `duration`).
+    static func visibleBounds(_ segments: [TimelineSegment], duration: Double)
+        -> (start: Double, end: Double) {
+        let sorted = segments.sorted { $0.start < $1.start }
+        guard let first = sorted.firstIndex(where: { !$0.hidden }),
+              let last = sorted.lastIndex(where: { !$0.hidden }) else { return (0, duration) }
+        return (first == 0 ? 0 : sorted[first].start,
+                last == sorted.count - 1 ? duration : sorted[last].end)
+    }
+}
+
+/// A cut-type transport action whose effect can be previewed on the timeline
+/// while its button is hovered.
+enum CutAction: Equatable {
+    case cutSegment, restoreSegment, trimStart, trimEnd, clearAll
+    /// Id-based variants: act on a specific segment, independent of the playhead.
+    case removeSplit(rightID: UUID), hideSegmentID(UUID), restoreSegmentID(UUID)
+}
+
+/// What a hovered `CutAction` would do: the ranges it would hide (`.cut`) or
+/// reveal (`.restore`), plus any split it would have to create first.
+struct CutPreview: Equatable {
+    enum Kind { case cut, restore, merge }
+    var ranges: [Range<Double>]
+    var kind: Kind
+    /// A split that the action would create (not yet a boundary) — drawn as a marker.
+    var pendingSplitAt: Double?
+    /// A split mark that the action would remove (`.merge`) — drawn as a marker.
+    var removingSplitAt: Double? = nil
+}
+
+extension TimelineSegments {
+    /// Preview of `action` applied at playhead `t`. nil when the action would
+    /// change nothing (mirrors the button's disabled state). An empty `segments`
+    /// list is the implicit single full segment.
+    static func preview(for action: CutAction, segments: [TimelineSegment],
+                        at t: Double, duration: Double) -> CutPreview? {
+        // Materialise once: `full(duration:)` mints a fresh id per call, so every
+        // "did it change?" comparison below must be against this same instance.
+        let s = (segments.isEmpty ? full(duration: duration) : segments)
+            .sorted { $0.start < $1.start }
+        let dur = max(0, duration)
+        let t = min(max(t, 0), dur)
+        let bounds = s.flatMap { [$0.start, $0.end] }
+        /// Mirrors `cut`'s snapping: a bound within `splitMinWidth` of an existing
+        /// boundary lands on it instead of splitting.
+        func snapped(_ b: Double) -> (value: Double, isBoundary: Bool) {
+            if let x = bounds.first(where: { abs($0 - b) < splitMinWidth }) { return (x, true) }
+            return (b, false)
+        }
+        let under = s.first { $0.start <= t && t < $0.end }
+
+        switch action {
+        case .cutSegment:
+            guard let seg = under, !seg.hidden,
+                  setHidden(s, id: seg.id, true) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .cut)
+        case .restoreSegment:
+            guard let seg = under, seg.hidden,
+                  setHidden(s, id: seg.id, false) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .restore)
+        case .trimStart:
+            guard cutRanges(cut(s, range: 0 ..< t)) != cutRanges(s) else { return nil }
+            let hi = snapped(t)
+            return CutPreview(ranges: [snapped(0).value ..< hi.value], kind: .cut,
+                              pendingSplitAt: hi.isBoundary ? nil : t)
+        case .trimEnd:
+            guard cutRanges(cut(s, range: t ..< dur)) != cutRanges(s) else { return nil }
+            let lo = snapped(t)
+            return CutPreview(ranges: [lo.value ..< snapped(dur).value], kind: .cut,
+                              pendingSplitAt: lo.isBoundary ? nil : t)
+        case .clearAll:
+            let ranges = cutRanges(s)
+            return ranges.isEmpty ? nil : CutPreview(ranges: ranges, kind: .restore)
+        case .removeSplit(let rightID):
+            guard let right = s.first(where: { $0.id == rightID }),
+                  join(s, atBoundaryOf: rightID) != s else { return nil }
+            return CutPreview(ranges: [], kind: .merge, removingSplitAt: right.start)
+        case .hideSegmentID(let id):
+            guard let seg = s.first(where: { $0.id == id }),
+                  setHidden(s, id: id, true) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .cut)
+        case .restoreSegmentID(let id):
+            guard let seg = s.first(where: { $0.id == id }), seg.hidden,
+                  setHidden(s, id: id, false) != s else { return nil }
+            return CutPreview(ranges: [seg.start ..< seg.end], kind: .restore)
+        }
     }
 }

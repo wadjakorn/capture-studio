@@ -7,6 +7,10 @@ struct StudioView: View {
     @State private var activeTab: RailTab = .frame
     @State private var timelineScroll = ScrollPosition(edge: .leading)
     @State private var timelineScrollX: CGFloat = 0
+    /// Split mark (by right-hand segment id) whose popover is open on the lane.
+    @State private var openSplitID: UUID?
+    /// Split mark (by right-hand segment id) under the pointer on the lane.
+    @State private var hoveredSplitID: UUID?
 
     init(bundleURL: URL) {
         _model = StateObject(wrappedValue: StudioModel(bundleURL: bundleURL))
@@ -92,6 +96,8 @@ struct StudioView: View {
             }
             // Block window close while exporting (minimize stays allowed).
             StudioWindowCloseGuard(isExporting: { model.isExporting })
+            // ⌘Z / ⇧⌘Z → edit history (text fields keep their own undo).
+            UndoKeyCatcher(model: model)
         }
     }
 
@@ -200,6 +206,9 @@ struct StudioView: View {
                             laneTrack(lane, contentWidth: contentWidth)
                                 .frame(width: contentWidth, height: laneHeight(lane), alignment: .leading)
                         }
+                    }
+                    .overlay(alignment: .topLeading) {
+                        CutPreviewOverlay(preview: model.hoverPreview, duration: model.duration, width: contentWidth, style: .dim)
                     }
                 }
                 .scrollPosition($timelineScroll)
@@ -338,13 +347,12 @@ struct StudioView: View {
                 RoundedRectangle(cornerRadius: 3)
                     .fill(.quaternary)
                     .frame(height: 6)
-                // Kept (trimmed) region.
+                // Full timeline (cuts are greyed over it below).
                 if model.duration > 0 {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(.tint)
-                        .frame(width: max(0, fraction(model.trimOut - model.trimIn) * width), height: 6)
-                        .offset(x: fraction(model.trimIn) * width)
-                    // Cut (hidden) segments: greyed over the kept region; split
+                        .frame(width: width, height: 6)
+                    // Cut (hidden) segments: greyed over the timeline; split
                     // boundaries: hairline ticks. Non-destructive — Reset restores.
                     ForEach(model.segments) { seg in
                         if seg.hidden {
@@ -354,17 +362,20 @@ struct StudioView: View {
                                 .offset(x: fraction(seg.start) * width)
                         }
                         if seg.start > 0.0001 {
+                            let active = seg.id == hoveredSplitID || seg.id == openSplitID
                             Rectangle()
-                                .fill(.secondary)
-                                .frame(width: 1, height: 10)
-                                .offset(x: fraction(seg.start) * width)
+                                .fill(active ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                                .frame(width: active ? 3 : 1, height: 10)
+                                .offset(x: fraction(seg.start) * width - (active ? 1 : 0))
                         }
                     }
+                    CutPreviewOverlay(preview: model.hoverPreview, duration: model.duration, width: width, style: .lane)
                     // Playhead.
                     Rectangle()
                         .fill(.primary)
                         .frame(width: 2, height: 16)
                         .offset(x: fraction(model.currentTime) * width - 1)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(maxHeight: .infinity)
@@ -376,8 +387,63 @@ struct StudioView: View {
                         model.seek(to: t)
                     }
             )
+            // Split-mark hit targets sit above the seek gesture view, so a press on a
+            // mark is hit-tested here and never reaches the seek drag.
+            .overlay(alignment: .leading) {
+                if model.duration > 0 {
+                    let marks = model.segments.filter { $0.start > 0.0001 }
+                    let xs = marks.map { fraction($0.start) * width }
+                    let rects = SplitMarkHitTest.rects(xs: xs, width: width)
+                    ForEach(Array(marks.enumerated()), id: \.element.id) { i, seg in
+                        Color.clear
+                            .frame(width: rects[i].upperBound - rects[i].lowerBound, height: 18)
+                            .contentShape(Rectangle())
+                            .pointerStyle(.link)                       // macOS 15: no NSCursor push/pop to balance
+                            .onHover { hoveredSplitID = $0 ? seg.id : (hoveredSplitID == seg.id ? nil : hoveredSplitID) }
+                            .onTapGesture { openSplitID = seg.id }
+                            .popover(isPresented: Binding(get: { openSplitID == seg.id },
+                                                          set: { if !$0, openSplitID == seg.id { openSplitID = nil } }),
+                                     arrowEdge: .bottom) { splitMarkPopover(rightID: seg.id) }
+                            .offset(x: rects[i].lowerBound)
+                    }
+                }
+            }
         }
         .frame(height: 18)
+        .onChange(of: openSplitID) { _, id in
+            model.hoverAction = nil
+            if id != nil, model.isPlaying { model.togglePlay() }
+        }
+        .onChange(of: model.segments) { _, segments in
+            // The open/hovered mark vanished (merged, undone, trimmed away): close its
+            // popover and drop the hover (its onHover(false) never fires once removed).
+            let boundaries = segments.dropFirst()
+            if let openSplitID, !boundaries.contains(where: { $0.id == openSplitID }) {
+                self.openSplitID = nil
+            }
+            if let hoveredSplitID, !boundaries.contains(where: { $0.id == hoveredSplitID }) {
+                self.hoveredSplitID = nil
+            }
+        }
+    }
+
+    /// Per-mark actions for the split whose right-hand segment is `rightID`.
+    private func splitMarkPopover(rightID: UUID) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(model.splitMarkItems(rightID: rightID) ?? []) { item in
+                Button(item.title) {
+                    model.perform(item.action)
+                    openSplitID = nil
+                }
+                .disabled(!item.enabled)
+                .help(item.help ?? "")
+                .onHover { model.hoverAction = $0 ? item.action : nil }
+            }
+        }
+        .padding(8)
+        .onAppear {
+            if model.splitMarkItems(rightID: rightID) == nil { openSplitID = nil }
+        }
     }
 
     private func fraction(_ seconds: Double) -> CGFloat {

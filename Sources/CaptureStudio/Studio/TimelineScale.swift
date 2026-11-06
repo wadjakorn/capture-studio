@@ -14,6 +14,15 @@ enum TimelineScale {
     /// scroll view / geometry handles sanely.
     static let maxZoom = 60.0
 
+    /// `mm:ss.s` timecode (e.g. `01:04.5`); non-finite or negative input → `00:00.0`.
+    static func timecode(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "00:00.0" }
+        let total = max(0, seconds)
+        let minutes = Int(total) / 60
+        let secs = total - Double(minutes * 60)
+        return String(format: "%02d:%04.1f", minutes, secs)
+    }
+
     static func clampZoom(_ zoom: Double) -> Double {
         min(max(zoom, minZoom), maxZoom)
     }

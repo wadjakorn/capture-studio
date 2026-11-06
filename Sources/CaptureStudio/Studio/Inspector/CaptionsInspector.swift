@@ -161,7 +161,11 @@ enum CaptionsInspector {
                         .foregroundStyle(.secondary)
                     Stepper("", value: Binding(
                         get: { Double(px) },
-                        set: { model.setTextFontSize($0 / h); model.commitTextEdit() }
+                        set: {
+                            model.setTextFontSize($0 / h)
+                            // One undo step per auto-repeat run on this block.
+                            model.commitTextEdit(coalescing: block.map { "textFontSize:\($0.id.uuidString)" })
+                        }
                     ), in: 1...(h * 0.5), step: 1)
                     .labelsHidden()
                 }

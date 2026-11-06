@@ -687,19 +687,10 @@ struct SubtitleTrack: Codable, Equatable {
 /// All edits are metadata — master files are never mutated.
 struct EditState: Codable, Equatable {
     var schemaVersion: Int = 1
-    /// Trim in-point, seconds on the (already-committed) studio timeline. These
-    /// are the live, reversible export markers — distinct from the committed cut
-    /// below.
+    /// Legacy (pre split-&-cut trim). Decoded for migration by LegacyTrimMigration; the app never sets these anymore.
     var trimIn: Double = 0
-    /// Trim out-point; nil means end of the timeline.
     var trimOut: Double?
-    /// Committed trim window, absolute seconds in the master source. The studio
-    /// timeline is the masters cut to `[committedTrimStart, committedTrimEnd)`:
-    /// the loader re-derives the trimmed composition from these and every block
-    /// below is stored relative to `committedTrimStart` (t = 0). `committedTrimEnd
-    /// == nil` means "to the master end". Default 0 / nil = no committed trim, so
-    /// legacy bundles (blocks in absolute source time) load unchanged. Applying a
-    /// trim (TrimTimeline.apply) narrows this window and rebases the blocks.
+    /// Legacy (pre split-&-cut trim). Decoded for migration by LegacyTrimMigration; the app never sets these anymore.
     var committedTrimStart: Double = 0
     var committedTrimEnd: Double? = nil
     /// Camera PiP overlay. Position is the PiP center, normalized 0–1 in

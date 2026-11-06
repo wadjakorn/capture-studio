@@ -30,40 +30,6 @@ final class StudioModel: ObservableObject {
     /// Transient: while true, dragging the preview pans the reframed video
     /// (see CropPanOverlay). Not persisted; reset when the reframe isn't pannable.
     @Published var panVideoMode = false
-    @Published private(set) var trimIn: Double = 0
-    @Published private(set) var trimOut: Double = 0
-    /// Committed trim window in absolute master seconds (the masters are cut to
-    /// `[committedTrimStart, committedTrimEnd)` to form this timeline). `nil` end
-    /// = master end. Persisted; drives composition re-derivation on load and is
-    /// narrowed by `applyTrim()`. See `TrimTimeline`.
-    private(set) var committedTrimStart: Double = 0
-    private(set) var committedTrimEnd: Double? = nil
-    /// One-level undo snapshot of the whole edit state captured right before the
-    /// last `applyTrim()`. `resetTrim()` restores it, bringing the full (un-cut)
-    /// timeline and every block/cursor edit back. Session-only (in-memory);
-    /// cleared once consumed. `nil` when no applied trim is pending undo.
-    private var trimUndo: TrimUndoState? = nil
-    /// Everything `applyTrim()` mutates, so `resetTrim()` can put it all back.
-    /// `composition` is a `mutableCopy()` of the pre-trim composition (edit lists
-    /// only — no re-encode), so swapping it back restores the full-length video.
-    private struct TrimUndoState {
-        var composition: AVMutableComposition
-        var committedTrimStart: Double
-        var committedTrimEnd: Double?
-        var duration: Double
-        var cameraBlocks: [CameraBlock]
-        var layoutBlocks: [LayoutBlock]
-        var zoomBlocks: [ZoomBlock]
-        var textBlocks: [TextBlock]
-        var shapeBlocks: [ShapeBlock]
-        var subtitles: SubtitleTrack?
-        var cursorSamples: [CursorSample]
-        var clickSamples: [ClickSample]
-        var segments: [TimelineSegment]
-    }
-    /// True once any in/out markers carve a sub-range of the current timeline —
-    /// gates the "Apply Trim" affordance.
-    var canApplyTrim: Bool { trimIn > 0.001 || trimOut < duration - 0.001 }
     @Published private(set) var exportState: ExportState = .idle
     /// True while an export runs. The editor hard-locks: every mutating control
     /// is disabled and the window refuses to close until the export finishes or
@@ -75,11 +41,27 @@ final class StudioModel: ObservableObject {
     }
     /// The running export task, retained so `cancelExport` can stop it.
     private var exportTask: Task<Void, Never>?
+    /// In-memory undo/redo stack of saved edits (never persisted). `saveEdit()`
+    /// records every committed change; `@Published` so the undo/redo controls
+    /// refresh. Reset on load.
+    @Published private var history = EditHistory(initial: EditState())
+    var canUndo: Bool { !isExporting && history.canUndo }
+    var canRedo: Bool { !isExporting && history.canRedo }
 
     #if DEBUG
     /// Test seam: enter the export lock without running a real AVFoundation
     /// export (which needs a loaded composition). Used only by unit tests.
     func beginExportLockForTests() { exportState = .exporting(0) }
+
+    /// Test seam: set duration/segments/playhead without touching AVFoundation
+    /// (`player` stays nil).
+    func loadForTests(duration: Double, segments: [TimelineSegment] = []) {
+        self.duration = duration
+        self.segments = segments.isEmpty ? []
+            : TimelineSegments.uncutIfSingleVisible(TimelineSegments.normalized(segments, duration: duration))
+        self.currentTime = 0
+        history.reset(to: currentEdit())
+    }
     #endif
 
     // Camera PiP — center normalized 0–1 in render space, scale = width
@@ -536,35 +518,11 @@ final class StudioModel: ObservableObject {
             }
             let meta = try bundle.loadMeta()
             let built = try await Self.makeComposition(bundle: bundle, meta: meta)
-            let edit = bundle.loadEdit()
-            // Re-derive the trimmed timeline: cut the masters down to the
-            // committed window before anything observes the composition. Blocks
-            // and cursor samples are then expressed relative to this window's
-            // t = 0 (committedTrimStart). No re-encode — removeTimeRange edits
-            // the composition's edit lists.
-            let fullDuration = built.composition.duration.seconds
-            committedTrimStart = max(0, min(edit.committedTrimStart, fullDuration))
-            let committedEnd = min(edit.committedTrimEnd ?? fullDuration, fullDuration)
-            // Clamp to the master length so the in-memory window can't exceed the
-            // composition we actually cut; keep nil ("to master end") as nil.
-            committedTrimEnd = edit.committedTrimEnd.map { min($0, fullDuration) }
-            // Remove the tail first, then the head: the tail range sits at higher
-            // timestamps, so cutting it leaves the head range's coordinates (at
-            // t = 0) untouched. Cutting the head first would shift everything left
-            // and invalidate the still-absolute tail coordinates.
-            if committedEnd > committedTrimStart,
-               committedTrimStart > 0.001 || committedEnd < fullDuration - 0.001 {
-                if committedEnd < fullDuration - 0.001 {
-                    built.composition.removeTimeRange(CMTimeRange(
-                        start: CMTime(seconds: committedEnd, preferredTimescale: 600),
-                        end: CMTime(seconds: fullDuration, preferredTimescale: 600)))
-                }
-                if committedTrimStart > 0.001 {
-                    built.composition.removeTimeRange(CMTimeRange(
-                        start: .zero,
-                        end: CMTime(seconds: committedTrimStart, preferredTimescale: 600)))
-                }
-            }
+            // Legacy committed trim / In-Out markers become hidden segments on the
+            // full master timeline (blocks rebased by the migration), so the
+            // composition is always the uncut masters.
+            let edit = LegacyTrimMigration.migrate(
+                bundle.loadEdit(), masterDuration: built.composition.duration.seconds)
             let item = AVPlayerItem(asset: built.composition)
             let player = AVPlayer(playerItem: item)
 
@@ -582,69 +540,14 @@ final class StudioModel: ObservableObject {
             self.player = player
             self.duration = built.composition.duration.seconds
 
-            trimIn = min(max(0, edit.trimIn), duration)
-            trimOut = min(edit.trimOut ?? duration, duration)
-            if trimOut <= trimIn { trimIn = 0; trimOut = duration }
-            cameraHomeLayout = edit.cameraHomeLayout
-            cameraCenterX = edit.cameraCenterX
-            cameraCenterY = edit.cameraCenterY
-            cameraScale = edit.cameraScale
-            cameraZoom = min(max(1, edit.cameraZoom), 4)
-            cameraFeedX = min(max(0, edit.cameraFeedX), 1)
-            cameraFeedY = min(max(0, edit.cameraFeedY), 1)
-            cameraShape = edit.cameraShape
-            cameraCornerRadius = min(max(0, edit.cameraCornerRadius), 1)
-            cameraBorderWidth = min(max(0, edit.cameraBorderWidth), 0.1)
-            cameraBorderHex = edit.cameraBorderHex
-            cameraShadow = edit.cameraShadow
-            cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
-            cameraAspect = edit.cameraAspect
-            cameraRotation = ((edit.cameraRotation / 90 % 4) + 4) % 4 * 90
-            micVolume = min(max(0, edit.micVolume), 3)
-            systemVolume = min(max(0, edit.systemVolume), 1)
-            showCursor = edit.showCursor
-            clickFeedback = edit.clickFeedback
+            applyEdit(edit)
             loadOverlayData(display: meta.display)
-            cropAspect = edit.cropAspect
-            cropCenterX = min(max(0, edit.cropCenterX), 1)
-            cropCenterY = min(max(0, edit.cropCenterY), 1)
-            cropZoom = min(max(0.2, edit.cropZoom), 1)
-            canvasBackground = edit.canvasBackground
-            canvasBackgroundBlur = min(max(0, edit.canvasBackgroundBlur), 0.2)
-            canvasBackgroundImage = edit.canvasBackgroundImage
-            loadBackgroundImage()
-            cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
-            // Stored verbatim — array order is the z-order, never re-sorted.
-            textBlocks = edit.textBlocks
-            shapeBlocks = edit.shapeBlocks
-            // Keep cues raw; the offset is applied at consumption. A track whose
-            // cues all fall outside the clip (after offset) loads as no subtitles
-            // (the .srt file is left in the bundle).
-            if let track = edit.subtitles {
-                let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
-                                                           duration: duration)
-                subtitles = surviving.isEmpty ? nil
-                    : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
-                                    cues: track.cues, offset: track.offset)
-            }
-            zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
-            layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
-            // Empty stays empty (uncut); a stored partition is renormalized onto
-            // the current duration (which may have changed since it was saved).
-            segments = edit.segments.isEmpty ? []
-                : TimelineSegments.normalized(edit.segments, duration: duration)
-            frameEnabled = edit.frameEnabled
-            let frame = FrameMath.clamped(centerX: edit.frameCenterX,
-                                          centerY: edit.frameCenterY,
-                                          width: edit.frameWidth,
-                                          height: edit.frameHeight)
-            frameCenterX = frame.centerX
-            frameCenterY = frame.centerY
-            frameWidth = frame.width
-            frameHeight = frame.height
+            history.reset(to: currentEdit())
             // Build the preview item: full composition, or a collapsed copy when the
             // loaded edit already has cuts (applies the video composition + audio).
             rebuildPreview()
+            // A bundle with a leading cut opens on its first visible frame.
+            seek(to: visibleBounds.start)
 
             let token = player.addPeriodicTimeObserver(
                 forInterval: CMTime(value: 1, timescale: 30),
@@ -654,8 +557,11 @@ final class StudioModel: ObservableObject {
                     guard let self else { return }
                     // The player runs on collapsed time when cuts are active; map it
                     // back to the timeline so the playhead hops over the cut regions.
-                    self.currentTime = self.previewCuts.isEmpty ? time.seconds
+                    let unmapped = self.previewCuts.isEmpty ? time.seconds
                         : TimelineCut.unmap(time.seconds, cuts: self.previewCuts)
+                    // `unmap` resolves the collapsed end onto `duration`, i.e. inside
+                    // a trailing cut — clamp to the last visible instant.
+                    self.currentTime = min(unmapped, self.visibleBounds.end)
                 }
             }
             observerCleanup = { player.removeTimeObserver(token) }
@@ -665,6 +571,72 @@ final class StudioModel: ObservableObject {
             Log.studio.error("StudioModel.load failed: \(error.localizedDescription, privacy: .public)")
             loadState = .failed(error.localizedDescription)
         }
+    }
+
+    /// Push `edit`'s fields into the model (camera, crop, background, blocks,
+    /// subtitles, segments, frame, volumes, cursor flags). Does not persist, does
+    /// not touch history, does not rebuild the preview — callers do. Used by
+    /// `load()` and by undo/redo.
+    private func applyEdit(_ edit: EditState) {
+        cameraHomeLayout = edit.cameraHomeLayout
+        cameraCenterX = edit.cameraCenterX
+        cameraCenterY = edit.cameraCenterY
+        cameraScale = edit.cameraScale
+        cameraZoom = min(max(1, edit.cameraZoom), 4)
+        cameraFeedX = min(max(0, edit.cameraFeedX), 1)
+        cameraFeedY = min(max(0, edit.cameraFeedY), 1)
+        cameraShape = edit.cameraShape
+        cameraCornerRadius = min(max(0, edit.cameraCornerRadius), 1)
+        cameraBorderWidth = min(max(0, edit.cameraBorderWidth), 0.1)
+        cameraBorderHex = edit.cameraBorderHex
+        cameraShadow = edit.cameraShadow
+        cameraShadowRadius = min(max(0, edit.cameraShadowRadius), 1)
+        cameraAspect = edit.cameraAspect
+        cameraRotation = ((edit.cameraRotation / 90 % 4) + 4) % 4 * 90
+        micVolume = min(max(0, edit.micVolume), 3)
+        systemVolume = min(max(0, edit.systemVolume), 1)
+        showCursor = edit.showCursor
+        clickFeedback = edit.clickFeedback
+        cropAspect = edit.cropAspect
+        cropCenterX = min(max(0, edit.cropCenterX), 1)
+        cropCenterY = min(max(0, edit.cropCenterY), 1)
+        cropZoom = min(max(0.2, edit.cropZoom), 1)
+        canvasBackground = edit.canvasBackground
+        canvasBackgroundBlur = min(max(0, edit.canvasBackgroundBlur), 0.2)
+        canvasBackgroundImage = edit.canvasBackgroundImage
+        loadBackgroundImage()
+        cameraBlocks = edit.cameraBlocks.sorted { $0.begin < $1.begin }
+        // Stored verbatim — array order is the z-order, never re-sorted.
+        textBlocks = edit.textBlocks
+        shapeBlocks = edit.shapeBlocks
+        // Keep cues raw; the offset is applied at consumption. A track whose
+        // cues all fall outside the clip (after offset) loads as no subtitles
+        // (the .srt file is left in the bundle).
+        if let track = edit.subtitles {
+            let surviving = SubtitleTimeline.effective(track.cues, offset: track.offset,
+                                                       duration: duration)
+            subtitles = surviving.isEmpty ? nil
+                : SubtitleTrack(srtFilename: track.srtFilename, style: track.style,
+                                cues: track.cues, offset: track.offset)
+        } else {
+            subtitles = nil
+        }
+        zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
+        layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
+        // Empty stays empty (uncut); a stored partition is renormalized onto
+        // the current duration (which may have changed since it was saved).
+        segments = edit.segments.isEmpty ? []
+            : TimelineSegments.uncutIfSingleVisible(
+                TimelineSegments.normalized(edit.segments, duration: duration))
+        frameEnabled = edit.frameEnabled
+        let frame = FrameMath.clamped(centerX: edit.frameCenterX,
+                                      centerY: edit.frameCenterY,
+                                      width: edit.frameWidth,
+                                      height: edit.frameHeight)
+        frameCenterX = frame.centerX
+        frameCenterY = frame.centerY
+        frameWidth = frame.width
+        frameHeight = frame.height
     }
 
     private struct BuiltComposition {
@@ -793,20 +765,11 @@ final class StudioModel: ObservableObject {
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
-        // events.jsonl is in absolute master time; rebase onto the committed
-        // trim window (t = 0 at committedTrimStart) and drop samples outside it.
-        let head = committedTrimStart, dur = duration
-        cursorSamples = s.cursor.compactMap { sample in
-            let t = sample.t - head
-            guard t >= -0.001, t <= dur + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-        clickSamples = s.clicks.compactMap { sample in
-            let t = sample.t - head
-            // Keep clicks whose expanding ring still overlaps the window.
-            guard t >= -CursorOverlay.ringDuration, t <= dur + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
+        // events.jsonl is in absolute master time, which is the timeline (the
+        // composition is always the uncut masters); drop samples past the end.
+        let dur = duration
+        cursorSamples = s.cursor.filter { $0.t <= dur + 0.001 }
+        clickSamples = s.clicks.filter { $0.t <= dur + 0.001 }
 
         var glyphs: [String: CursorGlyph] = [:]
         for name in Set(cursorSamples.map(\.cursor)) {
@@ -1353,6 +1316,19 @@ final class StudioModel: ObservableObject {
         segments.isEmpty ? TimelineSegments.full(duration: duration) : segments
     }
 
+    /// The cut-type transport button currently hovered (nil when none). Cleared by
+    /// each button's action and when an export starts.
+    @Published var hoverAction: CutAction?
+
+    /// What the hovered action would do, drawn on the timeline. Derived (never
+    /// stored) so it tracks the playhead during playback and goes nil by itself
+    /// when the action would change nothing.
+    var hoverPreview: CutPreview? {
+        hoverAction.flatMap {
+            TimelineSegments.preview(for: $0, segments: segments, at: currentTime, duration: duration)
+        }
+    }
+
     /// Any cut in effect (a hidden segment). Drives whether playback/export differ
     /// from the raw timeline.
     var hasCutSegments: Bool { segments.contains { $0.hidden } }
@@ -1361,7 +1337,8 @@ final class StudioModel: ObservableObject {
     var canResetSegments: Bool { !segments.isEmpty }
 
     /// Whether a split at the playhead is allowed — it must land strictly inside a
-    /// segment with at least `splitMinWidth` on each side. Drives the Split control.
+    /// visible segment with at least `splitMinWidth` on each side (never inside a
+    /// cut). Drives the Split control.
     var canSplitAtPlayhead: Bool {
         !isExporting && TimelineSegments.canSplit(effectiveSegments, at: currentTime)
     }
@@ -1401,23 +1378,105 @@ final class StudioModel: ObservableObject {
     /// Refused for the last visible segment (there must be something to play).
     func hideSegment(_ id: UUID) {
         guard !isExporting else { return }
-        let updated = TimelineSegments.setHidden(effectiveSegments, id: id, true)
-        guard updated != segments else { return }
+        // Compare against the same instance: `effectiveSegments` mints a fresh
+        // id for the implicit full segment on every read.
+        let s = effectiveSegments
+        let updated = TimelineSegments.setHidden(s, id: id, true)
+        guard updated != s else { return }
         setSegments(updated)
-        // If the playhead now sits inside the freshly-hidden range, hop past it.
-        if let r = TimelineSegments.hiddenRange(containing: currentTime, in: updated) {
-            seek(to: r.upperBound)
-        }
+        settlePlayhead()
+    }
+
+    /// If the playhead sits inside a hidden range, hop past it — or back to its
+    /// start when the range runs to the end of the timeline.
+    private func settlePlayhead() {
+        guard let r = TimelineSegments.hiddenRange(containing: currentTime, in: segments) else { return }
+        seek(to: r.upperBound >= duration - 1e-6 ? r.lowerBound : r.upperBound)
+    }
+
+    /// Whether Trim Start (cut `0..<playhead`) would change anything.
+    var canTrimStartAtPlayhead: Bool {
+        guard !isExporting else { return false }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: 0..<currentTime)
+        return TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s)
+    }
+
+    /// Whether Trim End (cut `playhead..<duration`) would change anything.
+    var canTrimEndAtPlayhead: Bool {
+        guard !isExporting else { return false }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: currentTime..<duration)
+        return TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s)
+    }
+
+    /// Hide everything before the playhead. Splits in the head collapse into one
+    /// cut (adjacent hidden segments always merge).
+    func trimStartAtPlayhead() {
+        guard !isExporting, currentTime > 0 else { return }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: 0..<currentTime)
+        // Compare hidden material, not segment lists: a trim that only adds a
+        // boundary inside an already-hidden run changes nothing visible.
+        guard TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s) else { return }
+        setSegments(c)
+        settlePlayhead()
+    }
+
+    /// Hide everything after the playhead. Splits in the tail collapse into one
+    /// cut (adjacent hidden segments always merge).
+    func trimEndAtPlayhead() {
+        guard !isExporting, currentTime < duration else { return }
+        let s = effectiveSegments
+        let c = TimelineSegments.cut(s, range: currentTime..<duration)
+        // Compare hidden material, not segment lists: a trim that only adds a
+        // boundary inside an already-hidden run changes nothing visible.
+        guard TimelineSegments.cutRanges(c) != TimelineSegments.cutRanges(s) else { return }
+        setSegments(c)
+        settlePlayhead()
     }
 
     /// Restore a previously hidden segment.
     func restoreSegment(_ id: UUID) {
         guard !isExporting else { return }
-        setSegments(TimelineSegments.setHidden(effectiveSegments, id: id, false))
+        let s = effectiveSegments
+        let updated = TimelineSegments.setHidden(s, id: id, false)
+        guard updated != s else { return }
+        setSegments(updated)
     }
 
-    /// Clear all splits and cuts back to a single uncut timeline (mirrors
-    /// `resetTrim`). No-op when already uncut.
+    /// Single entry point for cut actions (transport buttons and split-mark menu).
+    /// Clears the hover preview first. No-op while exporting.
+    func perform(_ action: CutAction) {
+        hoverAction = nil
+        guard !isExporting else { return }
+        switch action {
+        case .removeSplit(let rightID):
+            let s = effectiveSegments
+            let joined = TimelineSegments.join(s, atBoundaryOf: rightID)
+            guard joined != s else { return }
+            setSegments(joined)
+        case .hideSegmentID(let id): hideSegment(id)
+        case .restoreSegmentID(let id): restoreSegment(id)
+        case .cutSegment:
+            if let seg = segmentAtPlayhead, !seg.hidden { hideSegment(seg.id) }
+        case .restoreSegment:
+            if let seg = segmentAtPlayhead, seg.hidden { restoreSegment(seg.id) }
+        case .trimStart: trimStartAtPlayhead()
+        case .trimEnd: trimEndAtPlayhead()
+        case .clearAll: resetSegments()
+        }
+    }
+
+    /// Popover items for the split mark at the start of segment `rightID`; nil
+    /// when uncut or `rightID` is not a boundary.
+    func splitMarkItems(rightID: UUID) -> [SplitMarkItem]? {
+        guard !isExporting, !segments.isEmpty else { return nil }
+        return SplitMarkMenu.items(segments: effectiveSegments, rightID: rightID)
+    }
+
+    /// Clear all splits and cuts back to a single uncut timeline. No-op when
+    /// already uncut.
     func resetSegments() {
         guard !isExporting, !segments.isEmpty else { return }
         segments = []
@@ -1428,8 +1487,9 @@ final class StudioModel: ObservableObject {
     /// Store a new segment partition and persist. Rebuilds the preview only when the
     /// cut set changed (a plain split doesn't cut anything), so playback plays the
     /// collapsed composition — the cuts are skipped seamlessly with no seek.
+    /// A single visible segment is the uncut timeline, stored as `[]`.
     private func setSegments(_ list: [TimelineSegment]) {
-        segments = list
+        segments = TimelineSegments.uncutIfSingleVisible(list)
         syncPreviewToCuts()
         saveEdit()
     }
@@ -1569,8 +1629,10 @@ final class StudioModel: ObservableObject {
         applyVideoComposition()
     }
 
-    func commitTextEdit() {
-        saveEdit()
+    /// Persist a text edit. `key` coalesces continuous controls (e.g. the
+    /// font-size stepper's auto-repeat) into one undo step.
+    func commitTextEdit(coalescing key: String? = nil) {
+        saveEdit(coalescing: key)
     }
 
     /// Mutate one block in place (preserves array order / z-order) and refresh
@@ -1862,16 +1924,19 @@ final class StudioModel: ObservableObject {
     /// Mutate the selected shape block live. Discrete edits pass `commit: true`
     /// to persist immediately; slider drags pass `false` and persist on end via
     /// `commitShapeEdit`.
-    private func updateSelectedShape(commit: Bool, _ mutate: (inout ShapeBlock) -> Void) {
+    private func updateSelectedShape(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout ShapeBlock) -> Void) {
         guard let id = selectedShapeBlockID else { return }
         updateShapeBlock(id, mutate)
-        if commit { saveEdit() }
+        // Scope the coalescing key to the block so colour drags on two
+        // different blocks never merge into one undo step.
+        if commit { saveEdit(coalescing: key.map { "\($0):\(id.uuidString)" }) }
     }
 
     func setShapeKind(_ kind: ShapeKind) { updateSelectedShape(commit: true) { $0.kind = kind } }
-    func setShapeFillHex(_ hex: String) { updateSelectedShape(commit: true) { $0.fillHex = hex } }
+    func setShapeFillHex(_ hex: String) { updateSelectedShape(commit: true, coalescing: "shapeFillHex") { $0.fillHex = hex } }
     func setShapeFillOpacity(_ v: Double) { updateSelectedShape(commit: false) { $0.fillOpacity = min(max(0, v), 1) } }
-    func setShapeStrokeHex(_ hex: String) { updateSelectedShape(commit: true) { $0.strokeHex = hex } }
+    func setShapeStrokeHex(_ hex: String) { updateSelectedShape(commit: true, coalescing: "shapeStrokeHex") { $0.strokeHex = hex } }
     func setShapeStrokeWidth(_ v: Double) { updateSelectedShape(commit: false) { $0.strokeWidth = min(max(0, v), 0.1) } }
     func setShapeCornerRadius(_ v: Double) { updateSelectedShape(commit: false) { $0.cornerRadius = min(max(0, v), 0.5) } }
     func setShapeBlurStyle(_ s: ShapeBlurStyle) { updateSelectedShape(commit: true) { $0.blurStyle = s } }
@@ -1882,22 +1947,25 @@ final class StudioModel: ObservableObject {
     /// Mutate the selected text block live. Discrete edits pass `commit: true`
     /// to persist immediately; slider drags pass `false` and persist on end via
     /// `commitTextEdit`.
-    private func updateSelectedText(commit: Bool, _ mutate: (inout TextBlock) -> Void) {
+    private func updateSelectedText(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout TextBlock) -> Void) {
         guard let id = selectedTextBlockID else { return }
         updateTextBlock(id, mutate)
-        if commit { saveEdit() }
+        // Scope the coalescing key to the block so colour drags on two
+        // different blocks never merge into one undo step.
+        if commit { saveEdit(coalescing: key.map { "\($0):\(id.uuidString)" }) }
     }
 
     func setTextFontName(_ name: String) { updateSelectedText(commit: true) { $0.fontName = name } }
     func setTextFontSize(_ v: Double) { updateSelectedText(commit: false) { $0.fontSize = min(max(0.005, v), 0.5) } }
     func setTextWeight(_ w: TextWeight) { updateSelectedText(commit: true) { $0.fontWeight = w } }
-    func setTextColorHex(_ hex: String) { updateSelectedText(commit: true) { $0.colorHex = hex } }
+    func setTextColorHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textColorHex") { $0.colorHex = hex } }
     func setTextAlignment(_ a: TextAlignmentH) { updateSelectedText(commit: true) { $0.alignment = a } }
     func setTextBoxEnabled(_ on: Bool) { updateSelectedText(commit: true) { $0.boxEnabled = on } }
-    func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true) { $0.boxHex = hex } }
+    func setTextBoxHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textBoxHex") { $0.boxHex = hex } }
     func setTextBoxOpacity(_ v: Double) { updateSelectedText(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setTextStrokeWidth(_ v: Double) { updateSelectedText(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
-    func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true) { $0.strokeHex = hex } }
+    func setTextStrokeHex(_ hex: String) { updateSelectedText(commit: true, coalescing: "textStrokeHex") { $0.strokeHex = hex } }
     func setTextShadow(_ on: Bool) { updateSelectedText(commit: true) { $0.shadow = on } }
     func setTextBoxWidth(_ v: Double) { updateSelectedText(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
     func setTextAutoWrap(_ on: Bool) { updateSelectedText(commit: true) { $0.autoWrap = on } }
@@ -1956,6 +2024,8 @@ final class StudioModel: ObservableObject {
     }
 
     /// Remove the subtitle track + its `.srt` and hide the lane. Loader-gated.
+    /// Deleting the `.srt` is harmless for undo: the cues live in `EditState`,
+    /// so undo restores the track from the snapshot.
     func removeSubtitles() {
         guard subtitleState == .idle, subtitles != nil else { return }
         subtitleState = .removing
@@ -2001,23 +2071,24 @@ final class StudioModel: ObservableObject {
     /// Mutate the shared subtitle style live (applies to every cue). Discrete
     /// edits commit immediately; slider drags pass `commit: false` and persist on
     /// end via `commitSubtitleEdit`.
-    private func updateSubtitleStyle(commit: Bool, _ mutate: (inout SubtitleStyle) -> Void) {
+    private func updateSubtitleStyle(commit: Bool, coalescing key: String? = nil,
+                                     _ mutate: (inout SubtitleStyle) -> Void) {
         guard subtitles != nil else { return }
         mutate(&subtitles!.style)
         applyVideoComposition()
-        if commit { saveEdit() }
+        if commit { saveEdit(coalescing: key) }
     }
 
     func setSubtitleFontName(_ name: String) { updateSubtitleStyle(commit: true) { $0.fontName = name } }
     func setSubtitleFontSize(_ v: Double) { updateSubtitleStyle(commit: false) { $0.fontSize = min(max(0.01, v), 0.5) } }
     func setSubtitleWeight(_ w: TextWeight) { updateSubtitleStyle(commit: true) { $0.fontWeight = w } }
-    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.colorHex = hex } }
+    func setSubtitleColorHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleColorHex") { $0.colorHex = hex } }
     func setSubtitleAlignment(_ a: TextAlignmentH) { updateSubtitleStyle(commit: true) { $0.alignment = a } }
     func setSubtitleBoxEnabled(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.boxEnabled = on } }
-    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.boxHex = hex } }
+    func setSubtitleBoxHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleBoxHex") { $0.boxHex = hex } }
     func setSubtitleBoxOpacity(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxOpacity = min(max(0, v), 1) } }
     func setSubtitleStrokeWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.strokeWidth = min(max(0, v), 0.2) } }
-    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true) { $0.strokeHex = hex } }
+    func setSubtitleStrokeHex(_ hex: String) { updateSubtitleStyle(commit: true, coalescing: "subtitleStrokeHex") { $0.strokeHex = hex } }
     func setSubtitleShadow(_ on: Bool) { updateSubtitleStyle(commit: true) { $0.shadow = on } }
     func setSubtitleBoxWidth(_ v: Double) { updateSubtitleStyle(commit: false) { $0.boxWidth = min(max(0.05, v), 1.0) } }
 
@@ -2031,7 +2102,7 @@ final class StudioModel: ObservableObject {
         guard subtitles != nil else { return }
         subtitles!.offset = min(max(-86_400, seconds), 86_400)
         applyVideoComposition()
-        saveEdit()
+        saveEdit(coalescing: "subtitleOffset")
     }
 
     /// Align cue #1 (the smallest raw `begin`) to the current playhead.
@@ -2162,7 +2233,7 @@ final class StudioModel: ObservableObject {
 
     func setCameraBorderHex(_ hex: String) {
         applyCameraStyle { cameraBorderHex = hex }
-        saveEdit()
+        saveEdit(coalescing: "cameraBorderHex")
     }
 
     func setCameraShadow(_ on: Bool) {
@@ -2358,7 +2429,7 @@ final class StudioModel: ObservableObject {
 
     /// Remove the uploaded photo and revert the background to black.
     func deleteBackgroundImage() {
-        bundle.deleteBackgroundImages()
+        // Leave the file on disk so undo can restore the reference; the next upload overwrites it.
         canvasBackgroundImage = nil
         backgroundCIImage = nil
         applyOverlayChange { canvasBackground = .black }
@@ -2680,16 +2751,23 @@ final class StudioModel: ObservableObject {
     // MARK: - Playback
 
     func togglePlay() {
-        guard let player else { return }
+        guard !isExporting, let player else { return }
         if player.timeControlStatus == .playing {
             player.pause()
         } else {
-            if currentTime >= duration - 0.05 { seek(to: trimIn) }
+            let (start, end) = visibleBounds
+            if currentTime >= end - 0.05 { seek(to: start) }
             player.play()
         }
     }
 
     var isPlaying: Bool { player?.timeControlStatus == .playing }
+
+    /// First and last visible instants of the timeline (hidden segments at the
+    /// head/tail excluded). Playback restarts from `start` and parks at `end`.
+    var visibleBounds: (start: Double, end: Double) {
+        TimelineSegments.visibleBounds(segments, duration: duration)
+    }
 
     func seek(to seconds: Double) {
         let clamped = min(max(0, seconds), duration)
@@ -2702,164 +2780,53 @@ final class StudioModel: ObservableObject {
         currentTime = clamped
     }
 
-    // MARK: - Trim (persisted to edit.json; masters untouched)
-
-    func setTrimIn(_ value: Double) {
-        guard !isExporting else { return }
-        trimIn = min(max(0, value), trimOut - 0.1)
-        saveEdit()
+    /// Persist + record the current edit. `key` coalesces continuous controls
+    /// (colour wheel drags, stepper auto-repeat) into one undo step.
+    private func saveEdit(coalescing key: String? = nil) {
+        let e = currentEdit()
+        history.record(e, coalescingKey: key)
+        try? bundle.writeEdit(e)
     }
 
-    func setTrimOut(_ value: Double) {
-        guard !isExporting else { return }
-        trimOut = max(min(duration, value), trimIn + 0.1)
-        saveEdit()
+    /// Step back one saved edit. No-op while exporting or at the bottom of the stack.
+    func undo() {
+        guard canUndo, let s = history.undo() else { return }
+        applyHistorySnapshot(s)
     }
 
-    func resetTrim() {
-        guard !isExporting else { return }
-        // If a trim was applied (destructive cut), undo it: restore the full-length
-        // composition and every block/cursor edit from the pre-apply snapshot.
-        if let undo = trimUndo {
-            restoreTrimUndo(undo)
-            return
-        }
-        // Otherwise there is only a live In/Out selection — reset the markers.
-        trimIn = 0
-        trimOut = duration
-        saveEdit()
+    /// Re-apply the next undone edit. No-op while exporting or with nothing to redo.
+    func redo() {
+        guard canRedo, let s = history.redo() else { return }
+        applyHistorySnapshot(s)
     }
 
-    /// Put back everything the last `applyTrim()` changed: swap the pre-trim
-    /// composition (edit lists) back in, restore committed window, blocks, cursor
-    /// / click samples, splits, and duration, then rebuild the preview so the
-    /// player shows the full-length timeline again. Consumes the snapshot.
-    private func restoreTrimUndo(_ s: TrimUndoState) {
-        composition = s.composition
-        committedTrimStart = s.committedTrimStart
-        committedTrimEnd = s.committedTrimEnd
-        cameraBlocks = s.cameraBlocks
-        layoutBlocks = s.layoutBlocks
-        zoomBlocks = s.zoomBlocks
-        textBlocks = s.textBlocks
-        shapeBlocks = s.shapeBlocks
-        subtitles = s.subtitles
-        cursorSamples = s.cursorSamples
-        clickSamples = s.clickSamples
-        segments = s.segments
-        duration = s.duration
-        // Clear the live In/Out selection: the pre-apply markers described the cut
-        // we just undid, so keeping them would leave `canApplyTrim` true and let a
-        // later export/apply re-trim the now-restored full timeline.
-        trimIn = 0
-        trimOut = duration
-        trimUndo = nil
-        // Rebuild the player item from the restored composition (re-collapses any
-        // restored cuts, rebuilds overlays + audio), then park at the start.
+    /// Shared undo/redo tail: push the snapshot into the model, rebuild the
+    /// preview, re-derive transient UI state, then overwrite the history's
+    /// current entry (`replaceCurrent`, no new step) with what was actually
+    /// applied (`applyEdit` normalises/clamps) and persist it. Never calls
+    /// `saveEdit()`, which would push a new step and wipe the redo stack.
+    private func applyHistorySnapshot(_ s: EditState) {
+        applyEdit(s)
+        // Unconditional: crop-aspect / compositor / segment changes all need a
+        // fresh player item, and a paused frame won't repaint otherwise.
         rebuildPreview()
-        seek(to: 0)
-        saveEdit()
-        Log.studio.info("resetTrim: restored pre-apply timeline, duration=\(self.duration, format: .fixed(precision: 2))s")
-    }
-
-    /// Commit the current in/out markers: cut the head `[0, trimIn)` and tail
-    /// `[trimOut, duration)` off the timeline, shrink the project duration, and
-    /// rebase every lane + cursor overlay so the clip starts at the in-point.
-    /// Destructive — blocks outside the window are dropped, straddlers clamped.
-    /// The masters are untouched; the committed window is persisted so the cut
-    /// survives reload. Reversible in-session: `resetTrim()` restores the
-    /// pre-apply snapshot captured below (full length + every block/cursor edit).
-    func applyTrim() {
-        guard let composition, duration > 0, canApplyTrim else { return }
-        let inP = min(max(0, trimIn), duration)
-        let outP = min(max(inP + 0.1, trimOut), duration)
-        let oldDuration = duration
-        let ts: (Double) -> CMTime = { CMTime(seconds: $0, preferredTimescale: 600) }
-
-        // Snapshot the full pre-trim state (composition edit lists + all edits) so
-        // Reset can undo this destructive cut. `mutableCopy()` is cheap — it copies
-        // edit lists only, no media. Capture BEFORE the removeTimeRange calls below.
-        let undo = TrimUndoState(
-            composition: composition.mutableCopy() as! AVMutableComposition,
-            committedTrimStart: committedTrimStart,
-            committedTrimEnd: committedTrimEnd,
-            duration: duration,
-            cameraBlocks: cameraBlocks,
-            layoutBlocks: layoutBlocks,
-            zoomBlocks: zoomBlocks,
-            textBlocks: textBlocks,
-            shapeBlocks: shapeBlocks,
-            subtitles: subtitles,
-            cursorSamples: cursorSamples,
-            clickSamples: clickSamples,
-            segments: segments)
-
-        // Cut the composition (tail first so the head cut's coordinates hold).
-        if outP < oldDuration - 0.001 {
-            composition.removeTimeRange(CMTimeRange(start: ts(outP), end: ts(oldDuration)))
-        }
-        if inP > 0.001 {
-            composition.removeTimeRange(CMTimeRange(start: .zero, end: ts(inP)))
-        }
-
-        // Rebase the edit model through the pure transform, then read it back.
-        let trimmed = TrimTimeline.apply(currentEdit(), in: inP, out: outP, duration: oldDuration)
-        committedTrimStart = trimmed.committedTrimStart
-        committedTrimEnd = trimmed.committedTrimEnd
-        cameraBlocks = trimmed.cameraBlocks
-        layoutBlocks = trimmed.layoutBlocks
-        zoomBlocks = trimmed.zoomBlocks
-        textBlocks = trimmed.textBlocks
-        shapeBlocks = trimmed.shapeBlocks
-        subtitles = trimmed.subtitles
-
-        // Rebase cursor / click overlays onto the new t = 0.
-        let newDuration = composition.duration.seconds
-        cursorSamples = cursorSamples.compactMap { sample in
-            let t = sample.t - inP
-            guard t >= -0.001, t <= newDuration + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-        clickSamples = clickSamples.compactMap { sample in
-            let t = sample.t - inP
-            guard t >= -CursorOverlay.ringDuration, t <= newDuration + 0.001 else { return nil }
-            var c = sample; c.t = t; return c
-        }
-
-        duration = newDuration
-        trimIn = 0
-        trimOut = newDuration
-        // A committed trim rewrites the timeline; the old split partition no longer
-        // maps onto it, so clear splits/cuts (mirrors resetting the markers).
-        segments = []
-        // Drop selections that pointed at now-removed blocks.
+        templateGuideVisible = (cropAspect == .nineBySixteenTemplate)
+        if !cropPannable { panVideoMode = false }
+        if subtitles == nil { subtitleSelected = false }
         if let id = selectedBlockID, !cameraBlocks.contains(where: { $0.id == id }) { selectedBlockID = nil }
         if let id = selectedTextBlockID, !textBlocks.contains(where: { $0.id == id }) { selectedTextBlockID = nil }
         if let id = selectedShapeBlockID, !shapeBlocks.contains(where: { $0.id == id }) { selectedShapeBlockID = nil }
         if let id = selectedZoomBlockID, !zoomBlocks.contains(where: { $0.id == id }) { selectedZoomBlockID = nil }
         if let id = selectedLayoutBlockID, !layoutBlocks.contains(where: { $0.id == id }) { selectedLayoutBlockID = nil }
-
-        // Swap in a fresh player item for the mutated composition (segments were
-        // cleared above, so this rebuilds the uncut preview + overlays + audio and
-        // resets `previewCuts`), then park at the new start.
-        rebuildPreview()
-        seek(to: 0)
-        trimUndo = undo
-        saveEdit()
-        Log.studio.info("applyTrim: window [\(self.committedTrimStart, format: .fixed(precision: 2)), \(self.committedTrimEnd ?? -1, format: .fixed(precision: 2))] newDuration=\(newDuration, format: .fixed(precision: 2))s")
-    }
-
-    private func saveEdit() {
-        try? bundle.writeEdit(currentEdit())
+        settlePlayhead()
+        let e = currentEdit()
+        history.replaceCurrent(e)
+        try? bundle.writeEdit(e)
     }
 
     /// Snapshot the live model into an `EditState` for persistence / transforms.
     private func currentEdit() -> EditState {
         EditState(
-            trimIn: trimIn,
-            trimOut: trimOut >= duration - 0.001 ? nil : trimOut,
-            committedTrimStart: committedTrimStart,
-            committedTrimEnd: committedTrimEnd,
             cameraVisible: cameraVisible,
             cameraHomeLayout: cameraHomeLayout,
             cameraCenterX: cameraCenterX,
@@ -2933,20 +2900,20 @@ final class StudioModel: ObservableObject {
         if cuts.isEmpty {
             exportComposition = composition
             (videoComposition, avPresetOverride) = buildVC()
-            range = CMTimeRange(start: ts(trimIn), end: ts(trimOut))
+            range = CMTimeRange(start: .zero, end: ts(duration))
         } else {
-            let origDuration = duration
             let cutComp = cutComposition(composition, cuts: cuts)
             (videoComposition, avPresetOverride) = withCollapsedTimeline(cuts: cuts,
                                                                          cutComposition: cutComp) {
                 buildVC()
             }
             exportComposition = cutComp
-            let start = TimelineCut.map(min(max(0, trimIn), origDuration), cuts: cuts)
-            let end = TimelineCut.map(min(max(0, trimOut), origDuration), cuts: cuts)
-            range = CMTimeRange(start: ts(start), end: ts(max(start + 0.05, end)))
+            range = CMTimeRange(start: .zero,
+                                end: ts(TimelineCut.remainingDuration(duration, cuts: cuts)))
         }
 
+        player?.pause()
+        hoverAction = nil
         exportState = .exporting(0)
         let audioMix = buildAudioMix()
         exportTask = Task {

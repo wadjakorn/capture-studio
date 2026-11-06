@@ -19,12 +19,12 @@ struct ExportLockTests {
 
     @Test func mutatorsNoOpWhileExporting() {
         let m = makeModel()
+        m.loadForTests(duration: 10)
+        m.seek(to: 3)
         m.beginExportLockForTests()
-        // Without the lock, setTrimIn(5) with trimOut==0 clamps trimIn negative;
-        // the guard must leave it untouched.
-        let trimBefore = m.trimIn
-        m.setTrimIn(5)
-        #expect(m.trimIn == trimBefore)
+        // The export guard must leave the edit model untouched.
+        m.trimStartAtPlayhead()
+        #expect(m.segments.isEmpty)
 
         let zoomBefore = m.canvasZoom
         m.zoomCanvas(by: 2)
@@ -44,5 +44,12 @@ struct ExportLockTests {
         let m = makeModel()
         m.cancelExport()
         #expect(m.exportState == .idle)
+    }
+
+    @Test func togglePlayIsNoOpWhileExporting() {
+        let m = makeModel()
+        m.beginExportLockForTests()
+        m.togglePlay()
+        #expect(!m.isPlaying)
     }
 }

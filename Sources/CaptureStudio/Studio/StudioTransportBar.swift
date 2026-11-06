@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// Bottom transport chrome: play/pause + timecode, trim controls, plus a
-/// speed placeholder and a "timelines visible" label. Mirrors the bottom
-/// bar's `transportControls` + `trimControls`. Not yet wired into
-/// `StudioView` — Task 5 swaps the layout to use this.
+/// Bottom transport chrome: play/pause + timecode, split & cut controls, plus a
+/// speed placeholder and a "timelines visible" label. The split & cut controls
+/// (Split, Cut/Restore segment, Trim Start/End at playhead, Clear cuts) drive
+/// the non-destructive segment model on `StudioModel`.
 struct StudioTransportBar: View {
     @ObservedObject var model: StudioModel
 
@@ -11,9 +11,7 @@ struct StudioTransportBar: View {
         HStack(spacing: 12) {
             transportControls
             Divider().frame(height: 16)
-            trimControls
-            Divider().frame(height: 16)
-            splitControls
+            cutControls
             Divider().frame(height: 16)
             zoomControls
             Spacer()
@@ -33,42 +31,53 @@ struct StudioTransportBar: View {
         .keyboardShortcut(.space, modifiers: [])
         .help(model.isPlaying ? "Pause" : "Play")
 
-        Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
+        Text("\(TimelineScale.timecode(model.currentTime)) / \(TimelineScale.timecode(model.duration))")
             .font(.body.monospacedDigit())
             .foregroundStyle(.secondary)
     }
 
-    @ViewBuilder private var trimControls: some View {
-        Button("Set In") { model.setTrimIn(model.currentTime) }
-        Button("Set Out") { model.setTrimOut(model.currentTime) }
-        Button { model.resetTrim() } label: { Image(systemName: "arrow.uturn.backward") }
-            .help("Reset trim")
-        Button { model.applyTrim() } label: { Image(systemName: "scissors") }
-            .disabled(!model.canApplyTrim)
-            .help("Apply trim — cut everything outside In/Out off the timeline")
-        Text("\(timecode(model.trimIn)) – \(timecode(model.trimOut))")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
-    }
-
-    /// Split the master timeline at the playhead, then cut (hide) / restore the
-    /// segment under the playhead — non-destructive, cleared by Reset.
-    @ViewBuilder private var splitControls: some View {
+    /// Split / cut controls for the master timeline, all non-destructive. Hovering
+    /// a cut-type button previews its effect on the timeline (`hoverAction`).
+    @ViewBuilder private var cutControls: some View {
         Button { model.splitAtPlayhead() } label: {
             Image(systemName: "square.split.2x1")
         }
         .disabled(!model.canSplitAtPlayhead)
         .help("Split the timeline at the playhead")
 
-        Button { model.toggleCutAtPlayhead() } label: {
-            Image(systemName: cutIsRestore ? "eye" : "eye.slash")
+        Button {
+            model.hoverAction = nil
+            model.toggleCutAtPlayhead()
+        } label: {
+            Image(systemName: cutIsRestore ? "rectangle.badge.plus" : "scissors")
         }
         .disabled(!model.canToggleCutAtPlayhead)
         .help(cutIsRestore ? "Restore this segment" : "Cut this segment from the video")
+        .onHover { model.hoverAction = $0 ? (cutIsRestore ? .restoreSegment : .cutSegment) : nil }
 
-        Button { model.resetSegments() } label: { Image(systemName: "arrow.uturn.backward") }
+        Button {
+            model.hoverAction = nil
+            model.trimStartAtPlayhead()
+        } label: { Text("Trim Start") }
+            .disabled(!model.canTrimStartAtPlayhead)
+            .help("Cut everything before the playhead (merges into one cut)")
+            .onHover { model.hoverAction = $0 ? .trimStart : nil }
+
+        Button {
+            model.hoverAction = nil
+            model.trimEndAtPlayhead()
+        } label: { Text("Trim End") }
+            .disabled(!model.canTrimEndAtPlayhead)
+            .help("Cut everything after the playhead (merges into one cut)")
+            .onHover { model.hoverAction = $0 ? .trimEnd : nil }
+
+        Button {
+            model.hoverAction = nil
+            model.resetSegments()
+        } label: { Image(systemName: "xmark.circle") }
             .disabled(!model.canResetSegments)
-            .help("Clear all splits and cuts")
+            .help("Clear all splits & cuts")
+            .onHover { model.hoverAction = $0 ? .clearAll : nil }
 
         if model.hasCutSegments {
             Text("\(model.segments.filter(\.hidden).count) cut")
@@ -117,11 +126,4 @@ struct StudioTransportBar: View {
         return count
     }
 
-    private func timecode(_ seconds: Double) -> String {
-        guard seconds.isFinite else { return "00:00.0" }
-        let total = max(0, seconds)
-        let minutes = Int(total) / 60
-        let secs = total - Double(minutes * 60)
-        return String(format: "%02d:%04.1f", minutes, secs)
-    }
 }
