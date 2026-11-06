@@ -31,7 +31,7 @@ struct StudioTransportBar: View {
         .keyboardShortcut(.space, modifiers: [])
         .help(model.isPlaying ? "Pause" : "Play")
 
-        Text("\(timecode(model.currentTime)) / \(timecode(model.duration))")
+        Text("\(TimelineScale.timecode(model.currentTime)) / \(TimelineScale.timecode(model.duration))")
             .font(.body.monospacedDigit())
             .foregroundStyle(.secondary)
     }
@@ -126,11 +126,4 @@ struct StudioTransportBar: View {
         return count
     }
 
-    private func timecode(_ seconds: Double) -> String {
-        guard seconds.isFinite else { return "00:00.0" }
-        let total = max(0, seconds)
-        let minutes = Int(total) / 60
-        let secs = total - Double(minutes * 60)
-        return String(format: "%02d:%04.1f", minutes, secs)
-    }
 }

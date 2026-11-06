@@ -1376,8 +1376,11 @@ final class StudioModel: ObservableObject {
     /// Refused for the last visible segment (there must be something to play).
     func hideSegment(_ id: UUID) {
         guard !isExporting else { return }
-        let updated = TimelineSegments.setHidden(effectiveSegments, id: id, true)
-        guard updated != segments else { return }
+        // Compare against the same instance: `effectiveSegments` mints a fresh
+        // id for the implicit full segment on every read.
+        let s = effectiveSegments
+        let updated = TimelineSegments.setHidden(s, id: id, true)
+        guard updated != s else { return }
         setSegments(updated)
         settlePlayhead()
     }
@@ -1434,7 +1437,40 @@ final class StudioModel: ObservableObject {
     /// Restore a previously hidden segment.
     func restoreSegment(_ id: UUID) {
         guard !isExporting else { return }
-        setSegments(TimelineSegments.setHidden(effectiveSegments, id: id, false))
+        let s = effectiveSegments
+        let updated = TimelineSegments.setHidden(s, id: id, false)
+        guard updated != s else { return }
+        setSegments(updated)
+    }
+
+    /// Single entry point for cut actions (transport buttons and split-mark menu).
+    /// Clears the hover preview first. No-op while exporting.
+    func perform(_ action: CutAction) {
+        hoverAction = nil
+        guard !isExporting else { return }
+        switch action {
+        case .removeSplit(let rightID):
+            let s = effectiveSegments
+            let joined = TimelineSegments.join(s, atBoundaryOf: rightID)
+            guard joined != s else { return }
+            setSegments(joined)
+        case .hideSegmentID(let id): hideSegment(id)
+        case .restoreSegmentID(let id): restoreSegment(id)
+        case .cutSegment:
+            if let seg = segmentAtPlayhead, !seg.hidden { hideSegment(seg.id) }
+        case .restoreSegment:
+            if let seg = segmentAtPlayhead, seg.hidden { restoreSegment(seg.id) }
+        case .trimStart: trimStartAtPlayhead()
+        case .trimEnd: trimEndAtPlayhead()
+        case .clearAll: resetSegments()
+        }
+    }
+
+    /// Popover items for the split mark at the start of segment `rightID`; nil
+    /// when uncut or `rightID` is not a boundary.
+    func splitMarkItems(rightID: UUID) -> [SplitMarkItem]? {
+        guard !segments.isEmpty else { return nil }
+        return SplitMarkMenu.items(segments: effectiveSegments, rightID: rightID)
     }
 
     /// Clear all splits and cuts back to a single uncut timeline. No-op when

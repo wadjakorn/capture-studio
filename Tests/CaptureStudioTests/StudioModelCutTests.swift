@@ -165,4 +165,34 @@ struct StudioModelCutTests {
         m.undo()
         #expect(m.segments == before)
     }
+    @Test func removeSplitIsOneUndoStepAndRestoresMark() {
+        let m = model()
+        m.seek(to: 2); m.splitAtPlayhead(); m.seek(to: 6); m.splitAtPlayhead()
+        let before = m.segments
+        m.perform(.removeSplit(rightID: before[1].id))
+        #expect(m.segments.map(\.start) == [0, 6])
+        m.undo()
+        #expect(m.segments == before)
+    }
+    @Test func removingLastSplitLeavesTimelineUncut() {
+        let m = model()
+        m.seek(to: 4); m.splitAtPlayhead()
+        m.perform(.removeSplit(rightID: m.segments[1].id))
+        #expect(m.segments.isEmpty); #expect(!m.canResetSegments)
+    }
+    @Test func performHideThenMarkIsGone() {
+        let m = model()
+        m.seek(to: 2); m.splitAtPlayhead()
+        m.seek(to: 4); m.trimEndAtPlayhead()                 // [0,2) [2,4) [4,10)h
+        m.perform(.hideSegmentID(m.segments[1].id))
+        #expect(m.segments.map(\.start) == [0, 2]); #expect(m.segments[1].hidden)
+    }
+    @Test func performIsNoOpWhileExporting() {
+        let m = model()
+        m.seek(to: 4); m.splitAtPlayhead()
+        let before = m.segments
+        m.beginExportLockForTests()
+        m.perform(.removeSplit(rightID: before[1].id))
+        #expect(m.segments == before)
+    }
 }
