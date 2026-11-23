@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Registers the global hotkey handler once. The @StateObject session is
         // created before this fires, so RecordingSession.shared is set.
         HotkeyManager.install()
+        MainActor.assumeIsolated { AppUpdater.shared.start() }
 
         if Self.currentEventIsLoginItemLaunch() { isLoginItemLaunch = true }
         // Fallback for when AppKit never asks about an untitled file (unverified

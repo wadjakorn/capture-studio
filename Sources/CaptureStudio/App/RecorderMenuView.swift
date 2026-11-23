@@ -5,6 +5,7 @@ import KeyboardShortcuts
 
 struct RecorderMenuView: View {
     @EnvironmentObject private var session: RecordingSession
+    @ObservedObject private var updater = AppUpdater.shared
 
     @State private var displays: [DisplayItem] = []
     @State private var mainSource: MainSource?
@@ -72,6 +73,16 @@ struct RecorderMenuView: View {
                     DashboardLauncher.show()
                 } label: {
                     Label("Projects", systemImage: "square.grid.2x2")
+                }
+                if updater.isEnabled {
+                    Spacer()
+                    Button {
+                        updater.checkForUpdates()
+                    } label: {
+                        Label("Update", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(!updater.canCheckForUpdates)
+                    .help("Check for Updates…")
                 }
                 Spacer()
                 Button {

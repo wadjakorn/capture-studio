@@ -26,6 +26,7 @@ behave like the notarized release.
 | `scripts/make-dmg.sh` | Wrap the `.app` in a drag-to-Applications `.dmg` (`create-dmg`, or plain `hdiutil` fallback). |
 | `scripts/notarize.sh` | Notarize + staple a Developer ID signed `.app` or `.dmg` (signs the dmg first). |
 | `scripts/package-release.sh` | Local one-shot: build → notarize app → dmg → notarize dmg. |
+| `scripts/make-appcast.sh` | Write `dist/appcast.xml` (Sparkle feed, EdDSA-signed) for a release dmg. |
 | `Resources/CaptureStudio.entitlements` | Hardened Runtime entitlements (camera, audio-input). |
 | `.github/workflows/build.yml` | On tag push: import cert, build, dmg, draft GitHub Release. |
 | `.github/workflows/update-cask.yml` | On release publish: bump the Homebrew tap cask. |
@@ -133,6 +134,38 @@ first Developer ID build is a new identity to TCC, so users (and you) re-grant
 once. Builds after that keep their grants. For local debug builds you can keep
 using `Capture Studio Dev` (the default when `CS_SIGN_IDENTITY` is unset).
 
+## Auto-update (Sparkle 2)
+
+- The app checks
+  `https://github.com/wadjakorn/capture-studio/releases/latest/download/appcast.xml`
+  (`SUFeedURL` in Info.plist) daily, plus the menu's **Update** button.
+- Each release uploads `appcast.xml` next to the dmg. `/releases/latest` only
+  resolves to a **published, non-prerelease** release: publishing the draft is
+  what ships the update. Don't mark betas as GitHub "pre-release" or
+  installed apps won't see them.
+- Updates are verified with an **EdDSA key**, separate from Apple's cert.
+  Public key = `SUPublicEDKey` in Info.plist. Private key lives in the login
+  keychain of the Mac that ran `generate_keys`.
+- Sparkle compares `CFBundleVersion` (git commit count), so every release must
+  come from a later commit than the previous one (always true with
+  `release.sh`).
+
+**Back up the private key — losing it means installed apps can never accept
+another update** (users would have to reinstall manually):
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_keys -x sparkle-private-key.txt
+# store the file in your password manager, then delete it
+```
+
+CI secret: `gh secret set SPARKLE_PRIVATE_KEY < sparkle-private-key.txt`.
+Without it CI still builds, but skips `appcast.xml` (with a warning).
+
+Signing note: Sparkle.framework is embedded in `Contents/Frameworks`.
+Self-signed/ad-hoc builds have no Team ID, so `build-app.sh` adds
+`com.apple.security.cs.disable-library-validation` for them only; Developer ID
+builds keep full library validation.
+
 ## Versioning
 
 - **Marketing version** (`CFBundleShortVersionString`) — semver, the source of
@@ -184,5 +217,6 @@ tests. Needs Java 17 and the Android SDK 34 (`ANDROID_HOME` or
 - **Self-signed tier only:** no notarization, so a direct `.dmg` download shows
   the "unverified developer" prompt (right-click → Open clears it). Homebrew is
   clean because `brew` strips the quarantine flag.
-- **No in-app auto-update yet.** Planned: Sparkle 2 (EdDSA-signed appcast on
-  GitHub Releases).
+- **Auto-update across the signing switch:** the first Developer ID release is
+  accepted by older self-signed installs via the EdDSA signature, but macOS
+  will ask for Screen Recording/Camera/Mic permission again once.

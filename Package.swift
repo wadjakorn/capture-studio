@@ -14,12 +14,17 @@ let package = Package(
         // lacks (same constraint as the swift-testing 0.x pin above). 1.10.0 has
         // the same Name/onKeyUp/Recorder API we use.
         .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "1.10.0"),
+        // Auto-update (EdDSA-signed appcast on GitHub Releases). Binary
+        // xcframework, so it builds under Command Line Tools too. The .app
+        // bundle embeds Sparkle.framework in Contents/Frameworks (build-app.sh).
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
     ],
     targets: [
         .executableTarget(
             name: "CaptureStudio",
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/CaptureStudio",
             swiftSettings: [.swiftLanguageMode(.v5)]

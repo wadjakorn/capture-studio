@@ -100,12 +100,27 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: scripts/notarize.sh dist/CaptureStudio-*.dmg
 
+      # Sparkle feed. Must run after the dmg is notarized + stapled (stapling
+      # changes the file, which would invalidate the EdDSA signature).
+      - name: Build appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SPARKLE_PRIVATE_KEY:-}" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY not set — no appcast.xml, installed apps won't see this update."
+            exit 0
+          fi
+          scripts/make-appcast.sh dist/CaptureStudio-*.dmg
+
       # Tag push: create/attach a draft GitHub Release with the .dmg.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.dmg
+          files: |
+            dist/*.dmg
+            dist/appcast.xml
           draft: true
           name: Capture Studio ${{ github.ref_name }}
           body: |

@@ -38,6 +38,20 @@ for bundle in "$(dirname "$BIN")"/*.bundle; do
 done
 shopt -u nullglob
 
+# Embed Sparkle.framework (auto-update). SwiftPM links it via
+# @rpath/Sparkle.framework, so add the standard bundle rpath. XPCServices are
+# only needed by sandboxed apps (this one is not), so drop them: fewer nested
+# binaries to sign and notarize.
+if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
+    mkdir -p "$APP/Contents/Frameworks"
+    ditto "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+    rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" \
+           "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
+    if ! otool -l "$APP/Contents/MacOS/CaptureStudio" | grep -q "@executable_path/../Frameworks"; then
+        install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CaptureStudio"
+    fi
+fi
+
 # Stamp a monotonic build number (git commit count) into the packaged plist.
 # Marketing version (CFBundleShortVersionString) is managed by bump-version.sh.
 # Skipped outside a git checkout (e.g. source tarball) — the plist value stands.
@@ -71,13 +85,34 @@ if [[ "$IDENTITY" != "-" ]] && ! security find-identity -p codesigning | grep -q
 fi
 
 TIMESTAMP="--timestamp=none"
-[[ "$IDENTITY" == Developer\ ID* ]] && TIMESTAMP="--timestamp"
+if [[ "$IDENTITY" == Developer\ ID* ]]; then
+    TIMESTAMP="--timestamp"
+else
+    # Self-signed / ad-hoc signatures carry no Team ID, and Hardened Runtime's
+    # library validation then refuses to load the embedded Sparkle.framework
+    # ("mapping process and mapped file (non-platform) have different Team
+    # IDs"). Relax it for these builds only; Developer ID builds share one
+    # Team ID with the framework and keep full library validation.
+    DEV_ENTITLEMENTS="$(mktemp -t cs-entitlements).plist"
+    cp "$ENTITLEMENTS" "$DEV_ENTITLEMENTS"
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$DEV_ENTITLEMENTS"
+    ENTITLEMENTS="$DEV_ENTITLEMENTS"
+    trap 'rm -f "$DEV_ENTITLEMENTS"' EXIT
+fi
 
-# Sign nested bundles inside-out (never --deep: it applies the app's
-# entitlements to everything and Apple discourages it).
+# Sign nested code inside-out (never --deep: it applies the app's
+# entitlements to everything and Apple discourages it). Sparkle's helpers
+# first, then the framework, then resource bundles, then the app.
+sign_nested() { codesign --force --options runtime "$TIMESTAMP" --sign "$IDENTITY" "$@"; }
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+    sign_nested "$SPARKLE/Versions/B/Autoupdate"
+    sign_nested "$SPARKLE/Versions/B/Updater.app"
+    sign_nested "$SPARKLE"
+fi
 shopt -s nullglob
-for nested in "$APP"/Contents/Frameworks/*.framework "$APP"/Contents/Resources/*.bundle; do
-    codesign --force --options runtime "$TIMESTAMP" --sign "$IDENTITY" "$nested"
+for nested in "$APP"/Contents/Resources/*.bundle; do
+    sign_nested "$nested"
 done
 shopt -u nullglob
 codesign --force --options runtime "$TIMESTAMP" \

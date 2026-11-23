@@ -23,6 +23,10 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
   there or the notarized build silently loses it. Distribution:
   `CS_SIGN_IDENTITY="Developer ID Application: …" scripts/package-release.sh`
   (see RELEASING.md).
+- Auto-update: Sparkle 2.10.1 (exact pin, binary xcframework — CLT-safe),
+  `App/AppUpdater.swift`, embedded into `Contents/Frameworks` by
+  `build-app.sh`. Inert outside a `.app` with `SUFeedURL` + `SUPublicEDKey`.
+  Never change `SUPublicEDKey` (installed apps would reject every update).
 - After building, relaunch: `pkill -x CaptureStudio; open dist/CaptureStudio.app`.
 - Bundle id: `dev.wadjakorn.capture-studio` (stable; TCC + KeyboardShortcuts
   persistence key off it). Target: macOS 15+. `LSUIElement` (Dock icon only while a

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build, sign, notarize and package a public release locally:
 #   .app (Developer ID + Hardened Runtime) -> notarize + staple
-#   -> .dmg -> sign + notarize + staple
+#   -> .dmg -> sign + notarize + staple -> appcast.xml (Sparkle)
 #
 # Usage:
 #   CS_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)" scripts/package-release.sh
@@ -22,4 +22,5 @@ scripts/notarize.sh dist/CaptureStudio.app
 scripts/make-dmg.sh
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/CaptureStudio.app/Contents/Info.plist)"
 scripts/notarize.sh "dist/CaptureStudio-$VERSION.dmg"
+scripts/make-appcast.sh "dist/CaptureStudio-$VERSION.dmg"   # after stapling
 shasum -a 256 "dist/CaptureStudio-$VERSION.dmg"

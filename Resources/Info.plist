@@ -47,6 +47,14 @@
 	<string>Capture Studio finds Capture Studio Phone on your Wi-Fi to use your phone as a camera and microphone.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Capture Studio records your microphone alongside the screen so you can edit them separately.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/wadjakorn/capture-studio/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>0Au2aZj9P5omg/iI+imbFJLseb+018p6TzHMC9SIKW8=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
