@@ -53,6 +53,11 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
   (singleton window, Open Recorder → `TrayPopupOpener`).
 - `Sources/CaptureStudio/ProjectBundle/` — on-disk `.capturestudio` format:
   `Meta`, `EditState`, `Events`, `ProjectBundle`.
+- `Sources/CaptureStudio/License/` — license layer. Gate paid features only via
+  `LicenseManager.shared.allows(.feature)`; `LicensePolicy` is the pure logic.
+  Free beta uses `BetaLicenseProvider` (everything unlocked). A store-backed
+  provider (Lemon Squeezy/Paddle, Keychain cache) swaps in at
+  `LicenseManager.shared` later; never log or persist full keys outside Keychain.
 - `Tests/CaptureStudioTests/` — swift-testing; pure helpers (crop math, event
   mapping, codecs). Capture/UI glue is not unit-tested.
 

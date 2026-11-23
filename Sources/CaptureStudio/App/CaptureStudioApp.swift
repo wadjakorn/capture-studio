@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // created before this fires, so RecordingSession.shared is set.
         HotkeyManager.install()
         MainActor.assumeIsolated { AppUpdater.shared.start() }
+        Task { @MainActor in await LicenseManager.shared.refresh() }
 
         if Self.currentEventIsLoginItemLaunch() { isLoginItemLaunch = true }
         // Fallback for when AppKit never asks about an untitled file (unverified
