@@ -17,7 +17,12 @@ alternative. SwiftUI, Swift 6 toolchain, single SPM package.
 - `swift build` / `swift test` (keep them green).
 - `scripts/build-app.sh [debug|release]` → packages `dist/CaptureStudio.app`.
   Signs with the local `Capture Studio Dev` cert if present (keeps TCC grants
-  across rebuilds), else ad-hoc.
+  across rebuilds), else ad-hoc. Always Hardened Runtime +
+  `Resources/CaptureStudio.entitlements` — a new capability that Hardened
+  Runtime gates (camera, mic, Apple Events, JIT…) needs its entitlement added
+  there or the notarized build silently loses it. Distribution:
+  `CS_SIGN_IDENTITY="Developer ID Application: …" scripts/package-release.sh`
+  (see RELEASING.md).
 - After building, relaunch: `pkill -x CaptureStudio; open dist/CaptureStudio.app`.
 - Bundle id: `dev.wadjakorn.capture-studio` (stable; TCC + KeyboardShortcuts
   persistence key off it). Target: macOS 15+. `LSUIElement` (Dock icon only while a

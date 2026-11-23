@@ -3,7 +3,7 @@
 # installer layout (app icon on the left, Applications symlink on the right).
 #
 # Prereqs:
-#   brew install create-dmg          # the layout tool
+#   brew install create-dmg          # the layout tool (optional; falls back to hdiutil)
 #   scripts/build-app.sh release     # build the .app first
 #
 # IMPORTANT: for public distribution the .app inside MUST be Developer ID signed
@@ -15,7 +15,6 @@ cd "$(dirname "$0")/.."
 
 APP="dist/CaptureStudio.app"
 [[ -d "$APP" ]] || { echo "error: $APP not found — run scripts/build-app.sh release first" >&2; exit 1; }
-command -v create-dmg >/dev/null || { echo "error: create-dmg missing — brew install create-dmg" >&2; exit 1; }
 
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
 DMG="dist/CaptureStudio-$VERSION.dmg"
@@ -32,5 +31,15 @@ ARGS=(
 # Optional custom background like the example (drop a PNG here, ~1320x800 for retina).
 [[ -f Resources/dmg-bg.png ]] && ARGS+=(--background Resources/dmg-bg.png)
 
-create-dmg "${ARGS[@]}" "$DMG" "$APP"
+if command -v create-dmg >/dev/null; then
+    create-dmg "${ARGS[@]}" "$DMG" "$APP"
+else
+    # Plain fallback (no icon layout): app + Applications symlink.
+    echo "note: create-dmg not installed (brew install create-dmg) — building a plain dmg" >&2
+    STAGE="$(mktemp -d)"
+    trap 'rm -rf "$STAGE"' EXIT
+    ditto "$APP" "$STAGE/CaptureStudio.app"
+    ln -s /Applications "$STAGE/Applications"
+    hdiutil create -volname "Capture Studio" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+fi
 echo "Built $DMG"

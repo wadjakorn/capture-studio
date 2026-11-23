@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Hardened Runtime (required for notarization) blocks camera and
+	     microphone unless these are declared. Without them a notarized build
+	     records black video / silent audio with no prompt. Screen capture
+	     (ScreenCaptureKit) and Bonjour (NWBrowser) need no entitlement because
+	     the app is not sandboxed. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

@@ -1,9 +1,19 @@
 # Releasing Capture Studio
 
-Modeled on the `capz` release flow: a **free self-signed** code identity, a
-tag-triggered CI build that signs + packages a `.dmg` into a GitHub Release, and
-a Homebrew cask that auto-bumps. No Apple Developer Program required for this
-tier — but it does **not** notarize (see [Limitations](#limitations)).
+Modeled on the `capz` release flow: a tag-triggered CI build that signs +
+packages a `.dmg` into a GitHub Release, and a Homebrew cask that auto-bumps.
+
+Two signing tiers, same scripts:
+
+- **Developer ID + notarization** (Apple Developer Program). Direct `.dmg`
+  downloads open with no Gatekeeper warning. See
+  [Developer ID + notarization](#developer-id--notarization).
+- **Free self-signed** (`Capture Studio Dev`). No notarization; direct downloads
+  show the "unverified developer" prompt (see [Limitations](#limitations)).
+
+Every build is signed with **Hardened Runtime** and
+`Resources/CaptureStudio.entitlements` (camera + microphone), so local builds
+behave like the notarized release.
 
 ## Pieces
 
@@ -13,7 +23,10 @@ tier — but it does **not** notarize (see [Limitations](#limitations)).
 | `scripts/release.sh` | Bump + commit + tag (no push). Pushing the tag drives CI. |
 | `scripts/setup-signing-cert.sh` | One-time: generate a self-signed cert, push it to GitHub Actions secrets. |
 | `scripts/build-app.sh` | Build `dist/CaptureStudio.app`, sign with `Capture Studio Dev`, stamp build number. |
-| `scripts/make-dmg.sh` | Wrap the `.app` in a drag-to-Applications `.dmg`. |
+| `scripts/make-dmg.sh` | Wrap the `.app` in a drag-to-Applications `.dmg` (`create-dmg`, or plain `hdiutil` fallback). |
+| `scripts/notarize.sh` | Notarize + staple a Developer ID signed `.app` or `.dmg` (signs the dmg first). |
+| `scripts/package-release.sh` | Local one-shot: build → notarize app → dmg → notarize dmg. |
+| `Resources/CaptureStudio.entitlements` | Hardened Runtime entitlements (camera, audio-input). |
 | `.github/workflows/build.yml` | On tag push: import cert, build, dmg, draft GitHub Release. |
 | `.github/workflows/update-cask.yml` | On release publish: bump the Homebrew tap cask. |
 
@@ -70,6 +83,56 @@ Users install via:
 brew install --cask wadjakorn/capture-studio/capture-studio
 ```
 
+## Developer ID + notarization
+
+### One-time (local Mac)
+
+1. Create the **Developer ID Application** cert: Xcode → Settings → Accounts →
+   Manage Certificates → `+` → Developer ID Application. Check it:
+   ```sh
+   security find-identity -v -p codesigning   # "Developer ID Application: NAME (TEAMID)"
+   ```
+   Export it (with private key) from Keychain Access as a `.p12` and keep it in a
+   password manager. Apple caps how many of these you can create.
+2. Store notary credentials in the keychain (app-specific password from
+   account.apple.com → Sign-In and Security → App-Specific Passwords):
+   ```sh
+   xcrun notarytool store-credentials notary \
+     --apple-id <you@example.com> --team-id <TEAMID> --password <app-specific-pw>
+   ```
+
+### Local release build
+
+```sh
+CS_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)" CS_UNIVERSAL=1 \
+  scripts/package-release.sh
+```
+
+Output: `dist/CaptureStudio-<version>.dmg`, notarized and stapled.
+
+### CI (tag push)
+
+Replace / add these repo secrets; `build.yml` notarizes automatically when the
+identity is Developer ID and the API key secrets exist:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE` | `base64 -i DeveloperID.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: NAME (TEAMID)` |
+| `APPLE_API_KEY` | contents of `AuthKey_XXXX.p8` (App Store Connect → Users and Access → Integrations → Team Keys, role Developer) |
+| `APPLE_API_KEY_ID` | the key ID |
+| `APPLE_API_ISSUER` | the issuer UUID |
+
+CI builds **universal** (arm64 + x86_64).
+
+### Switching identity resets permissions once
+
+macOS keys Screen Recording / Camera / Mic grants to the code signature. The
+first Developer ID build is a new identity to TCC, so users (and you) re-grant
+once. Builds after that keep their grants. For local debug builds you can keep
+using `Capture Studio Dev` (the default when `CS_SIGN_IDENTITY` is unset).
+
 ## Versioning
 
 - **Marketing version** (`CFBundleShortVersionString`) — semver, the source of
@@ -118,12 +181,8 @@ tests. Needs Java 17 and the Android SDK 34 (`ANDROID_HOME` or
 
 ## Limitations
 
-- **No notarization.** A direct `.dmg` download shows the macOS "unverified
-  developer" prompt (right-click → Open clears it). The **Homebrew** path is
-  clean because `brew` strips the quarantine flag. Removing the prompt for direct
-  downloads needs a paid Apple Developer ID + notarization.
-- **Apple-silicon only** for now (the `macos-26` runner builds `arm64`). For a
-  universal build, switch `build-app.sh` to `swift build --arch arm64 --arch
-  x86_64` and adjust the binary path.
-- **No in-app auto-update.** capz gets this from Tauri's updater; the equivalent
-  here would be the Sparkle framework (a separate addition).
+- **Self-signed tier only:** no notarization, so a direct `.dmg` download shows
+  the "unverified developer" prompt (right-click → Open clears it). Homebrew is
+  clean because `brew` strips the quarantine flag.
+- **No in-app auto-update yet.** Planned: Sparkle 2 (EdDSA-signed appcast on
+  GitHub Releases).
