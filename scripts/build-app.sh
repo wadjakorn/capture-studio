@@ -47,7 +47,7 @@ if [[ -d "$BIN_DIR/Sparkle.framework" ]]; then
     ditto "$BIN_DIR/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
     rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" \
            "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
-    if ! otool -l "$APP/Contents/MacOS/CaptureStudio" | grep -q "@executable_path/../Frameworks"; then
+    if ! otool -l "$APP/Contents/MacOS/CaptureStudio" | grep "@executable_path/../Frameworks" >/dev/null; then
         install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CaptureStudio"
     fi
 fi
@@ -75,7 +75,7 @@ echo "Version $VERSION (build ${BUILD_NUM:-unknown})"
 # a trust setting. With -v, CI silently fell back to ad-hoc and TCC grants died.
 IDENTITY="${CS_SIGN_IDENTITY:-Capture Studio Dev}"
 ENTITLEMENTS="Resources/CaptureStudio.entitlements"
-if [[ "$IDENTITY" != "-" ]] && ! security find-identity -p codesigning | grep -qF "\"$IDENTITY\""; then
+if [[ "$IDENTITY" != "-" ]] && ! security find-identity -p codesigning | grep -F "\"$IDENTITY\"" >/dev/null; then
     if [[ "$IDENTITY" == Developer\ ID* ]]; then
         echo "error: '$IDENTITY' not found in keychain" >&2
         exit 1

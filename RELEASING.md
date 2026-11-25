@@ -93,6 +93,10 @@ brew install --cask wadjakorn/capture-studio/capture-studio
    ```sh
    security find-identity -v -p codesigning   # "Developer ID Application: NAME (TEAMID)"
    ```
+   If it is listed only without `-v` (invalid), the intermediate CA is missing:
+   `curl -fsSLO https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer && security import DeveloperIDG2CA.cer -k ~/Library/Keychains/login.keychain-db`.
+   If Xcode says "only the Account Holder", create it on developer.apple.com
+   with a CSR from Keychain Access (Certificate Assistant) instead.
    Export it (with private key) from Keychain Access as a `.p12` and keep it in a
    password manager. Apple caps how many of these you can create.
 2. Store notary credentials in the keychain (app-specific password from
@@ -214,9 +218,10 @@ tests. Needs Java 17 and the Android SDK 34 (`ANDROID_HOME` or
 
 ## Limitations
 
-- **Self-signed tier only:** no notarization, so a direct `.dmg` download shows
-  the "unverified developer" prompt (right-click → Open clears it). Homebrew is
-  clean because `brew` strips the quarantine flag.
+- **Self-signed tier only:** no notarization, so macOS blocks first launch
+  ("Not Opened") for both the `.dmg` and the Homebrew cask — current Homebrew
+  keeps the quarantine flag. Users clear it via System Settings → Privacy &
+  Security → Open Anyway. Developer ID + notarization removes the prompt.
 - **Auto-update across the signing switch:** the first Developer ID release is
   accepted by older self-signed installs via the EdDSA signature, but macOS
   will ask for Screen Recording/Camera/Mic permission again once.

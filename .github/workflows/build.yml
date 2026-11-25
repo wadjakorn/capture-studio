@@ -45,6 +45,11 @@ jobs:
           security unlock-keychain -p "$KP" "$KEYCHAIN"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          # Developer ID leaf certs chain through this intermediate; without it
+          # the identity is "not valid" and codesign can't find it.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN" || true
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KP" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" login.keychain
           security default-keychain -s "$KEYCHAIN"
@@ -124,7 +129,7 @@ jobs:
           draft: true
           name: Capture Studio ${{ github.ref_name }}
           body: |
-            ${{ steps.notary.outputs.enabled == 'true' && 'Signed with Developer ID and notarized by Apple. Universal (Apple silicon + Intel), macOS 15+.' || 'Self-signed build — not Apple-notarized. On a direct download macOS shows an "unverified developer" prompt: right-click the app → Open, or install via Homebrew (`brew install --cask wadjakorn/capture-studio/capture-studio`), which strips the quarantine flag.' }}
+            ${{ steps.notary.outputs.enabled == 'true' && 'Signed with Developer ID and notarized by Apple. Universal (Apple silicon + Intel), macOS 15+.' || 'Self-signed build — not Apple-notarized. macOS blocks the first launch ("Not Opened"): open System Settings → Privacy & Security → Open Anyway.' }}
 
       # Dispatch (no tag): keep the .dmg as a downloadable run artifact for smoke-testing.
       - name: Upload artifact

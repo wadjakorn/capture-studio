@@ -36,7 +36,9 @@ case "$TARGET" in
     *.app)
         # Notarization rejects anything not Developer ID signed with Hardened
         # Runtime + timestamp, so fail fast with a readable message.
-        if ! codesign -dvv "$TARGET" 2>&1 | grep -q "^Authority=Developer ID Application"; then
+        # Capture first: `| grep -q` under pipefail SIGPIPEs codesign -> false negative.
+        SIGINFO="$(codesign -dvv "$TARGET" 2>&1)"
+        if ! grep -q "^Authority=Developer ID Application" <<<"$SIGINFO"; then
             echo "error: $TARGET is not Developer ID signed." >&2
             echo "       rebuild: CS_SIGN_IDENTITY=\"Developer ID Application: NAME (TEAMID)\" scripts/build-app.sh release" >&2
             exit 1
