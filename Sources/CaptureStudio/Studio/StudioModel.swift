@@ -199,13 +199,21 @@ final class StudioModel: ObservableObject {
     /// The zoom lane is shown only when there is at least one zoom block.
     var showsZoomTimeline: Bool { !zoomBlocks.isEmpty }
 
-    /// Per-project defaults for new/unset blocks (global config).
+    /// This project's follow settings for zoom blocks without an override (set
+    /// by "Apply to all blocks"); nil = the app default. Saved in `EditState`.
+    @Published private(set) var zoomDefaultSensitivity: Double?
+    @Published private(set) var zoomDefaultOverflow: Bool?
+
+    /// Defaults for new/unset blocks: the app-wide ones, overridden by this
+    /// project's follow settings.
     var autoZoomConfig: AutoZoomConfig {
         var c = AutoZoomConfig()
         let v = UserDefaults.standard.double(forKey: "autoZoomDefaultScale")
         if v > 1 { c.defaultScale = v }
         let s = UserDefaults.standard.double(forKey: "autoZoomDefaultSensitivity")
         if s > 0 && s <= 1 { c.defaultSensitivity = s }
+        if let s = zoomDefaultSensitivity { c.defaultSensitivity = min(max(s, 0), 1) }
+        if let o = zoomDefaultOverflow { c.defaultOverflow = o }
         return c
     }
 
@@ -664,6 +672,8 @@ final class StudioModel: ObservableObject {
             subtitles = nil
         }
         zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
+        zoomDefaultSensitivity = edit.zoomDefaultSensitivity
+        zoomDefaultOverflow = edit.zoomDefaultOverflow
         layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
         // Empty stays empty (uncut); a stored partition is renormalized onto
         // the current duration (which may have changed since it was saved).
@@ -1196,10 +1206,15 @@ final class StudioModel: ObservableObject {
         setZoomBlocks(added.blocks, select: added.id)
     }
 
-    /// Copy the selected block's follow sensitivity and overflow onto every zoom
-    /// block. One undo step.
+    /// Make the selected block's follow sensitivity and overflow the project's
+    /// setting: copied onto every zoom block and kept as the default for blocks
+    /// added later (by hand or by "Auto zoom"). One undo step.
     func applySelectedZoomFollowSettingsToAll() {
-        guard let id = selectedZoomBlockID, zoomBlocks.count > 1 else { return }
+        guard let id = selectedZoomBlockID,
+              let src = zoomBlocks.first(where: { $0.id == id }) else { return }
+        let config = autoZoomConfig
+        zoomDefaultSensitivity = src.sensitivity ?? config.defaultSensitivity
+        zoomDefaultOverflow = src.overflow ?? config.defaultOverflow
         setZoomBlocks(ZoomTimeline.applyingFollowSettings(of: id, toAll: zoomBlocks), select: id)
     }
 
@@ -1320,8 +1335,10 @@ final class StudioModel: ObservableObject {
     /// (pan past the edges, revealing the background). Off by default.
     var selectedZoomOverflow: Bool {
         guard let id = selectedZoomBlockID,
-              let b = zoomBlocks.first(where: { $0.id == id }) else { return false }
-        return b.overflow ?? false
+              let b = zoomBlocks.first(where: { $0.id == id }) else {
+            return autoZoomConfig.defaultOverflow
+        }
+        return b.overflow ?? autoZoomConfig.defaultOverflow
     }
 
     /// Toggle the selected block's overflow (live; persist via commitZoomEdit).
@@ -2943,6 +2960,8 @@ final class StudioModel: ObservableObject {
             shapeBlocks: shapeBlocks,
             subtitles: subtitles,
             zoomBlocks: zoomBlocks,
+            zoomDefaultSensitivity: zoomDefaultSensitivity,
+            zoomDefaultOverflow: zoomDefaultOverflow,
             layoutBlocks: layoutBlocks,
             frameEnabled: frameEnabled,
             frameCenterX: frameCenterX,

@@ -125,6 +125,19 @@ import CoreGraphics
         #expect(AutoZoomTrack.sample(at: 9.0, track: on).overflow == false)
     }
 
+    @Test func overflowFallsBackToTheConfigDefault() {
+        var cfg = AutoZoomConfig()
+        cfg.defaultOverflow = true
+        let unset = AutoZoomTrack.build(blocks: [ZoomBlock(begin: 0, end: 4, scale: 2)],
+                                        cursorSamples: movingCursor(), sourceSize: source,
+                                        config: cfg)
+        let off = AutoZoomTrack.build(
+            blocks: [ZoomBlock(begin: 0, end: 4, scale: 2, overflow: false)],
+            cursorSamples: movingCursor(), sourceSize: source, config: cfg)
+        #expect(AutoZoomTrack.sample(at: 2.0, track: unset).overflow == true)
+        #expect(AutoZoomTrack.sample(at: 2.0, track: off).overflow == false)
+    }
+
     // MARK: - tuning mapping
 
     // MARK: - Edge cases
@@ -493,8 +506,8 @@ import CoreGraphics
                                 focusX: 0.3, focusY: 0.3)]
         let track = AutoZoomTrack.build(blocks: blocks, cursorSamples: s, sourceSize: hd)
         for i in 0..<(track.count - 1) {
-            #expect(abs(track[i + 1].focusX - track[i].focusX) < 40)
-            #expect(abs(track[i + 1].focusY - track[i].focusY) < 40)
+            #expect(abs(track[i + 1].focusX - track[i].focusX) < 60)
+            #expect(abs(track[i + 1].focusY - track[i].focusY) < 60)
         }
     }
 

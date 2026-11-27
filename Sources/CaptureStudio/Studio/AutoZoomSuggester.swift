@@ -222,14 +222,23 @@ enum AutoZoomSuggester {
     }
 
     /// `.all` → `generated`. `.block(id)` → `existing` with that one block
-    /// replaced by `generated`. Sorted by begin.
+    /// replaced by `generated`, which inherit its scale, sensitivity and
+    /// overflow (the user's choices for that stretch). Sorted by begin.
     static func merge(existing: [ZoomBlock], generated: [ZoomBlock],
                       scope: AutoZoomScope) -> [ZoomBlock] {
         switch scope {
         case .all:
             return generated.sorted { $0.begin < $1.begin }
         case .block(let id):
-            return (existing.filter { $0.id != id } + generated).sorted { $0.begin < $1.begin }
+            let replaced = existing.first { $0.id == id }
+            let inherited = generated.map { g -> ZoomBlock in
+                var b = g
+                b.scale = replaced?.scale
+                b.sensitivity = replaced?.sensitivity
+                b.overflow = replaced?.overflow
+                return b
+            }
+            return (existing.filter { $0.id != id } + inherited).sorted { $0.begin < $1.begin }
         }
     }
 

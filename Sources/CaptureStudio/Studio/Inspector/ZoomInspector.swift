@@ -155,13 +155,13 @@ struct ZoomInspector: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Copy this block's follow sensitivity + overflow to every block.
+            // Make this block's follow sensitivity + overflow the project setting.
             Button { model.applySelectedZoomFollowSettingsToAll() } label: {
                 Label("Apply sensitivity & overflow to all blocks",
                       systemImage: "square.on.square")
             }
-            .disabled(model.selectedZoomBlockID == nil || model.zoomBlocks.count < 2)
-            .help("Use this block's follow sensitivity and overflow setting for every zoom block")
+            .disabled(model.selectedZoomBlockID == nil)
+            .help("Use this block's follow sensitivity and overflow for every zoom block in this project, including blocks added later and by Auto zoom")
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)

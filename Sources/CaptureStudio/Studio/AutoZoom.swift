@@ -18,8 +18,8 @@ struct ZoomKeyframe: Equatable {
     var overflow: Bool = false
 }
 
-/// Tunables for the auto-zoom pre-pass. `defaultScale` / `defaultSensitivity`
-/// are overridden per project from UserDefaults (see `StudioModel.autoZoomConfig`).
+/// Tunables for the auto-zoom pre-pass. The defaults come from UserDefaults and
+/// the project's own follow settings (see `StudioModel.autoZoomConfig`).
 struct AutoZoomConfig {
     var defaultScale: Double = 2.0
     /// How readily the frame moves to follow the cursor, 0…1. Drives the safe
@@ -27,6 +27,8 @@ struct AutoZoomConfig {
     /// low = holds longer and glides, high = follows closely. Overridden per block
     /// by `ZoomBlock.sensitivity`.
     var defaultSensitivity: Double = 0.5
+    /// Overflow for blocks without their own setting (see `ZoomBlock.overflow`).
+    var defaultOverflow: Bool = false
     /// Keyframe sampling step (seconds).
     var step: Double = 1.0 / 60.0
     /// How much source (px) fits in the framing region at scale 1. nil = the full
@@ -137,7 +139,7 @@ enum AutoZoomTrack {
         func geometry(_ b: ZoomBlock) -> BlockGeometry {
             let hold = max(1, b.scale ?? config.defaultScale)
             let half = CGSize(width: view.width / (2 * hold), height: view.height / (2 * hold))
-            let overflow = b.overflow ?? false
+            let overflow = b.overflow ?? config.defaultOverflow
             // Contained: the view stays inside the content (mirrors the
             // compositor's cover clamp). Built from explicit min/max so an axis
             // where the view is larger than the content stays inverted and the
@@ -334,7 +336,7 @@ enum AutoZoomTrack {
         var t = runStart, bi = 0
         while t < runEnd - 1e-9 {
             while bi < run.count - 1 && t >= run[bi].end - 1e-9 { bi += 1 }
-            let overflow = run[bi].overflow ?? false
+            let overflow = run[bi].overflow ?? config.defaultOverflow
 
             // Scale = run envelope × blended target. weight (recenter blend) tracks
             // the envelope: full inside the run, easing to 0 only at the run edges,
@@ -394,7 +396,7 @@ enum AutoZoomTrack {
         }
         // Exact end keyframe (scale back to 1) for a clean handoff to the gap.
         out.append(ZoomKeyframe(t: runEnd, scale: 1, focusX: focus.x, focusY: focus.y,
-                                weight: 0, overflow: last.overflow ?? false))
+                                weight: 0, overflow: last.overflow ?? config.defaultOverflow))
     }
 
     /// How much source (px) fits in `region` at scale 1 when `sourceRect` is drawn

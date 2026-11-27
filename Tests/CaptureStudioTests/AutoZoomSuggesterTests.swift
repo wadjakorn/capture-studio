@@ -266,6 +266,17 @@ import CoreGraphics
                 == [a, x, c])
     }
 
+    @Test func mergeBlockInheritsTheReplacedBlocksSettings() {
+        let old = ZoomBlock(begin: 5, end: 9, scale: 3, sensitivity: 0.2, overflow: true)
+        let x = ZoomBlock(begin: 6, end: 8, mode: .manual, focusX: 0.4, focusY: 0.6)
+        let out = AutoZoomSuggester.merge(existing: [a, old, c], generated: [x],
+                                          scope: .block(old.id))
+        #expect(out.count == 3)
+        #expect(out[1].id == x.id && out[1].begin == 6 && out[1].end == 8)
+        #expect(out[1].scale == 3 && out[1].sensitivity == 0.2 && out[1].overflow == true)
+        #expect(out[1].mode == .manual && out[1].focusX == 0.4)
+    }
+
     @Test func nothingFoundLeavesBlocksUntouched() {
         #expect(AutoZoomSuggester.resolve(existing: [a, b, c], generated: [], scope: .all) == nil)
         #expect(AutoZoomSuggester.resolve(existing: [a, b, c], generated: [],

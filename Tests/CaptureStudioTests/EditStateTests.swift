@@ -277,9 +277,16 @@ import Foundation
             ZoomBlock(begin: 0, end: 2, scale: 2),                        // follow (default)
             ZoomBlock(begin: 2, end: 4, scale: 2, mode: .manual, focusX: 0.7, focusY: 0.3),
         ]
-        let edit = EditState(zoomBlocks: blocks)
+        let edit = EditState(zoomBlocks: blocks, zoomDefaultSensitivity: 0.8,
+                             zoomDefaultOverflow: true)
         try bundle.writeEdit(edit)
-        #expect(bundle.loadEdit().zoomBlocks == blocks)
+        let loaded = bundle.loadEdit()
+        #expect(loaded.zoomBlocks == blocks)
+        #expect(loaded.zoomDefaultSensitivity == 0.8 && loaded.zoomDefaultOverflow == true)
+        // Unset project defaults stay unset.
+        try bundle.writeEdit(EditState(zoomBlocks: blocks))
+        #expect(bundle.loadEdit().zoomDefaultSensitivity == nil)
+        #expect(bundle.loadEdit().zoomDefaultOverflow == nil)
     }
 
     @Test func legacyZoomBlockDefaultsToFollow() throws {

@@ -42,8 +42,9 @@ struct ZoomMove: Equatable {
 
 /// Pure offline camera planning for auto-zoom follow blocks: split a cursor path
 /// into held shots (look-ahead, so the camera can anticipate), and describe the
-/// moves between them in closed form (minimum-jerk, so they start and stop with
-/// zero velocity and acceleration, and overlap by simple addition). No
+/// moves between them in closed form (a spring-like S-curve that starts and
+/// stops with zero velocity and acceleration, so moves overlap by simple
+/// addition). No
 /// AVFoundation / AppKit deps — unit-tested in isolation.
 enum ZoomShotPlanner {
     /// The cursor must stay inside the view shrunk by this factor while holding.
@@ -52,11 +53,31 @@ enum ZoomShotPlanner {
     static let vRest = 0.3
     /// Longest the planner waits for the cursor to land after it leaves a shot.
     static let maxTransit = 0.8
-    static let dMin = 0.35
-    static let dMax = 1.4
+    /// Shortest / longest move. Screen-recording cameras read best when a move
+    /// takes roughly 0.3–0.6 s; only a hop across most of the screen is longer.
+    static let dMin = 0.3
+    static let dMax = 0.9
     /// Peak on-screen speed (view-widths/s) a duration-capped move may reach
     /// before the zoom dips to slow it down.
-    static let vMax = 2.5
+    static let vMax = 3.5
+    /// The camera may start moving at most this long before the cursor leaves
+    /// the shot. More than a hint of anticipation reads as the frame wandering
+    /// off on its own.
+    static let maxLead = 0.15
+    /// Time warp of the move curve (`ease`): < 1 puts the peak speed early and
+    /// stretches the landing, like a damped spring. Must stay above 2/3 so the
+    /// move still starts with zero acceleration.
+    static let easeWarp = 0.75
+    /// Peak of `ease`'s slope — the peak speed of a unit move of unit duration.
+    static let easePeak: Double = {
+        var peak = 0.0
+        let n = 2000
+        for i in 0..<n {
+            let a = Double(i) / Double(n) - 0.5, b = Double(i + 1) / Double(n) - 0.5
+            peak = max(peak, (ease(b) - ease(a)) * Double(n))
+        }
+        return peak
+    }()
     /// A dip never takes the scale below this (scale 1 would un-recentre the frame).
     static let dipFloor = 1.1
     /// Pixel tolerance on safe-zone tests, so a cursor sitting exactly on the
@@ -65,8 +86,8 @@ enum ZoomShotPlanner {
 
     static func followTuning(_ sensitivity: Double) -> FollowTuning {
         let c = min(max(sensitivity, 0), 1)
-        return FollowTuning(safeFrac: 0.80 - 0.55 * c,
-                            vPref: 0.7 + 0.6 * c,
+        return FollowTuning(safeFrac: 0.85 - 0.30 * c,
+                            vPref: 1.2 + 1.2 * c,
                             flickGrace: 0.50 - 0.40 * c)
     }
 
@@ -203,6 +224,15 @@ enum ZoomShotPlanner {
         return x * x * x * (10 - 15 * x + 6 * x * x)
     }
 
+    /// The move curve over `u ∈ [−½, ½]` → `[0, 1]`: minimum-jerk on warped time,
+    /// so it leaves quickly and settles gently (spring-like) while still starting
+    /// and stopping with zero velocity and acceleration.
+    static func ease(_ u: Double) -> Double {
+        if u <= -0.5 { return 0 }
+        if u >= 0.5 { return 1 }
+        return minJerk(pow(u + 0.5, easeWarp) - 0.5)
+    }
+
     /// Smooth 0 → 1 → 0 over `u ∈ [−½, ½]`, zero slope at the ends and the peak.
     static func bump(_ u: Double) -> Double {
         guard abs(u) < 0.5 else { return 0 }
@@ -226,14 +256,15 @@ enum ZoomShotPlanner {
     static func dipRatio(hold: Double, dNorm: Double, d: Double) -> Double {
         guard d >= dMax - 1e-9, dNorm > 0, hold > 0 else { return 1 }
         let floor = min(1, dipFloor / hold)
-        return min(max(vMax * d / (1.875 * dNorm), floor), 1)
+        return min(max(vMax * d / (easePeak * dNorm), floor), 1)
     }
 
     /// Centre time for a follow move. Starts at the middle of the cursor's flight
-    /// and is delayed, in `step` increments up to `tExit + d/2` (no anticipation
-    /// at all), until the camera leaving early never pushes the cursor outside
-    /// the hard margin before the cursor itself starts to leave. `from` is the
-    /// previous shot's aim; `delta` the change of centre.
+    /// — but never more than `maxLead` before the cursor leaves — and is delayed,
+    /// in `step` increments up to `tExit + d/2` (no anticipation at all), until
+    /// the camera leaving early never pushes the cursor outside the hard margin
+    /// before the cursor itself starts to leave. `from` is the previous shot's
+    /// aim; `delta` the change of centre.
     static func moveTime(cursor: (Double) -> CGPoint, from: CGPoint, delta: CGVector,
                          d: Double, tExit: Double, tArrive: Double, half: CGSize,
                          step: Double) -> Double {
@@ -245,7 +276,7 @@ enum ZoomShotPlanner {
         func keepsCursorInFrame(_ t: Double) -> Bool {
             var tau = tExit
             while tau > t - d / 2 {
-                let s = minJerk((tau - t) / d)
+                let s = ease((tau - t) / d)
                 let p = cursor(tau)
                 if abs(Double(p.x - from.x) - Double(delta.dx) * s) > hardW
                     || abs(Double(p.y - from.y) - Double(delta.dy) * s) > hardH { return false }
@@ -253,7 +284,7 @@ enum ZoomShotPlanner {
             }
             return true
         }
-        var t = mid
+        var t = max(mid, tExit - maxLead + d / 2)
         while t < latest {
             if keepsCursorInFrame(t) { return t }
             t += step
@@ -263,7 +294,7 @@ enum ZoomShotPlanner {
 
     /// Progress of `move` at `t`, 0…1.
     static func progress(_ move: ZoomMove, at t: Double) -> Double {
-        move.d > 0 ? minJerk((t - move.t) / move.d) : (t >= move.t ? 1 : 0)
+        move.d > 0 ? ease((t - move.t) / move.d) : (t >= move.t ? 1 : 0)
     }
 
     /// The focus path: `origin` plus every move's contribution at `t`.

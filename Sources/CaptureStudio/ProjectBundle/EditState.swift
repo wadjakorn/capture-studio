@@ -766,6 +766,10 @@ struct EditState: Codable, Equatable {
     /// Auto-zoom blocks. Empty = no auto zoom/pan. Non-overlapping; during each
     /// block the canvas zooms + pans to follow the cursor.
     var zoomBlocks: [ZoomBlock] = []
+    /// Project-wide follow settings for zoom blocks that carry no override of
+    /// their own (blocks added by hand or by "Auto zoom"). nil = the app default.
+    var zoomDefaultSensitivity: Double? = nil
+    var zoomDefaultOverflow: Bool? = nil
     /// Layout timeline. Empty = the whole clip uses `cameraHomeLayout`. Non-empty
     /// = each block sets the frame layout over its span; uncovered gaps render
     /// blank (black). Non-overlapping (a single layout at a time).
@@ -808,7 +812,8 @@ struct EditState: Codable, Equatable {
          cameraBlocks: [CameraBlock] = [], textBlocks: [TextBlock] = [],
          shapeBlocks: [ShapeBlock] = [],
          subtitles: SubtitleTrack? = nil,
-         zoomBlocks: [ZoomBlock] = [], layoutBlocks: [LayoutBlock] = [],
+         zoomBlocks: [ZoomBlock] = [], zoomDefaultSensitivity: Double? = nil,
+         zoomDefaultOverflow: Bool? = nil, layoutBlocks: [LayoutBlock] = [],
          frameEnabled: Bool = false, frameCenterX: Double = 0.5,
          frameCenterY: Double = 0.5, frameWidth: Double = 0.6,
          frameHeight: Double = 0.6, segments: [TimelineSegment] = []) {
@@ -848,6 +853,8 @@ struct EditState: Codable, Equatable {
         self.shapeBlocks = shapeBlocks
         self.subtitles = subtitles
         self.zoomBlocks = zoomBlocks
+        self.zoomDefaultSensitivity = zoomDefaultSensitivity
+        self.zoomDefaultOverflow = zoomDefaultOverflow
         self.layoutBlocks = layoutBlocks
         self.frameEnabled = frameEnabled
         self.frameCenterX = frameCenterX
@@ -907,6 +914,8 @@ struct EditState: Codable, Equatable {
         shapeBlocks = try c.decodeIfPresent([ShapeBlock].self, forKey: .shapeBlocks) ?? []
         subtitles = try c.decodeIfPresent(SubtitleTrack.self, forKey: .subtitles)
         zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
+        zoomDefaultSensitivity = try c.decodeIfPresent(Double.self, forKey: .zoomDefaultSensitivity)
+        zoomDefaultOverflow = try c.decodeIfPresent(Bool.self, forKey: .zoomDefaultOverflow)
         layoutBlocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .layoutBlocks) ?? []
         frameEnabled = try c.decodeIfPresent(Bool.self, forKey: .frameEnabled) ?? false
         frameCenterX = try c.decodeIfPresent(Double.self, forKey: .frameCenterX) ?? 0.5

@@ -25,9 +25,9 @@ import CoreGraphics
 
     @Test func followTuningEndpoints() {
         let lo = ZoomShotPlanner.followTuning(0), hi = ZoomShotPlanner.followTuning(1)
-        #expect(abs(lo.safeFrac - 0.80) < 1e-9 && abs(lo.vPref - 0.7) < 1e-9
+        #expect(abs(lo.safeFrac - 0.85) < 1e-9 && abs(lo.vPref - 1.2) < 1e-9
                 && abs(lo.flickGrace - 0.50) < 1e-9)
-        #expect(abs(hi.safeFrac - 0.25) < 1e-9 && abs(hi.vPref - 1.3) < 1e-9
+        #expect(abs(hi.safeFrac - 0.55) < 1e-9 && abs(hi.vPref - 2.4) < 1e-9
                 && abs(hi.flickGrace - 0.10) < 1e-9)
         #expect(ZoomShotPlanner.followTuning(-1) == lo)
         #expect(ZoomShotPlanner.followTuning(2) == hi)
@@ -48,33 +48,35 @@ import CoreGraphics
     }
 
     @Test func flickThatReturnsIsIgnored() {
-        // Safe zone ±252 px (0.525·480), hard margin ±441.6. A 0.1 s excursion to
+        // Safe zone ±336 px (0.70·480), hard margin ±441.6. A 0.1 s excursion to
         // +350 stays inside the hard margin and returns within the 0.3 s grace.
         let shots = plan({ t in CGPoint(x: (t >= 2 && t < 2.1) ? 1310 : 960, y: 540) }, end: 5)
         #expect(shots.count == 1)
     }
 
     @Test func flickAcrossHardMarginExits() {
-        // Snappy tuning (safe zone ±120 px, so one shot cannot cover both spots).
-        // A 0.05 s excursion to +460 crosses the hard margin (0.92·480 = 441.6):
+        // Snappy tuning (safe zone ±264 px, so one shot cannot cover both spots).
+        // A 0.05 s excursion to +600 crosses the hard margin (0.92·480 = 441.6):
         // it counts as an exit even though it returns within the grace period.
         let snappy = ZoomShotPlanner.followTuning(1)
         let shots = ZoomShotPlanner.shots(
-            cursor: { t in CGPoint(x: (t >= 2 && t < 2.05) ? 1420 : 960, y: 540) },
+            cursor: { t in CGPoint(x: (t >= 2 && t < 2.05) ? 1560 : 960, y: 540) },
             begin: 0, end: 5, start: nil, half: half, tuning: snappy, reach: reach,
             breaks: [], step: step)
         #expect(shots.count >= 2)
     }
 
     @Test func relocationMakesOneShotAtLanding() {
-        // Rest at the centre, fly 0.3 s, rest at (1500, 700).
+        // Rest at the centre, fly 0.3 s, rest at (1700, 700) — too far for one
+        // safe zone (672 px wide) to hold both.
         let cursor: (Double) -> CGPoint = { t in
             let f = min(max((t - 2) / 0.3, 0), 1)
-            return CGPoint(x: 960 + 540 * f, y: 540 + 160 * f)
+            return CGPoint(x: 960 + 740 * f, y: 540 + 160 * f)
         }
         let shots = plan(cursor, end: 6)
         #expect(shots.count == 2)
-        #expect(near(shots[1].aim, CGPoint(x: 1500, y: 700)))
+        guard shots.count == 2 else { return }
+        #expect(near(shots[1].aim, CGPoint(x: 1700, y: 700)))
         #expect(near(shots[1].center, CGPoint(x: 1440, y: 700)))   // x clamped by reach
         #expect(shots[1].tExit < shots[1].tArrive)
         #expect(!shots[1].isCut)
@@ -155,32 +157,56 @@ import CoreGraphics
         #expect(abs((1 - ZoomShotPlanner.minJerk(0.5 - h)) / h) < 1e-3)
     }
 
+    @Test func easeIsSpringLike() {
+        #expect(ZoomShotPlanner.ease(-0.5) == 0 && ZoomShotPlanner.ease(-9) == 0)
+        #expect(ZoomShotPlanner.ease(0.5) == 1 && ZoomShotPlanner.ease(9) == 1)
+        // Leaves quickly, settles gently: past half way at the centre time.
+        #expect(ZoomShotPlanner.ease(0) > 0.6)
+        // Zero slope at both ends, monotonic in between.
+        let h = 1e-3
+        #expect(abs(ZoomShotPlanner.ease(-0.5 + h) / h) < 1e-2)
+        #expect(abs((1 - ZoomShotPlanner.ease(0.5 - h)) / h) < 1e-2)
+        var prev = 0.0
+        for i in 0...200 {
+            let v = ZoomShotPlanner.ease(Double(i) / 200 - 0.5)
+            #expect(v >= prev - 1e-12)
+            prev = v
+        }
+        #expect(abs(ZoomShotPlanner.easePeak - 1.799) < 5e-3)
+    }
+
     @Test func durationGrowsThenSaturates() {
-        #expect(abs(ZoomShotPlanner.duration(dNorm: 0.1, vPref: 1.0) - 0.35) < 1e-9)
+        #expect(abs(ZoomShotPlanner.duration(dNorm: 0.1, vPref: 1.0) - 0.3) < 1e-9)
         #expect(abs(ZoomShotPlanner.duration(dNorm: 0.7, vPref: 1.0) - 0.7) < 1e-9)
-        #expect(abs(ZoomShotPlanner.duration(dNorm: 5, vPref: 1.0) - 1.4) < 1e-9)
+        #expect(abs(ZoomShotPlanner.duration(dNorm: 5, vPref: 1.0) - 0.9) < 1e-9)
     }
 
     @Test func dipOnlyOnDurationCappedMoves() {
+        let cap = ZoomShotPlanner.dMax
         #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 0.5, d: 0.5) == 1)
         #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 3, d: 0.7) == 1)     // shortened
-        #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 1.5, d: 1.4) == 1)   // under vMax
-        #expect(abs(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 3, d: 1.4) - 0.6222) < 1e-3)
-        #expect(abs(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 20, d: 1.4) - 0.55) < 1e-9)
-        #expect(ZoomShotPlanner.dipRatio(hold: 1.05, dNorm: 20, d: 1.4) == 1)
+        #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 1.5, d: cap) == 1)   // under vMax
+        let expected = ZoomShotPlanner.vMax * cap / (ZoomShotPlanner.easePeak * 3)
+        #expect(expected < 1 && expected > 0.55)
+        #expect(abs(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 3, d: cap) - expected) < 1e-9)
+        #expect(abs(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 20, d: cap) - 0.55) < 1e-9)
+        #expect(ZoomShotPlanner.dipRatio(hold: 1.05, dNorm: 20, d: cap) == 1)
     }
 
     @Test func dipDepthGrowsWithDistance() {
-        #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 3, d: 1.4)
-                > ZoomShotPlanner.dipRatio(hold: 2, dNorm: 4, d: 1.4))
+        let cap = ZoomShotPlanner.dMax
+        #expect(ZoomShotPlanner.dipRatio(hold: 2, dNorm: 2.5, d: cap)
+                > ZoomShotPlanner.dipRatio(hold: 2, dNorm: 3, d: cap))
     }
 
-    @Test func uncappedMovesNeverExceedVMax() {
-        for vPref in stride(from: 0.7, through: 1.3, by: 0.1) {
+    @Test func uncappedMovesStayUnderVMaxUpToDefaultSensitivity() {
+        // Snappier settings trade this bound for speed on purpose.
+        let top = ZoomShotPlanner.followTuning(0.5).vPref
+        for vPref in stride(from: ZoomShotPlanner.followTuning(0).vPref, through: top, by: 0.1) {
             for dn in stride(from: 0.1, through: 5.0, by: 0.1) {
                 let d = ZoomShotPlanner.duration(dNorm: dn, vPref: vPref)
                 if d < ZoomShotPlanner.dMax - 1e-9 {
-                    #expect(1.875 * dn / d <= ZoomShotPlanner.vMax + 1e-9)
+                    #expect(ZoomShotPlanner.easePeak * dn / d <= ZoomShotPlanner.vMax + 1e-9)
                 }
             }
         }
@@ -190,7 +216,8 @@ import CoreGraphics
         let o = CGPoint(x: 100, y: 50)
         let m = [ZoomMove(t: 1, d: 1, dx: 100, dy: 0)]
         #expect(abs(ZoomShotPlanner.focus(at: 0.4, origin: o, moves: m).x - 100) < 1e-9)
-        #expect(abs(ZoomShotPlanner.focus(at: 1.0, origin: o, moves: m).x - 150) < 1e-9)
+        #expect(abs(Double(ZoomShotPlanner.focus(at: 1.0, origin: o, moves: m).x)
+                    - (100 + 100 * ZoomShotPlanner.ease(0))) < 1e-9)
         #expect(abs(ZoomShotPlanner.focus(at: 1.6, origin: o, moves: m).x - 200) < 1e-9)
         #expect(abs(ZoomShotPlanner.focus(at: 1.0, origin: o, moves: m).y - 50) < 1e-9)
     }
@@ -213,7 +240,7 @@ import CoreGraphics
         #expect(ZoomShotPlanner.focus(at: 2, origin: .zero, moves: m).y == -40)
     }
 
-    @Test func peakSpeedMatchesMinJerkBound() {
+    @Test func peakSpeedMatchesEasePeak() {
         let m = [ZoomMove(t: 1, d: 0.8, dx: 500, dy: 0)]
         var peak = 0.0
         var prev = Double(ZoomShotPlanner.focus(at: 0, origin: .zero, moves: m).x)
@@ -222,8 +249,8 @@ import CoreGraphics
             peak = max(peak, abs(x - prev) / step)
             prev = x
         }
-        #expect(peak <= 1.875 * 500 / 0.8 * 1.01)
-        #expect(peak >= 1.875 * 500 / 0.8 * 0.95)
+        #expect(peak <= ZoomShotPlanner.easePeak * 500 / 0.8 * 1.01)
+        #expect(peak >= ZoomShotPlanner.easePeak * 500 / 0.8 * 0.95)
     }
 
     @Test func dipFactorIsOneOutsideMoves() {
@@ -248,6 +275,17 @@ import CoreGraphics
         #expect(abs(t - 2.1) < 1e-9)
     }
 
+    @Test func moveTimeLeadIsCapped() {
+        // A long move whose early start would not hurt the framing still begins
+        // at most `maxLead` before the cursor leaves.
+        let from = CGPoint(x: 960, y: 540)
+        let d = 0.9
+        let t = ZoomShotPlanner.moveTime(cursor: { _ in from }, from: from,
+                                         delta: CGVector(dx: 100, dy: 0), d: d,
+                                         tExit: 2.0, tArrive: 2.2, half: half, step: step)
+        #expect(abs((t - d / 2) - (2.0 - ZoomShotPlanner.maxLead)) < 1e-9)
+    }
+
     @Test func moveTimeDelaysForRestingCursor() {
         // 4× view (half 240×135): the cursor rests until it leaves at t = 2, then
         // hops 1380 px. Leaving D/2 early would push it out of frame.
@@ -264,7 +302,7 @@ import CoreGraphics
         #expect(t > (tExit + tArrive) / 2)
         var tau = 0.0
         while tau <= tExit {
-            let view = Double(from.x) + 1380 * ZoomShotPlanner.minJerk((tau - t) / d)
+            let view = Double(from.x) + 1380 * ZoomShotPlanner.ease((tau - t) / d)
             #expect(abs(Double(cursor(tau).x) - view) <= 0.92 * 240 + 1)
             tau += step
         }

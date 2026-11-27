@@ -497,3 +497,27 @@ session, and a recording with long cursor travel at 2.5×.
   optimal camera paths" (CVPR 2011).
 - Screen Studio auto-zoom guide; Reframed and Screenize READMEs (behavioural
   reference only).
+
+## Revision — feel tuning and project follow defaults (2026-11-27)
+
+After trying phases 1+2 in the app the follow camera read as slow and as moving
+before the pointer did. The values below supersede the ones quoted earlier in
+this document; the structure (shots, summed moves, dip on capped moves) is
+unchanged.
+
+| Tunable | Was | Now | Why |
+| --- | --- | --- | --- |
+| `safeFrac` (sensitivity 0 → 1) | 0.80 → 0.25 | 0.85 → 0.55 (0.70 at the default) | wider dead zone: fewer moves |
+| `vPref` (frame-widths/s) | 0.7 → 1.3 | 1.2 → 2.4 | typical move lands in 0.3–0.6 s |
+| `dMin` / `dMax` | 0.35 / 1.4 s | 0.3 / 0.9 s | |
+| `vMax` | 2.5 | 3.5 | holds for uncapped moves up to the default sensitivity; snappier settings exceed it on purpose |
+| Move curve | minimum-jerk `S(u)` | `ease(u) = S(x^0.75 − ½)`, `x = u + ½` | leaves quickly, settles gently (spring-like); still zero velocity and acceleration at both ends. Peak slope 1.80 (`easePeak`) replaces 1.875 in the dip law |
+| Anticipation | move centred on the flight midpoint | additionally starts at most `maxLead` = 0.15 s before the cursor exits | more than a hint of lead reads as the frame wandering off |
+
+Project follow defaults: `EditState.zoomDefaultSensitivity` /
+`zoomDefaultOverflow` (nil = app default). "Apply sensitivity & overflow to all
+blocks" stores the selected block's effective values there and copies them onto
+every block; blocks without an override — including ones a later "Auto zoom"
+generates — fall back to them (`AutoZoomConfig.defaultSensitivity` /
+`defaultOverflow`). Re-running Auto zoom for "Only this block" makes the
+generated blocks inherit the replaced block's scale, sensitivity and overflow.
