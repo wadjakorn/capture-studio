@@ -4,6 +4,23 @@ import SwiftUI
 /// on the selected move/zoom block.
 struct ZoomInspector: View {
     @ObservedObject var model: StudioModel
+    /// Blocks exist: ask whether auto zoom replaces all of them or just one.
+    @State private var askAutoZoomScope = false
+    /// The last auto zoom found no clicks or typing in range.
+    @State private var autoZoomFoundNothing = false
+
+    /// Run auto zoom, or ask for the scope first when there are blocks to replace.
+    private func autoZoomTapped() {
+        if model.zoomBlocks.isEmpty {
+            runAutoZoom(.all)
+        } else {
+            askAutoZoomScope = true
+        }
+    }
+
+    private func runAutoZoom(_ scope: AutoZoomScope) {
+        autoZoomFoundNothing = !model.generateAutoZoom(scope: scope)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -25,6 +42,30 @@ struct ZoomInspector: View {
                 }
                 .disabled(model.selectedZoomBlockID == nil)
                 .help("Delete the selected zoom block")
+            }
+
+            // Generate blocks from the recorded clicks / typing.
+            Button { autoZoomTapped() } label: {
+                Label("Auto zoom", systemImage: "wand.and.stars")
+            }
+            .disabled(!model.canAutoZoom)
+            .help(model.canAutoZoom
+                  ? "Create zoom blocks from clicks and typing in this recording"
+                  : "Zoom needs cursor data from a screen recording")
+            .confirmationDialog("Auto zoom", isPresented: $askAutoZoomScope,
+                                titleVisibility: .visible) {
+                Button("All blocks (replace \(model.zoomBlocks.count))") { runAutoZoom(.all) }
+                if let id = model.selectedZoomBlockID {
+                    Button("Only this block") { runAutoZoom(.block(id)) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Replace zoom blocks with ones generated from clicks and typing.")
+            }
+            if autoZoomFoundNothing {
+                Text("Nothing to zoom on here — no clicks or typing in range, or the range is too short.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Split the block at the playhead into two touching segments (a
@@ -99,7 +140,7 @@ struct ZoomInspector: View {
                         in: 0...1,
                         onEditingChanged: { editing in if !editing { model.commitZoomEdit() } }
                     )
-                    Text("How aggressively the zoom pans toward the cursor — low = calm, high = snappy.")
+                    Text("How readily the frame moves to follow the cursor — low = holds longer and glides, high = follows closely.")
                         .font(.caption2).foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -113,8 +154,17 @@ struct ZoomInspector: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // Copy this block's follow sensitivity + overflow to every block.
+            Button { model.applySelectedZoomFollowSettingsToAll() } label: {
+                Label("Apply sensitivity & overflow to all blocks",
+                      systemImage: "square.on.square")
+            }
+            .disabled(model.selectedZoomBlockID == nil || model.zoomBlocks.count < 2)
+            .help("Use this block's follow sensitivity and overflow setting for every zoom block")
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: model.selectedZoomBlockID) { _, _ in autoZoomFoundNothing = false }
     }
 }

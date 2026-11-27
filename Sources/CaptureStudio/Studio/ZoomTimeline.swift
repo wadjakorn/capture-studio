@@ -93,6 +93,20 @@ enum ZoomTimeline {
         return (sortedByBegin(blocks + [block]), block.id)
     }
 
+    /// Copy one block's follow sensitivity and overflow setting onto every block
+    /// (overrides included, so nil — "use the default" — is copied too). Scale,
+    /// mode and manual targets are per-block framing and stay untouched. No-op
+    /// when `id` is not in `blocks`.
+    static func applyingFollowSettings(of id: UUID, toAll blocks: [ZoomBlock]) -> [ZoomBlock] {
+        guard let src = blocks.first(where: { $0.id == id }) else { return blocks }
+        return blocks.map { b in
+            var c = b
+            c.sensitivity = src.sensitivity
+            c.overflow = src.overflow
+            return c
+        }
+    }
+
     // MARK: - Helpers
 
     private static func sortedByBegin(_ blocks: [ZoomBlock]) -> [ZoomBlock] {

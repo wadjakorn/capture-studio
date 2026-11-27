@@ -208,6 +208,48 @@ final class StudioModel: ObservableObject {
         if s > 0 && s <= 1 { c.defaultSensitivity = s }
         return c
     }
+
+    /// Cut points on the collapsed timeline while `withCollapsedTimeline` is
+    /// running (empty otherwise): where the auto-zoom camera must cut with the
+    /// picture instead of gliding.
+    private var collapsedCutTimes: [Double] = []
+
+    /// Where the main video sits on a `canvas`-sized frame: the fit placement
+    /// (nil in cover/crop mode) and the framing window (nil when off). One source
+    /// of truth for the compositor layout and the auto-zoom planner.
+    private func screenPlacementRects(canvas: CGSize) -> (fit: CGRect?, frame: CGRect?) {
+        let fit: CGRect? = cropAspect.isFit
+            ? CropMath.fitPlacement(source: sourceSize, canvas: canvas,
+                                    zoom: CGFloat(cropZoom),
+                                    centerX: CGFloat(cropCenterX),
+                                    centerY: CGFloat(cropCenterY))
+            : nil
+        let frame: CGRect? = frameEnabled
+            ? FrameMath.rectInCanvas(canvas, centerX: frameCenterX, centerY: frameCenterY,
+                                     width: frameWidth, height: frameHeight)
+            : nil
+        return (fit, frame)
+    }
+
+    /// `autoZoomConfig` plus the framing geometry the planner needs: how much
+    /// source the framing region shows at 1× and which part of the source the
+    /// picture can show — the same placement the compositor uses (fit: the whole
+    /// source at the fit rect; cover: the crop filling the canvas).
+    private func zoomTrackConfig(canvas: CGSize) -> AutoZoomConfig {
+        var c = autoZoomConfig
+        guard sourceSize.width > 0, sourceSize.height > 0,
+              canvas.width > 0, canvas.height > 0 else { return c }
+        let rects = screenPlacementRects(canvas: canvas)
+        let full = CGRect(origin: .zero, size: sourceSize)
+        let canvasRect = CGRect(origin: .zero, size: canvas)
+        let sourceRect = rects.fit != nil ? full : (cropRectInSource ?? full)
+        c.contentRect = sourceRect
+        c.viewSize = AutoZoomTrack.viewSize(sourceRect: sourceRect,
+                                            placedAt: rects.fit ?? canvasRect,
+                                            region: rects.frame ?? canvasRect)
+        c.discontinuities = collapsedCutTimes
+        return c
+    }
     var selectedBlock: CameraBlock? {
         guard let id = selectedBlockID else { return nil }
         return cameraBlocks.first { $0.id == id }
@@ -761,10 +803,12 @@ final class StudioModel: ObservableObject {
     private func loadOverlayData(display: DisplayInfo) {
         guard let data = try? Data(contentsOf: bundle.eventsURL),
               let events = try? EventsCodec.decodeLines(data), !events.isEmpty else {
-            cursorSamples = []; clickSamples = []
+            cursorSamples = []; clickSamples = []; zoomActivity = ZoomActivity()
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
+        zoomActivity = ZoomActivity.from(events: events, display: display,
+                                         sourceSize: sourceSize).trimmed(to: duration)
         // events.jsonl is in absolute master time, which is the timeline (the
         // composition is always the uncut masters); drop samples past the end.
         let dur = duration
@@ -1152,6 +1196,40 @@ final class StudioModel: ObservableObject {
         setZoomBlocks(added.blocks, select: added.id)
     }
 
+    /// Copy the selected block's follow sensitivity and overflow onto every zoom
+    /// block. One undo step.
+    func applySelectedZoomFollowSettingsToAll() {
+        guard let id = selectedZoomBlockID, zoomBlocks.count > 1 else { return }
+        setZoomBlocks(ZoomTimeline.applyingFollowSettings(of: id, toAll: zoomBlocks), select: id)
+    }
+
+    /// What the user did during the recording (clicks, drags, typing, scrolls) —
+    /// the input to "Auto zoom". Loaded with the cursor samples.
+    private(set) var zoomActivity = ZoomActivity()
+
+    /// Auto zoom needs the same cursor data as a hand-placed zoom block.
+    var canAutoZoom: Bool { hasCursorData }
+
+    /// Generate zoom blocks from the recorded activity and replace either every
+    /// block (`.all`) or just one (`.block`, using only the activity inside its
+    /// span). One undo step. Returns false — and changes nothing — when the
+    /// scope's block no longer exists or no activity was found in range.
+    @discardableResult
+    func generateAutoZoom(scope: AutoZoomScope) -> Bool {
+        guard hasCursorData, sourceSize.width > 0, sourceSize.height > 0,
+              let span = AutoZoomSuggester.span(for: scope, existing: zoomBlocks,
+                                                duration: duration) else { return false }
+        let ramp = AutoZoomTrack.rampFor(autoZoomConfig.defaultSensitivity)
+        let generated = AutoZoomSuggester.suggest(
+            activity: zoomActivity, cursorSamples: cursorSamples, span: span,
+            sourceSize: sourceSize, cuts: TimelineSegments.cutRanges(segments),
+            config: AutoZoomSuggestConfig(rampIn: ramp, rampOut: ramp))
+        guard let result = AutoZoomSuggester.resolve(existing: zoomBlocks, generated: generated,
+                                                     scope: scope) else { return false }
+        setZoomBlocks(result, select: nil)
+        return true
+    }
+
     func moveZoomBlockBegin(_ id: UUID, toTime: Double) {
         zoomBlocks = ZoomTimeline.moveBegin(zoomBlocks, id: id, toTime: toTime, duration: duration)
         applyVideoComposition()
@@ -1527,9 +1605,21 @@ final class StudioModel: ObservableObject {
         guard hasCursorData, sourceSize.width > 0, sourceSize.height > 0 else { return }
         let b = zoomBlocks[i]
         let t = min(max(currentTime, b.begin), b.end)
-        let track = AutoZoomTrack.build(blocks: zoomBlocks, cursorSamples: cursorSamples,
-                                        sourceSize: sourceSize, config: autoZoomConfig)
-        let sampled = AutoZoomTrack.sample(at: t, track: track)
+        // Build the track the way the preview does (on the cut timeline, with its
+        // discontinuities) so the seeded point is exactly what is on screen.
+        let sampled: (scale: CGFloat, focus: CGPoint, weight: CGFloat, overflow: Bool)
+        func build() -> [ZoomKeyframe] {
+            AutoZoomTrack.build(blocks: zoomBlocks, cursorSamples: cursorSamples,
+                                sourceSize: sourceSize,
+                                config: zoomTrackConfig(canvas: renderSize))
+        }
+        if !previewCuts.isEmpty, let cutComp = previewComposition {
+            let cuts = previewCuts
+            let track = withCollapsedTimeline(cuts: cuts, cutComposition: cutComp) { build() }
+            sampled = AutoZoomTrack.sample(at: TimelineCut.map(t, cuts: cuts), track: track)
+        } else {
+            sampled = AutoZoomTrack.sample(at: t, track: build())
+        }
         let p: CGPoint
         if sampled.scale > 1 {
             p = sampled.focus
@@ -2573,23 +2663,17 @@ final class StudioModel: ObservableObject {
         if cameraTrackID != nil { layout.cameraTransform = cameraTransform }
         // Fit/template placement (canvas px, top-left): the whole source scaled
         // to fit at the current zoom/pan. nil = cover/crop placement.
-        if cropAspect.isFit {
-            layout.screenFit = CropMath.fitPlacement(source: sourceSize, canvas: canvas,
-                                                     zoom: CGFloat(cropZoom),
-                                                     centerX: CGFloat(cropCenterX),
-                                                     centerY: CGFloat(cropCenterY))
+        let placement = screenPlacementRects(canvas: canvas)
+        if let fit = placement.fit {
+            layout.screenFit = fit
             layout.background = canvasBackground
             layout.backgroundBlurRadius = CGFloat(canvasBackgroundBlur) * canvas.width
         }
         // Framing window: mask the main-video group to a static canvas rect.
         // The configured background fill shows outside the window, so the
         // background settings apply here too (even outside fit mode).
-        if frameEnabled {
-            layout.screenFrame = FrameMath.rectInCanvas(canvas,
-                                                        centerX: frameCenterX,
-                                                        centerY: frameCenterY,
-                                                        width: frameWidth,
-                                                        height: frameHeight)
+        if let frame = placement.frame {
+            layout.screenFrame = frame
             layout.background = canvasBackground
             layout.backgroundBlurRadius = CGFloat(canvasBackgroundBlur) * canvas.width
         }
@@ -2674,7 +2758,7 @@ final class StudioModel: ObservableObject {
             overlay.autoZoom = AutoZoomTrack.build(blocks: zoomBlocks,
                                                    cursorSamples: cursorSamples,
                                                    sourceSize: sourceSize,
-                                                   config: autoZoomConfig)
+                                                   config: zoomTrackConfig(canvas: canvas))
         }
 
         let instruction = StudioCompositionInstruction(
@@ -2977,7 +3061,9 @@ final class StudioModel: ObservableObject {
         let snapSubtitles = subtitles
         let snapCursor = cursorSamples
         let snapClick = clickSamples
+        let snapCutTimes = collapsedCutTimes
         defer {
+            collapsedCutTimes = snapCutTimes
             composition = snapComposition
             duration = snapDuration
             cameraBlocks = snapCamera
@@ -2990,6 +3076,7 @@ final class StudioModel: ObservableObject {
             clickSamples = snapClick
         }
         composition = cutComposition
+        collapsedCutTimes = AutoZoomTrack.collapsedCutTimes(cuts)
         duration = TimelineCut.remainingDuration(snapDuration, cuts: cuts)
         cameraBlocks = snapCamera.compactMap { collapse($0, cuts: cuts) }
         layoutBlocks = snapLayout.compactMap { collapse($0, cuts: cuts) }

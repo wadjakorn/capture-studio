@@ -108,4 +108,22 @@ import Foundation
         #expect(newID == nil)
         #expect(out.count == 1)
     }
+
+    @Test func applyingFollowSettingsCopiesSensitivityAndOverflowOnly() {
+        let a = ZoomBlock(begin: 0, end: 2, scale: 3, sensitivity: 0.1, overflow: true)
+        let b = ZoomBlock(begin: 4, end: 6, scale: 1.5, sensitivity: 0.9, overflow: false,
+                          mode: .manual, focusX: 0.2, focusY: 0.7)
+        let c = ZoomBlock(begin: 8, end: 9)
+        let out = ZoomTimeline.applyingFollowSettings(of: a.id, toAll: [a, b, c])
+        #expect(out.map(\.sensitivity) == [0.1, 0.1, 0.1])
+        #expect(out.map(\.overflow) == [true, true, true])
+        // Framing stays per block.
+        #expect(out[1].scale == 1.5 && out[1].mode == .manual && out[1].focusX == 0.2)
+        #expect(out[2].scale == nil && out[2].begin == 8 && out[2].id == c.id)
+        // nil ("use the default") is copied too.
+        #expect(ZoomTimeline.applyingFollowSettings(of: c.id, toAll: [a, b, c])
+            .allSatisfy { $0.sensitivity == nil && $0.overflow == nil })
+        // Unknown id: unchanged.
+        #expect(ZoomTimeline.applyingFollowSettings(of: UUID(), toAll: [a, b, c]) == [a, b, c])
+    }
 }
