@@ -1231,6 +1231,21 @@ final class StudioModel: ObservableObject {
     /// Auto zoom needs the same cursor data as a hand-placed zoom block.
     var canAutoZoom: Bool { hasCursorData }
 
+    /// The layout and zoom track of the most recently built video composition
+    /// (nil without zoom blocks): what `canvasZoomAtPlayhead` reads.
+    private var zoomMappingSource: (layout: CompositorLayout, track: [ZoomKeyframe])?
+
+    /// How the screen is zoomed at the playhead, in normalized canvas units —
+    /// for canvas overlays that must line up with zoomed content (shape boxes).
+    /// Identity outside zoom blocks.
+    var canvasZoomAtPlayhead: CanvasZoom {
+        guard let source = zoomMappingSource else { return .identity }
+        // The preview's track lives on the cut timeline.
+        let t = previewCuts.isEmpty ? currentTime : TimelineCut.map(currentTime, cuts: previewCuts)
+        return StudioCompositor.canvasZoom(at: t, track: source.track, layout: source.layout)
+            .normalized(by: source.layout.canvas)
+    }
+
     // MARK: Content analysis (what changed on screen)
 
     enum AutoZoomOutcome {
@@ -2880,6 +2895,8 @@ final class StudioModel: ObservableObject {
                                                    sourceSize: sourceSize,
                                                    config: zoomTrackConfig(canvas: canvas))
         }
+
+        zoomMappingSource = overlay.autoZoom.isEmpty ? nil : (layout, overlay.autoZoom)
 
         let instruction = StudioCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: composition.duration),

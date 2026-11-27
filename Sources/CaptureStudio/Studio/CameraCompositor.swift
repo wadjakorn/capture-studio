@@ -6,6 +6,38 @@ import Metal
 /// Geometry + styling for one composed frame. All rects are in top-left
 /// pixel coordinates (matching the rest of the model); the compositor flips
 /// to Core Image's bottom-left space when building transforms.
+/// The screen's auto-zoom at one instant as a canvas mapping (top-left origin):
+/// a point `p` drawn un-zoomed lands at `target + scale · (p − focus)`. Works in
+/// canvas pixels or in normalized 0…1 canvas units alike. Pure — unit-tested.
+struct CanvasZoom: Equatable {
+    var scale: CGFloat = 1
+    var focus: CGPoint = .zero
+    var target: CGPoint = .zero
+
+    static let identity = CanvasZoom()
+    var isIdentity: Bool { scale <= 1.0001 }
+
+    func map(_ p: CGPoint) -> CGPoint {
+        guard !isIdentity else { return p }
+        return CGPoint(x: target.x + scale * (p.x - focus.x),
+                       y: target.y + scale * (p.y - focus.y))
+    }
+
+    func map(_ r: CGRect) -> CGRect {
+        guard !isIdentity else { return r }
+        return CGRect(origin: map(r.origin),
+                      size: CGSize(width: r.width * scale, height: r.height * scale))
+    }
+
+    /// The same mapping expressed in units of `size` (canvas px → normalized).
+    func normalized(by size: CGSize) -> CanvasZoom {
+        guard size.width > 0, size.height > 0 else { return .identity }
+        return CanvasZoom(scale: scale,
+                          focus: CGPoint(x: focus.x / size.width, y: focus.y / size.height),
+                          target: CGPoint(x: target.x / size.width, y: target.y / size.height))
+    }
+}
+
 struct CompositorLayout {
     var canvas: CGSize
     var sourceSize: CGSize
@@ -431,10 +463,16 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             // Shape overlays sit above the screen/camera/cursor (so a blur
             // censors them) but below subtitles and text. All blocks active at
             // `now`, in array (z) order, except the one being edited live.
+            // They mark screen content, so while the screen is zoomed they ride
+            // the zoom with it and are clipped to the framing window like it.
             if let spec = layout.shapeTimeline {
+                let ride = !blankGap && frameLayout.showsMainVideo
+                    ? CanvasZoom(scale: zoom.scale, focus: focusCanvas, target: targetCanvas)
+                    : .identity
                 for block in ShapeTimeline.active(at: now, blocks: spec.blocks)
                 where block.id != layout.suppressedShapeBlockID {
-                    output = Self.applyShape(block, to: output, canvas: layout.canvas)
+                    output = Self.applyShape(block, to: output, canvas: layout.canvas,
+                                             zoom: ride, clip: ride.isIdentity ? nil : frameCI)
                 }
             }
 
@@ -680,6 +718,22 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
         return (s, CGPoint(x: -crop.minX * s, y: -crop.minY * s))
     }
 
+    /// The auto-zoom mapping the screen layers get at `now`, in canvas pixels —
+    /// the one source for the renderer and for editor overlays that must line up
+    /// with zoomed content.
+    static func canvasZoom(at now: Double, track: [ZoomKeyframe],
+                           layout: CompositorLayout) -> CanvasZoom {
+        let zoom = AutoZoomTrack.sample(at: now, track: track)
+        guard zoom.scale > 1.0001 else { return .identity }
+        let focus = sourceToCanvas(zoom.focus, layout: layout)
+        let canvasRect = CGRect(origin: .zero, size: layout.canvas)
+        let target = recenterTarget(focus: focus, weight: zoom.weight, scale: zoom.scale,
+                                    content: layout.screenFit ?? canvasRect,
+                                    region: layout.screenFrame ?? canvasRect,
+                                    clamp: !zoom.overflow)
+        return CanvasZoom(scale: zoom.scale, focus: focus, target: target)
+    }
+
     /// Screen-source pixel point → canvas pixel point (top-left origin), using
     /// the same scale/offset the screen image gets.
     private static func sourceToCanvas(_ p: CGPoint, layout: CompositorLayout) -> CGPoint {
@@ -893,22 +947,30 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
     /// and/or stroked shape; blur replaces its rectangular region with a blurred
     /// or pixellated copy of what's underneath (censoring the screen / camera /
     /// cursor). Geometry is normalized against the canvas so preview and export
-    /// match. Returns `output` unchanged if the shape is degenerate.
+    /// match. Returns `output` unchanged if the shape is degenerate. `zoom` moves
+    /// and scales the shape with the zoomed screen (strength and stroke scale
+    /// too); `clip` (CI space) then limits it to the framing window.
     private static func applyShape(_ block: ShapeBlock, to output: CIImage,
-                                   canvas: CGSize) -> CIImage {
-        let w = CGFloat(block.width) * canvas.width
-        let h = CGFloat(block.height) * canvas.height
-        guard w > 1, h > 1 else { return output }
-        let topLeftX = CGFloat(block.centerX) * canvas.width - w / 2
-        let topLeftY = CGFloat(block.centerY) * canvas.height - h / 2
-        let rectCI = flip(CGRect(x: topLeftX, y: topLeftY, width: w, height: h),
-                          in: canvas.height)
+                                   canvas: CGSize, zoom: CanvasZoom = .identity,
+                                   clip: CGRect? = nil) -> CIImage {
+        let w0 = CGFloat(block.width) * canvas.width
+        let h0 = CGFloat(block.height) * canvas.height
+        guard w0 > 1, h0 > 1 else { return output }
+        let placed = zoom.map(CGRect(x: CGFloat(block.centerX) * canvas.width - w0 / 2,
+                                     y: CGFloat(block.centerY) * canvas.height - h0 / 2,
+                                     width: w0, height: h0))
+        let fullCI = flip(placed, in: canvas.height)
+        // Nothing to draw when the zoom has pushed it out of the picture.
+        let visible = fullCI.intersection(clip ?? CGRect(origin: .zero, size: canvas))
+        guard !visible.isNull, visible.width > 0, visible.height > 0 else { return output }
+        let rectCI = block.kind == .blur ? visible : fullCI
+        let canvasH = canvas.height * zoom.scale
 
         switch block.kind {
         case .blur:
             let region = output.cropped(to: rectCI)
             guard region.extent.width > 0, region.extent.height > 0 else { return output }
-            let strength = max(0, CGFloat(block.blurStrength)) * canvas.height
+            let strength = max(0, CGFloat(block.blurStrength)) * canvasH
             let processed: CIImage
             switch block.blurStyle {
             case .gaussian:
@@ -925,11 +987,11 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             }
             return processed.composited(over: output)
         case .rectangle, .ellipse:
-            guard let img = makeShapeImage(block, sizePx: rectCI.size, canvasH: canvas.height)
+            guard let img = makeShapeImage(block, sizePx: rectCI.size, canvasH: canvasH)
             else { return output }
-            return img.transformed(by: CGAffineTransform(translationX: rectCI.minX.rounded(),
-                                                         y: rectCI.minY.rounded()))
-                .composited(over: output)
+            let drawn = img.transformed(by: CGAffineTransform(translationX: rectCI.minX.rounded(),
+                                                              y: rectCI.minY.rounded()))
+            return (clip.map { drawn.cropped(to: $0) } ?? drawn).composited(over: output)
         }
     }
 

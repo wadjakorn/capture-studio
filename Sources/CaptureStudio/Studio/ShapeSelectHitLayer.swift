@@ -32,10 +32,13 @@ struct ShapeSelectHitLayer: View {
     }
 
     private func boxFrame(_ block: ShapeBlock, videoRect: CGRect, viewScale: CGFloat) -> CGRect {
-        let w = max(CGFloat(block.width) * model.renderSize.width * viewScale, 16)
-        let h = max(CGFloat(block.height) * model.renderSize.height * viewScale, 16)
-        let cx = videoRect.minX + CGFloat(block.centerX) * model.renderSize.width * viewScale
-        let cy = videoRect.minY + CGFloat(block.centerY) * model.renderSize.height * viewScale
+        // Shapes ride the screen's auto zoom (see `ShapeCanvasOverlay`).
+        let zoom = model.canvasZoomAtPlayhead
+        let w = max(CGFloat(block.width) * videoRect.width * zoom.scale, 16)
+        let h = max(CGFloat(block.height) * videoRect.height * zoom.scale, 16)
+        let centre = zoom.map(CGPoint(x: block.centerX, y: block.centerY))
+        let cx = videoRect.minX + centre.x * videoRect.width
+        let cy = videoRect.minY + centre.y * videoRect.height
         return CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
     }
 }

@@ -25,9 +25,13 @@ struct ShapeCanvasOverlay: View {
 
                 if let block = activeSelectedBlock, model.renderSize.width > 0 {
                     let videoRect = CropMath.aspectFitRect(model.renderSize, in: geo.size)
-                    let viewScale = videoRect.width / model.renderSize.width
-                    let cx = videoRect.minX + CGFloat(block.centerX) * model.renderSize.width * viewScale
-                    let cy = videoRect.minY + CGFloat(block.centerY) * model.renderSize.height * viewScale
+                    // The shape rides the screen's auto zoom; so does its box, and
+                    // drags are measured in un-zoomed units.
+                    let zoom = model.canvasZoomAtPlayhead
+                    let viewScale = videoRect.width / model.renderSize.width * zoom.scale
+                    let centre = zoom.map(CGPoint(x: block.centerX, y: block.centerY))
+                    let cx = videoRect.minX + centre.x * videoRect.width
+                    let cy = videoRect.minY + centre.y * videoRect.height
                     let boxW = max(CGFloat(block.width) * model.renderSize.width * viewScale, 20)
                     let boxH = max(CGFloat(block.height) * model.renderSize.height * viewScale, 20)
 
