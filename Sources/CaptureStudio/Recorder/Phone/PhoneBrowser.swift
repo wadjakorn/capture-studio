@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import dnssd
 
 /// Discovers Capture Studio Phone instances on the local network via Bonjour.
 @MainActor
@@ -9,6 +10,18 @@ final class PhoneBrowser: ObservableObject {
 
     @Published private(set) var phones: [PhoneDevice] = []
     @Published private(set) var isBrowsing = false
+    /// Sticky across stop/start: set when the OS reports a Local Network policy denial.
+    @Published private(set) var localNetworkDenied = false
+    /// Sticky: a phone has been discovered at least once, so Local Network is allowed.
+    @Published private(set) var hasSeenPhone = false
+
+    /// kDNSServiceErr_PolicyDenied — Local Network permission refused.
+    nonisolated static let policyDeniedCode: DNSServiceErrorType = -65570
+
+    nonisolated static func isLocalNetworkDenied(_ error: NWError) -> Bool {
+        if case .dns(let code) = error { return code == policyDeniedCode }
+        return false
+    }
 
     private var browser: NWBrowser?
 
@@ -20,10 +33,15 @@ final class PhoneBrowser: ObservableObject {
             Task { @MainActor [weak self, weak b] in
                 guard let self, let b, self.browser === b else { return }
                 switch state {
+                case .waiting(let error):
+                    Log.recorder.error("Phone browser waiting: \(error.localizedDescription)")
+                    if Self.isLocalNetworkDenied(error) { self.localNetworkDenied = true }
                 case .ready:
                     self.isBrowsing = true
+                    self.localNetworkDenied = false
                 case .failed(let error):
                     Log.recorder.error("Phone browser failed: \(error.localizedDescription)")
+                    if Self.isLocalNetworkDenied(error) { self.localNetworkDenied = true }
                     self.reset()
                 case .cancelled:
                     self.reset()
@@ -36,6 +54,10 @@ final class PhoneBrowser: ObservableObject {
             Task { @MainActor [weak self, weak b] in
                 guard let self, let b, self.browser === b else { return }
                 self.phones = Self.devices(from: results)
+                if !self.phones.isEmpty {
+                    self.hasSeenPhone = true
+                    self.localNetworkDenied = false
+                }
             }
         }
         browser = b
