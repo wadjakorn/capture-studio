@@ -241,7 +241,13 @@ struct OverlayPayload {
 final class StudioCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol, @unchecked Sendable {
     let timeRange: CMTimeRange
     let enablePostProcessing = false
-    let containsTweening = false
+    /// The output changes over time even while the source frames do not: the
+    /// zoom/pan, cursor, click rings, camera moves and captions are all animated
+    /// by the compositor. Screen recordings are variable-frame-rate (a frame only
+    /// when the screen changes), so with `false` AVFoundation is free to reuse the
+    /// last composed frame across a static stretch during playback — the zoom
+    /// ramp and pan then stall until the screen next changes.
+    let containsTweening = true
     let requiredSourceTrackIDs: [NSValue]?
     let passthroughTrackID = kCMPersistentTrackID_Invalid
 
