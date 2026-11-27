@@ -30,7 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             didRouteLaunch = true
             guard LaunchRouting.shouldShowDashboardAtLaunch(isLoginItem: isLoginItemLaunch) else { return }
             Log.app.info("Launch routing: fallback → Dashboard")
-            MainActor.assumeIsolated { DashboardLauncher.show() }
+            MainActor.assumeIsolated {
+                DashboardLauncher.show()
+                PermissionOnboarding.showIfNeeded(isLoginItem: isLoginItemLaunch)
+            }
         }
     }
 
@@ -49,7 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
         didRouteLaunch = true
         Log.app.info("Launch routing: untitled file → Dashboard")
-        MainActor.assumeIsolated { DashboardLauncher.show() }
+        MainActor.assumeIsolated {
+            DashboardLauncher.show()
+            PermissionOnboarding.showIfNeeded(isLoginItem: isLoginItemLaunch)
+        }
         return true
     }
 

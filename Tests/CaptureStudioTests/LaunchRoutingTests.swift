@@ -33,4 +33,17 @@ import Testing
     @Test func normalLaunchShowsDashboard() {
         #expect(LaunchRouting.shouldShowDashboardAtLaunch(isLoginItem: false))
     }
+
+    @Test func onboardingShowsOnFirstPlainLaunchWithMissingGrant() {
+        #expect(LaunchRouting.shouldShowPermissionOnboarding(isLoginItem: false, onboardingDone: false, coreGranted: false))
+    }
+    @Test func onboardingSkippedForLoginItem() {
+        #expect(!LaunchRouting.shouldShowPermissionOnboarding(isLoginItem: true, onboardingDone: false, coreGranted: false))
+    }
+    @Test func onboardingSkippedWhenDone() {
+        #expect(!LaunchRouting.shouldShowPermissionOnboarding(isLoginItem: false, onboardingDone: true, coreGranted: false))
+    }
+    @Test func onboardingSkippedWhenAllGranted() {
+        #expect(!LaunchRouting.shouldShowPermissionOnboarding(isLoginItem: false, onboardingDone: false, coreGranted: true))
+    }
 }

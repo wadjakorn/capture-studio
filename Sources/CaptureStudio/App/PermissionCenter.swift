@@ -79,7 +79,11 @@ final class PermissionCenter: ObservableObject {
     func fix(_ kind: PermissionKind) async {
         switch status(kind) {
         case .notDetermined, .unknown: await request(kind)
-        case .denied: openSettings(kind)
+        case .denied:
+            // Granted-but-pending-relaunch also reads .denied; the onboarding
+            // window (behind Settings) is where Relaunch lives.
+            if kind == .screenRecording { PermissionOnboarding.show() }
+            openSettings(kind)
         case .granted: break
         }
     }

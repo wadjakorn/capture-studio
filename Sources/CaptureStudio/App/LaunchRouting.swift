@@ -34,4 +34,10 @@ enum LaunchRouting {
     static func shouldShowDashboardAtLaunch(isLoginItem: Bool) -> Bool {
         !isLoginItem
     }
+
+    /// First plain launch with a core grant (screen/mic/camera) missing shows
+    /// the permission window once; login-item launches never do.
+    static func shouldShowPermissionOnboarding(isLoginItem: Bool, onboardingDone: Bool, coreGranted: Bool) -> Bool {
+        !isLoginItem && !onboardingDone && !coreGranted
+    }
 }
