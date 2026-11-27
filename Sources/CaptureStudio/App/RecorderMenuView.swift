@@ -19,7 +19,8 @@ struct RecorderMenuView: View {
     @State private var captureRegion: CGRect? = AppSettings.captureRegion
     @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
     @State private var showPhoneHelp = false
-    @State private var permissionGranted = Permissions.screenRecordingGranted()
+    @ObservedObject private var permissions = PermissionCenter.shared
+    private var permissionGranted: Bool { permissions.isGranted(.screenRecording) }
     @State private var elapsed: TimeInterval = 0
     @State private var showDisplayMenu = false
     @State private var showCameraMenu = false
@@ -86,6 +87,14 @@ struct RecorderMenuView: View {
                 }
                 Spacer()
                 Button {
+                    TrayPopupOpener.closePopup()
+                    PermissionOnboarding.show()
+                } label: {
+                    Image(systemName: "lock.shield")
+                }
+                .help("Permissions…")
+                Spacer()
+                Button {
                     NSApp.terminate(nil)
                 } label: {
                     Label("Quit", systemImage: "power")
@@ -98,6 +107,7 @@ struct RecorderMenuView: View {
         .padding(14)
         .frame(width: 300)
         .task {
+            permissions.refresh()
             // Lazy policy: only browse automatically once the user has paired before.
             if PhonePairingStore.shared.hasAnyPairing { PhoneBrowser.shared.start() }
             await refreshDevices()
@@ -119,6 +129,9 @@ struct RecorderMenuView: View {
             projectRows = rows
         }
         .onChange(of: browser.phones) { _, _ in refreshPairedPhones() }
+        .onChange(of: permissionGranted) { _, granted in
+            if granted { Task { await refreshDevices() } }
+        }
         .onReceive(NotificationCenter.default.publisher(for: AVCaptureDevice.wasConnectedNotification)) { _ in
             Task { await refreshDevices() }
         }
@@ -146,12 +159,32 @@ struct RecorderMenuView: View {
                 .foregroundStyle(.secondary)
             HStack {
                 Button("Request") {
-                    Permissions.requestScreenRecording()
-                    permissionGranted = Permissions.screenRecordingGranted()
+                    Task {
+                        await permissions.fix(.screenRecording)
+                        await refreshDevices()
+                    }
                 }
                 Button("Open Settings") { Permissions.openSettings(.screenRecording) }
+                Button("Relaunch") { AppRelauncher.relaunch() }
+                    .disabled(!AppRelauncher.isSafe(state: session.state))
             }
         }
+    }
+
+    /// The main source the Preview button records; also what the preflight
+    /// rows above it check.
+    private var previewMain: MainSource? {
+        cameraIsMain
+            ? mainSource
+            : (captureAreaEnabled
+                ? (AppSettings.captureRegionDisplayID.map(MainSource.display) ?? mainSource)
+                : mainSource)
+    }
+
+    private var preflightIssues: [PermissionIssue] {
+        guard let main = previewMain else { return [] }
+        return PermissionPreflight.issues(main: main, cameraID: selectedCameraID,
+                                          micID: selectedMicID, status: permissions.status)
     }
 
     @ViewBuilder
@@ -275,9 +308,10 @@ struct RecorderMenuView: View {
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
                         Button("Request") {
-                            Permissions.requestScreenRecording()
-                            permissionGranted = Permissions.screenRecordingGranted()
-                            if permissionGranted { Task { await refreshDevices() } }
+                            Task {
+                                await permissions.fix(.screenRecording)
+                                await refreshDevices()
+                            }
                         }
                         .controlSize(.small)
                     }
@@ -337,6 +371,11 @@ struct RecorderMenuView: View {
                         Text("Use your phone as a camera").bold()
                         Text("Any Android phone: install Capture Studio Phone, join the same Wi-Fi, open the app — it appears here.")
                         Text("Galaxy S26 (One UI 8.5+) can also plug in via USB-C: choose \"Webcam\" in the USB notification (video only, no mic).")
+                        if permissions.status(.localNetwork) == .denied {
+                            Text("Local Network access is off — phones can't be found.")
+                                .foregroundStyle(.orange)
+                            Button("Open Settings") { permissions.openSettings(.localNetwork) }
+                        }
                     }
                     .font(.caption)
                     .frame(width: 260, alignment: .leading)
@@ -386,6 +425,18 @@ struct RecorderMenuView: View {
                     .labelsHidden()
             }
 
+            ForEach(preflightIssues, id: \.kind) { issue in
+                HStack(spacing: 6) {
+                    Label(issue.message,
+                          systemImage: issue.blocking ? "xmark.octagon" : "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(issue.blocking ? .red : .orange)
+                    Spacer(minLength: 4)
+                    Button("Fix") { Task { await permissions.fix(issue.kind) } }
+                        .controlSize(.small)
+                }
+            }
+
             Button {
                 elapsed = 0
                 // Read the persisted area FRESH from AppSettings — the session
@@ -398,11 +449,7 @@ struct RecorderMenuView: View {
                 let region = captureAreaEnabled && !cameraMain ? savedRegion : nil
                 // Seed display from the saved region; fall back to the picker so a
                 // never-set area still has a screen to open the overlay on.
-                let main: MainSource? = cameraMain
-                    ? mainSource
-                    : (captureAreaEnabled
-                        ? (savedDisplay.map(MainSource.display) ?? mainSource)
-                        : mainSource)
+                let main = previewMain
                 // Full Display never selects an area. Area mode requires one only
                 // when nothing is saved at all (a full-display area keeps its
                 // display id, so it's recordable as-is).
@@ -433,7 +480,8 @@ struct RecorderMenuView: View {
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled((!areaMode && mainSource == nil) || (!cameraIsMain && !permissionGranted))
+            .disabled((!areaMode && mainSource == nil) || (!cameraIsMain && !permissionGranted)
+                      || preflightIssues.contains(where: \.blocking))
             .padding(.top, 4)
 
             HStack(spacing: 6) {
