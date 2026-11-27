@@ -16,8 +16,6 @@ struct RecorderMenuView: View {
     @State private var systemAudioEnabled = AppSettings.recordSystemAudio
     @State private var openStudioAfterRecording = AppSettings.openStudioAfterRecording
     @State private var captureAreaEnabled = AppSettings.captureAreaEnabled
-    @State private var captureRegion: CGRect? = AppSettings.captureRegion
-    @State private var captureRegionDisplayID: CGDirectDisplayID? = AppSettings.captureRegionDisplayID
     @State private var showPhoneHelp = false
     @ObservedObject private var permissions = PermissionCenter.shared
     private var permissionGranted: Bool { permissions.isGranted(.screenRecording) }
@@ -144,8 +142,6 @@ struct RecorderMenuView: View {
         .onChange(of: systemAudioEnabled) { _, on in AppSettings.recordSystemAudio = on }
         .onChange(of: openStudioAfterRecording) { _, on in AppSettings.openStudioAfterRecording = on }
         .onChange(of: captureAreaEnabled) { _, on in AppSettings.captureAreaEnabled = on }
-        .onChange(of: captureRegion) { _, r in AppSettings.captureRegion = r }
-        .onChange(of: captureRegionDisplayID) { _, id in AppSettings.captureRegionDisplayID = id }
         .onReceive(tick) { _ in
             if case .recording(let startedAt) = session.state {
                 elapsed = Date().timeIntervalSince(startedAt)
@@ -179,9 +175,16 @@ struct RecorderMenuView: View {
     private var previewMain: MainSource? {
         cameraIsMain
             ? mainSource
-            : (captureAreaEnabled
-                ? (AppSettings.captureRegionDisplayID.map(MainSource.display) ?? mainSource)
-                : mainSource)
+            : (captureAreaEnabled ? (areaTarget.displayID.map(MainSource.display) ?? mainSource)
+                                  : mainSource)
+    }
+
+    /// The saved area on the display it belongs to — found by UUID, so a display
+    /// whose id changed still matches — or moved onto the picker's display when
+    /// that display is gone. Read fresh each render: the session persists a new
+    /// drag straight to AppSettings.
+    private var areaTarget: AreaTarget {
+        AreaTarget.current(preferredFallback: mainSource?.displayID)
     }
 
     private var preflightIssues: [PermissionIssue] {
@@ -442,23 +445,18 @@ struct RecorderMenuView: View {
 
             Button {
                 elapsed = 0
-                // Read the persisted area FRESH from AppSettings — the session
-                // writes it there directly after a drag, so the view's @State
-                // copies can be stale within the same MenuBarExtra lifecycle.
-                let savedRegion = AppSettings.captureRegion
-                let savedDisplay = AppSettings.captureRegionDisplayID
-                // Area mode seeds the saved region (editable live); full mode the picker's.
+                // Area mode seeds the saved region (editable live) on its own
+                // display; full mode uses the picker's display.
                 let cameraMain = cameraIsMain
-                let region = captureAreaEnabled && !cameraMain ? savedRegion : nil
-                // Seed display from the saved region; fall back to the picker so a
-                // never-set area still has a screen to open the overlay on.
+                let area = areaTarget
+                let region = captureAreaEnabled && !cameraMain ? area.region : nil
                 let main = previewMain
                 // Full Display never selects an area. Area mode requires one only
                 // when nothing is saved at all (a full-display area keeps its
-                // display id, so it's recordable as-is).
+                // display, so it's recordable as-is).
                 let areaSelection: AreaSelection = (!captureAreaEnabled || cameraMain)
                     ? .unavailable
-                    : (savedRegion == nil && savedDisplay == nil ? .required : .optional)
+                    : area.selection
                 // Get the popup out of the way of the preview / area overlay.
                 // Everything above is already captured, so the view being
                 // torn down by the close doesn't matter.
@@ -626,13 +624,17 @@ struct RecorderMenuView: View {
                     .foregroundStyle(.secondary)
                 Text("Area")
                 Spacer()
-                if let r = captureRegion {
-                    Text("\(areaDisplayName) · \(Int(r.width))×\(Int(r.height))")
+                let area = areaTarget
+                if let r = area.region {
+                    Text("\(displayName(area.displayID)) · \(Int(r.width))×\(Int(r.height))")
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(.quaternary, in: Capsule())
+                        .help(area.movedFromMissingDisplay
+                              ? "The display this area was selected on isn't connected, so it records on \(displayName(area.displayID)). Reconnect it to record there again."
+                              : "")
                 } else {
                     Text("Not set")
                         .foregroundStyle(.secondary)
@@ -860,9 +862,11 @@ struct RecorderMenuView: View {
         }
     }
 
-    /// Name of the display the saved region was dragged on (for the Area readout).
-    private var areaDisplayName: String {
-        displays.first { $0.id == captureRegionDisplayID }?.name ?? "Unknown display"
+    /// Display name for the Area readout. The NSScreen name needs no Screen
+    /// Recording grant, unlike `displays`.
+    private func displayName(_ id: CGDirectDisplayID?) -> String {
+        guard let id else { return "No display" }
+        return displays.first { $0.id == id }?.name ?? DeviceDiscovery.displayName(for: id)
     }
 
     private var formattedElapsed: String {
@@ -881,7 +885,7 @@ struct RecorderMenuView: View {
             guard let name = cameraName(id) else { return "" }
             return " · \(name)"
         }
-        let id = captureAreaEnabled ? captureRegionDisplayID : mainSource?.displayID
+        let id = captureAreaEnabled ? areaTarget.displayID : mainSource?.displayID
         guard let name = displays.first(where: { $0.id == id })?.name else { return "" }
         return " · \(name)"
     }

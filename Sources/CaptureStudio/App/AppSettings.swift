@@ -89,9 +89,23 @@ enum AppSettings {
 
     /// Display the saved `captureRegion` was dragged on. Area capture derives the
     /// recorded display from the region's screen, not from the Display picker.
+    /// Raw id as saved — may be stale (ids change across connect/clamshell/
+    /// reboot). Read the area through `AreaTarget.current` instead.
     static var captureRegionDisplayID: CGDirectDisplayID? {
         get { (defaults.object(forKey: "captureRegionDisplayID") as? Int).map { CGDirectDisplayID($0) } }
-        set { set(newValue.map { Int($0) }, forKey: "captureRegionDisplayID") }
+        set {
+            set(newValue.map { Int($0) }, forKey: "captureRegionDisplayID")
+            // Keep the stable identity in step; an id with no UUID (not
+            // connected) clears it rather than leaving another display's.
+            captureRegionDisplayUUID = newValue.flatMap(DeviceDiscovery.displayUUID(for:))
+        }
+    }
+
+    /// `CGDisplayCreateUUIDFromDisplayID` of `captureRegionDisplayID` when it
+    /// was saved. nil for areas saved before this key existed.
+    static var captureRegionDisplayUUID: String? {
+        get { defaults.string(forKey: "captureRegionDisplayUUID") }
+        set { set(newValue, forKey: "captureRegionDisplayUUID") }
     }
 
     /// The recorder's main source. Falls back to the legacy `lastDisplayID`

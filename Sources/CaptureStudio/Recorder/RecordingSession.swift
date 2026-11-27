@@ -1040,17 +1040,18 @@ final class RecordingSession: ObservableObject {
             )
         } else {
             // Area mode can't pop an interactive selector from a hotkey → reuse the
-            // last saved region on its saved display. Full mode uses the picker's last
-            // display. If the saved area display is gone, arm() no-ops gracefully.
+            // last saved region on its saved display (matched by UUID; moved onto the
+            // picker's display if that display is gone). Full mode uses the picker's
+            // last display.
             let area = AppSettings.captureAreaEnabled
-            region = area ? AppSettings.captureRegion : nil
-            main = area ? AppSettings.captureRegionDisplayID.map(MainSource.display) : stored
+            let target = AreaTarget.current(preferredFallback: stored?.displayID)
+            region = area ? target.region : nil
+            main = area ? target.displayID.map(MainSource.display) : stored
             // A hotkey can't open the area selector. If Area mode has NO saved area
             // at all (no region and no saved display — a full-display area keeps its
             // display), ignore a start rather than silently grabbing the whole
             // display. A saved area (region, or a full-display area) records as usual.
-            if (state == .idle || isFailed), area, region == nil,
-               AppSettings.captureRegionDisplayID == nil {
+            if (state == .idle || isFailed), area, target.selection == .required {
                 // Without Screen Recording no area could ever have been saved,
                 // so say what's actually wrong instead of ignoring the press.
                 let permissions = PermissionCenter.shared

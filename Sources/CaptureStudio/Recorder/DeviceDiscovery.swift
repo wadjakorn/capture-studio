@@ -183,7 +183,29 @@ enum DeviceDiscovery {
         ).devices
     }
 
-    private static func displayName(for displayID: CGDirectDisplayID) -> String {
+    /// Displays connected right now, main display first. Plain CoreGraphics, so
+    /// unlike `displays()` it needs no Screen Recording grant.
+    static func liveDisplays() -> [AreaTarget.LiveDisplay] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        let main = CGMainDisplayID()
+        return ids.prefix(Int(count))
+            .sorted { a, b in a == main && b != main }
+            .map { AreaTarget.LiveDisplay(id: $0, uuid: displayUUID(for: $0),
+                                          size: CGDisplayBounds($0).size) }
+    }
+
+    /// Stable identity of a physical display (survives id reassignment).
+    static func displayUUID(for displayID: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() else {
+            return nil
+        }
+        return CFUUIDCreateString(nil, uuid) as String?
+    }
+
+    static func displayName(for displayID: CGDirectDisplayID) -> String {
         for screen in NSScreen.screens {
             if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
                number.uint32Value == displayID {
