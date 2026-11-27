@@ -58,6 +58,10 @@ final class RecordingSession: ObservableObject {
     @Published private(set) var lastBundleURL: URL?
     /// Non-fatal problems from the last recording (camera died, mic failed…).
     @Published private(set) var warnings: [String] = []
+    /// The permission behind the current `.failed` state, if any. Set by
+    /// `fail(_:permission:)` before `state` publishes, so a `state` listener
+    /// can read it. nil otherwise.
+    @Published private(set) var failurePermission: PermissionKind?
     /// True while the 3-2-1 countdown is running (before writers flip on).
     /// Drives the "Starting…" UI and blocks a double countdown.
     @Published private(set) var counting = false
@@ -195,6 +199,7 @@ final class RecordingSession: ObservableObject {
              areaSelection: AreaSelection = .unavailable) async {
         guard state == .idle || isFailed else { return }
         RecordingSavedToast.dismiss()
+        failurePermission = nil
         state = .arming
         armGeneration &+= 1
         let generation = armGeneration
@@ -216,7 +221,7 @@ final class RecordingSession: ObservableObject {
             guard armIsCurrent(generation) else { return }
             guard let item = items.first(where: { $0.id == displayID }),
                   let scDisplay = scDisplays[displayID] else {
-                state = .failed("Selected display is no longer available.")
+                fail("Selected display is no longer available.")
                 return
             }
             // Clamp the region to the live display bounds (defends against a
@@ -239,7 +244,17 @@ final class RecordingSession: ObservableObject {
                 region: region
             )
             screen.onStreamError = { [weak self] error in
-                Task { @MainActor in await self?.stop(streamError: error) }
+                // Classify on the delivering queue; only the Sendable issue hops.
+                let issue = ScreenStreamIssue.classify(
+                    error, screenAccessGranted: Permissions.screenRecordingGranted())
+                Task { @MainActor in
+                    // Stopped from the system UI → a normal stop, not a failure.
+                    if issue == .userStopped {
+                        await self?.stop()
+                    } else {
+                        await self?.stop(streamError: ScreenStreamFailure(issue: issue))
+                    }
+                }
             }
 
             // Camera/mic are best-effort — failure becomes a warning.
@@ -383,7 +398,7 @@ final class RecordingSession: ObservableObject {
             guard armIsCurrent(generation) else { return }
             Log.recorder.error("arm failed: \(error.localizedDescription, privacy: .public)")
             await tearDownArmed()
-            if armIsCurrent(generation) { state = .failed(error.localizedDescription) }
+            if armIsCurrent(generation) { fail(error.localizedDescription) }
         }
     }
 
@@ -397,7 +412,7 @@ final class RecordingSession: ObservableObject {
         Log.recorder.info("arm: main camera=\(mainID, privacy: .public) overlay=\(cameraID ?? "none", privacy: .public) mic=\(micID ?? "none", privacy: .public) controls=\(previewControls)")
         let cameraIDs = availableCameraIDs()
         if main.resolve(cameraIDs: cameraIDs, displayIDs: []) != nil {
-            state = .failed("Selected camera is no longer available.")
+            fail("Selected camera is no longer available.")
             return
         }
         // The main camera can't also be the overlay: drop a duplicate selection.
@@ -434,7 +449,7 @@ final class RecordingSession: ObservableObject {
                 // Vanished between the availability check and the lookup.
                 await tearDownArmed()
                 if armIsCurrent(generation) {
-                    state = .failed("Selected camera is no longer available.")
+                    fail("Selected camera is no longer available.")
                 }
                 return
             }
@@ -589,8 +604,8 @@ final class RecordingSession: ObservableObject {
             Log.recorder.error("arm (camera main) failed: \(error.localizedDescription, privacy: .public)")
             await tearDownArmed()
             if armIsCurrent(generation) {
-                state = .failed(Self.identityChangedMessage(error, phoneID: plan.mainPhone)
-                                ?? error.localizedDescription)
+                fail(Self.identityChangedMessage(error, phoneID: plan.mainPhone)
+                     ?? error.localizedDescription)
             }
         }
     }
@@ -843,7 +858,17 @@ final class RecordingSession: ObservableObject {
                 region: region
             )
             screen.onStreamError = { [weak self] error in
-                Task { @MainActor in await self?.stop(streamError: error) }
+                // Classify on the delivering queue; only the Sendable issue hops.
+                let issue = ScreenStreamIssue.classify(
+                    error, screenAccessGranted: Permissions.screenRecordingGranted())
+                Task { @MainActor in
+                    // Stopped from the system UI → a normal stop, not a failure.
+                    if issue == .userStopped {
+                        await self?.stop()
+                    } else {
+                        await self?.stop(streamError: ScreenStreamFailure(issue: issue))
+                    }
+                }
             }
 
             self.screenRecorder = screen
@@ -877,7 +902,7 @@ final class RecordingSession: ObservableObject {
     private func failArmed(_ message: String) async {
         guard isArmed else { return }
         await tearDownArmed()
-        if isArmed { state = .failed(message) }
+        if isArmed { fail(message) }
     }
 
     /// Flips the warmed sources into recording: starts the screen SCStream
@@ -898,7 +923,7 @@ final class RecordingSession: ObservableObject {
             } catch {
                 Log.recorder.error("main camera beginWriting failed: \(error.localizedDescription, privacy: .public)")
                 await tearDownArmed()
-                state = .failed(error.localizedDescription)
+                fail(error.localizedDescription)
                 return
             }
         } else {
@@ -914,7 +939,15 @@ final class RecordingSession: ObservableObject {
             } catch {
                 Log.recorder.error("screen start failed: \(error.localizedDescription, privacy: .public)")
                 await tearDownArmed()
-                state = .failed(error.localizedDescription)
+                // Nothing was captured yet, so a revoked grant gets the
+                // pre-record wording rather than a "saved up to" message.
+                let issue = ScreenStreamIssue.classify(
+                    error, screenAccessGranted: Permissions.screenRecordingGranted())
+                if issue == .permissionRevoked {
+                    fail(PermissionPreflight.screenOff, permission: .screenRecording)
+                } else {
+                    fail(error.localizedDescription)
+                }
                 return
             }
         }
@@ -1030,7 +1063,7 @@ final class RecordingSession: ObservableObject {
            let phoneID = stored.cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)) {
             guard await browser.waitForDevice(id: phoneID, timeout: timeout) != nil else {
                 if state == .idle || isFailed {
-                    state = .failed("Phone not found. Open Capture Studio Phone on your device.")
+                    fail("Phone not found. Open Capture Studio Phone on your device.")
                 }
                 return false
             }
@@ -1098,7 +1131,7 @@ final class RecordingSession: ObservableObject {
         if mainIsLocalCamera || cameraIsLocal, await !Permissions.requestCapture(.video) {
             // Camera-main without camera access can't record anything.
             if mainIsLocalCamera {
-                state = .failed("Camera access is required to record a camera.")
+                fail("Camera access is required to record a camera.")
                 return
             }
             camera = nil
@@ -1234,7 +1267,7 @@ final class RecordingSession: ObservableObject {
 
         if armedMain?.isCamera == true {
             guard let bundle, let mainCameraRecorder else {
-                state = .failed("Internal error: no active recording.")
+                fail("Internal error: no active recording.")
                 return
             }
             await finishCameraMain(bundle: bundle, mainRecorder: mainCameraRecorder,
@@ -1244,7 +1277,7 @@ final class RecordingSession: ObservableObject {
         }
 
         guard let bundle, let screenRecorder, let displayInfo else {
-            state = .failed("Internal error: no active recording.")
+            fail("Internal error: no active recording.")
             return
         }
 
@@ -1300,7 +1333,7 @@ final class RecordingSession: ObservableObject {
         } catch {
             Log.recorder.error("stop failed: \(error.localizedDescription, privacy: .public)")
             eventTracker.cancel()
-            state = .failed(error.localizedDescription)
+            fail(error.localizedDescription)
         }
 
         clearAfterStop()
@@ -1330,7 +1363,7 @@ final class RecordingSession: ObservableObject {
             // a project: delete the orphaned bundle (partial main-camera.mp4,
             // no meta.json). clearAfterStop() posts .projectLibraryDidChange.
             try? FileManager.default.removeItem(at: bundle.url)
-            state = .failed(error.localizedDescription)
+            fail(error.localizedDescription)
             return
         }
         do {
@@ -1372,7 +1405,7 @@ final class RecordingSession: ObservableObject {
             try completeSave(bundle: bundle, meta: meta, streamError: streamError)
         } catch {
             Log.recorder.error("stop (camera main) failed: \(error.localizedDescription, privacy: .public)")
-            state = .failed(error.localizedDescription)
+            fail(error.localizedDescription)
         }
     }
 
@@ -1400,7 +1433,16 @@ final class RecordingSession: ObservableObject {
         Log.recorder.info("stop OK: \(bundle.url.lastPathComponent, privacy: .public) tracks=\(meta.tracks.count) warnings=\(self.warnings.count)")
         lastBundleURL = bundle.url
         RecentProjectsStore.shared.noteRecorded(bundle.url)
-        state = .idle
+        // Final state decided once: `.finishing` goes straight to `.failed`
+        // on a stream error, never through `.idle`.
+        if let failure = streamError as? ScreenStreamFailure {
+            fail(failure.issue.savedMessage, permission: failure.issue.permission)
+        } else if let streamError {
+            // e.g. MainCameraLostError — never a screen issue.
+            fail("Recording saved, but capture stopped early: \(streamError.localizedDescription)")
+        } else {
+            state = .idle
+        }
         switch PostRecordingAction.decide(
             openStudioAfterRecording: AppSettings.openStudioAfterRecording,
             studioWindowVisible: StudioLauncher.hasVisibleStudioWindow
@@ -1408,9 +1450,6 @@ final class RecordingSession: ObservableObject {
         case .openStudio: StudioLauncher.open(bundleURL: bundle.url)
         case .openStudioBehind: StudioLauncher.open(bundleURL: bundle.url, placement: .behindCurrent)
         case .showSavedToast: RecordingSavedToast.show(bundleURL: bundle.url)
-        }
-        if let streamError {
-            state = .failed("Recording saved, but capture stopped early: \(streamError.localizedDescription)")
         }
     }
 
@@ -1447,7 +1486,16 @@ final class RecordingSession: ObservableObject {
     }
 
     func resetFailure() {
-        if isFailed { state = .idle }
+        guard isFailed else { return }
+        failurePermission = nil
+        state = .idle
+    }
+
+    /// The only way into `.failed`: `failurePermission` is assigned first so a
+    /// listener reacting to the `state` change already sees it.
+    private func fail(_ message: String, permission: PermissionKind? = nil) {
+        failurePermission = permission
+        state = .failed(message)
     }
 
     private var isFailed: Bool {
@@ -1463,6 +1511,9 @@ final class RecordingSession: ObservableObject {
     private func warmUpStandaloneMic(_ device: AVCaptureDevice, bundle: ProjectBundle,
                                      generation: Int) async {
         let recorder = MicRecorder(device: device, outputURL: bundle.micURL)
+        recorder.onDeviceLost = { [weak self] msg in
+            Task { @MainActor in self?.warnings.append(msg) }
+        }
         do {
             try await recorder.warmUp()
             guard armIsCurrent(generation) else {
