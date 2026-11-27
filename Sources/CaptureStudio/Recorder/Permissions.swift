@@ -64,7 +64,20 @@ enum Permissions {
         CGRequestScreenCaptureAccess()
     }
 
+    /// macOS lists an app under Screen Recording only once it has requested access
+    /// (and a TCC reset or a re-signed build removes it again), so the pane alone can
+    /// leave nothing to toggle. `AppSettings.screenRecordingRequested` can't tell,
+    /// so every not-granted open requests first: it shows the system prompt if no
+    /// decision exists yet, or does nothing if one does.
+    static func requestsBeforeOpeningSettings(_ kind: PermissionKind, screenGranted: Bool) -> Bool {
+        kind == .screenRecording && !screenGranted
+    }
+
     static func openSettings(_ kind: PermissionKind) {
+        if requestsBeforeOpeningSettings(kind, screenGranted: screenRecordingGranted()) {
+            AppSettings.screenRecordingRequested = true
+            requestScreenRecording()
+        }
         NSWorkspace.shared.open(kind.settingsURL)
     }
 

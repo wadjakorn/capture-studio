@@ -30,3 +30,13 @@ import AVFoundation
     #expect(PermissionKind.camera.settingsURL.absoluteString == base + "Privacy_Camera")
     #expect(PermissionKind.localNetwork.settingsURL.absoluteString == base + "Privacy_LocalNetwork")
 }
+
+// macOS lists an app under Screen Recording only after it has requested access, so
+// opening that pane without requesting first can leave nothing to toggle.
+@Test func screenSettingsRegisterTheAppFirstWhenNotGranted() {
+    #expect(Permissions.requestsBeforeOpeningSettings(.screenRecording, screenGranted: false))
+    #expect(!Permissions.requestsBeforeOpeningSettings(.screenRecording, screenGranted: true))
+    #expect(!Permissions.requestsBeforeOpeningSettings(.microphone, screenGranted: false))
+    #expect(!Permissions.requestsBeforeOpeningSettings(.camera, screenGranted: false))
+    #expect(!Permissions.requestsBeforeOpeningSettings(.localNetwork, screenGranted: false))
+}
