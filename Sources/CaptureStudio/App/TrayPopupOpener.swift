@@ -53,7 +53,8 @@ enum TrayPopupOpener {
         }
     }
 
-    private static func isPopupOpen() -> Bool { popupWindow() != nil }
+    /// Whether the MenuBarExtra popup is on screen (best-effort, see `open()`).
+    static func isPopupOpen() -> Bool { popupWindow() != nil }
 
     /// The visible MenuBarExtra `.window` popup, matched by SwiftUI's private
     /// window class name.

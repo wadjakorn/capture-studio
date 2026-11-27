@@ -79,11 +79,17 @@ final class RecordingSession: ObservableObject {
     /// There is only ever one.
     static weak var shared: RecordingSession?
 
+    /// Failure for a start with no recordable source selected.
+    nonisolated static let noSourceMessage = "Choose what to record in the Capture Studio menu first."
+
     init() {
         Self.shared = self
         CaptureContentWindows.shared.onChange = { [weak self] in
             self?.requestFilterRefresh()
         }
+        // Here rather than in the app delegate, so the notifier can never miss
+        // the session.
+        SessionIssueNotifier.shared.start(session: self)
     }
 
     /// Serializes `ScreenRecorder.refreshFilter()` passes; see `RefreshCoalescer`.
@@ -190,13 +196,15 @@ final class RecordingSession: ObservableObject {
     /// SCStream is deferred to `beginRecording()` so no screen-recording
     /// indicator appears during preview. Moves the slow warm-up before the
     /// countdown so Record begins near-instantly. → `.armed`.
+    /// `initialWarnings` (e.g. a denied overlay camera) start the take's warnings.
     func arm(main: MainSource,
              cameraID: String? = nil,
              micID: String? = nil,
              systemAudio: Bool = false,
              region: CGRect? = nil,
              previewControls: Bool = false,
-             areaSelection: AreaSelection = .unavailable) async {
+             areaSelection: AreaSelection = .unavailable,
+             initialWarnings: [String] = []) async {
         guard state == .idle || isFailed else { return }
         RecordingSavedToast.dismiss()
         failurePermission = nil
@@ -204,6 +212,9 @@ final class RecordingSession: ObservableObject {
         armGeneration &+= 1
         let generation = armGeneration
         warnings = []
+        // A separate publish from the reset, so a warning repeated from the
+        // previous take still reads as new to listeners.
+        if !initialWarnings.isEmpty { warnings.append(contentsOf: initialWarnings) }
         let displayID: CGDirectDisplayID
         switch main {
         case .camera(let mainID):
@@ -1063,7 +1074,12 @@ final class RecordingSession: ObservableObject {
            let phoneID = stored.cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)) {
             guard await browser.waitForDevice(id: phoneID, timeout: timeout) != nil else {
                 if state == .idle || isFailed {
-                    fail("Phone not found. Open Capture Studio Phone on your device.")
+                    // Runs before the preflight, so a blocked browse is named here.
+                    if browser.localNetworkDenied {
+                        fail(PermissionPreflight.phoneMainOff, permission: .localNetwork)
+                    } else {
+                        fail("Phone not found. Open Capture Studio Phone on your device.")
+                    }
                 }
                 return false
             }
@@ -1113,15 +1129,45 @@ final class RecordingSession: ObservableObject {
                                micID: String?, systemAudio: Bool, region: CGRect?,
                                activateForPrompts: Bool, previewFirst: Bool,
                                areaSelection: AreaSelection = .unavailable) async {
-        guard let main else { return }
-        // Can't usefully prompt for screen recording from a hotkey — no-op.
-        // Camera-main never touches the screen, so it doesn't need the grant.
-        if RecorderSelection.needsScreenPermission(for: main) {
-            guard Permissions.screenRecordingGranted() else { return }
+        let permissions = PermissionCenter.shared
+        guard let main else {
+            // A new user's popup never stores a display without the grant, so
+            // a hotkey start with no source usually means screen access is off.
+            permissions.refresh()
+            if permissions.status(.screenRecording) != .granted {
+                fail(PermissionPreflight.screenOff, permission: .screenRecording)
+            } else {
+                fail(Self.noSourceMessage)
+            }
+            return
         }
 
         var camera = cameraID
         var mic = micID
+        // Denied grants: a blocking one fails before any bundle exists; the
+        // rest drop their device up front (no prompt for an already-denied
+        // device) and become the take's first warnings.
+        permissions.refresh()
+        let issues = PermissionPreflight.issues(main: main, cameraID: camera, micID: mic,
+                                                status: { permissions.status($0) })
+        if let blocking = issues.first(where: \.blocking) {
+            fail(blocking.message, permission: blocking.kind)
+            return
+        }
+        var startWarnings: [String] = []
+        for issue in issues {
+            startWarnings.append(issue.message)
+            switch issue.kind {
+            case .camera: camera = nil
+            case .microphone: mic = nil
+            case .localNetwork:
+                // Otherwise arm() adds its own "…not recorded: Phone not reachable."
+                if camera.flatMap(PhoneDeviceID.phoneID(fromCamera:)) != nil { camera = nil }
+                if mic.flatMap(PhoneDeviceID.phoneID(fromMic:)) != nil { mic = nil }
+            case .screenRecording: break
+            }
+        }
+
         if main.isCamera || camera != nil || mic != nil, activateForPrompts {
             NSApp.activate(ignoringOtherApps: true)  // TCC dialog frontmost
         }
@@ -1131,13 +1177,21 @@ final class RecordingSession: ObservableObject {
         if mainIsLocalCamera || cameraIsLocal, await !Permissions.requestCapture(.video) {
             // Camera-main without camera access can't record anything.
             if mainIsLocalCamera {
-                fail("Camera access is required to record a camera.")
+                fail(PermissionPreflight.cameraMainOff, permission: .camera)
                 return
             }
             camera = nil
+            if !startWarnings.contains(PermissionPreflight.cameraOverlayOff) {
+                startWarnings.append(PermissionPreflight.cameraOverlayOff)
+            }
         }
         if let m = mic, PhoneDeviceID.phoneID(fromMic: m) == nil,
-           await !Permissions.requestCapture(.audio) { mic = nil }
+           await !Permissions.requestCapture(.audio) {
+            mic = nil
+            if !startWarnings.contains(PermissionPreflight.micOff) {
+                startWarnings.append(PermissionPreflight.micOff)
+            }
+        }
 
         // Show the preview HUD (drag-mode toggle) whenever we'll pause on the
         // preview (camera flow, or the GUI's previewFirst). Screen-only records
@@ -1146,7 +1200,8 @@ final class RecordingSession: ObservableObject {
         await arm(main: main, cameraID: camera, micID: mic,
                   systemAudio: systemAudio, region: region,
                   previewControls: willPreview,
-                  areaSelection: areaSelection)
+                  areaSelection: areaSelection,
+                  initialWarnings: startWarnings)
 
         // Screen-only normally records directly. Camera (or `previewFirst`, the
         // GUI button) stays armed with its preview, awaiting the Record button /

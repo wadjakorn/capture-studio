@@ -2,19 +2,15 @@ import AppKit
 import SwiftUI
 
 /// "Recording saved" toast shown when the user opted out of auto-opening Studio.
-/// A non-activating panel that never becomes key, so it cannot steal focus from
-/// whatever app the user was in (e.g. when stopping via the global hotkey).
+/// A non-activating `ToastPanel` that never becomes key, so it cannot steal focus
+/// from whatever app the user was in (e.g. when stopping via the global hotkey).
 /// One static panel: a new `show` replaces any toast still on screen.
 @MainActor
 enum RecordingSavedToast {
-    private static var panel: NSPanel?
-    private static var timer: Timer?
-    private static let lifetime: TimeInterval = 6
-    private static let inset: CGFloat = 16
+    private static let toast = ToastPanel(identifier: "chrome.savedToast",
+                                          placement: .topTrailing, lifetime: 6)
 
     static func show(bundleURL: URL) {
-        dismiss()
-
         let view = RecordingSavedToastView(
             name: bundleURL.deletingPathExtension().lastPathComponent,
             onOpen: {
@@ -26,47 +22,12 @@ enum RecordingSavedToast {
                 dismiss()
             },
             onClose: { dismiss() },
-            onHover: { hovering in
-                if hovering { timer?.invalidate(); timer = nil } else { startTimer() }
-            })
-        let host = NSHostingView(rootView: view)
-        host.layoutSubtreeIfNeeded()
-        let size = host.fittingSize
-
-        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
-                        styleMask: [.borderless, .nonactivatingPanel],
-                        backing: .buffered, defer: false)
-        p.identifier = NSUserInterfaceItemIdentifier("chrome.savedToast")
-        p.level = .statusBar
-        p.isOpaque = false
-        p.backgroundColor = .clear
-        p.hasShadow = true
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.hidesOnDeactivate = false
-        p.isReleasedWhenClosed = false
-        p.contentView = host
-
-        if let vis = NSScreen.main?.visibleFrame {
-            p.setFrameOrigin(CGPoint(x: vis.maxX - size.width - inset,
-                                     y: vis.maxY - size.height - inset))
-        }
-        p.orderFrontRegardless()
-        panel = p
-        startTimer()
+            onHover: { toast.setHovering($0) })
+        toast.show(view)
     }
 
     static func dismiss() {
-        timer?.invalidate()
-        timer = nil
-        panel?.orderOut(nil)
-        panel = nil
-    }
-
-    private static func startTimer() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: lifetime, repeats: false) { _ in
-            Task { @MainActor in dismiss() }
-        }
+        toast.dismiss()
     }
 }
 
