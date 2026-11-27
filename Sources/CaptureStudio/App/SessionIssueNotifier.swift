@@ -2,8 +2,31 @@ import AppKit
 import SwiftUI
 import Combine
 
+/// What an `IssueToast` shows: full lines, before `visibleLines` caps them.
+struct IssueToastContent: Equatable, Sendable {
+    var title: String
+    var lines: [String]
+    var isError: Bool
+    var fix: PermissionKind?
+}
+
 /// Pure rules for the capture-issue toasts. Non-isolated so tests call it directly.
 enum IssueToastPolicy {
+    /// The single toast slot's next content when `incoming` arrives while
+    /// `visible` is on screen (nil = nothing shown). An error always replaces.
+    /// A warning never replaces: its lines join the visible toast (exact
+    /// repeats dropped), which keeps its title, icon and fix — the warning's
+    /// fix is used only when the visible toast has none.
+    static func merge(visible: IssueToastContent?, incoming: IssueToastContent) -> IssueToastContent {
+        guard let visible, !incoming.isError else { return incoming }
+        var merged = visible
+        for line in incoming.lines where !merged.lines.contains(line) {
+            merged.lines.append(line)
+        }
+        if merged.fix == nil { merged.fix = incoming.fix }
+        return merged
+    }
+
     /// Warnings in `current` not yet shown: the appended suffix when `current`
     /// extends `previous`, otherwise all of `current` (a new arm reset the list).
     static func newWarnings(previous: [String], current: [String]) -> [String] {
@@ -31,18 +54,26 @@ enum IssueToastPolicy {
 }
 
 /// Top-center toast for a failed start, an early stop, or a capture warning.
+/// One slot: a later issue merges into the visible one (`IssueToastPolicy.merge`).
 /// Chrome: never registered with `CaptureContentWindows`.
 @MainActor
 enum IssueToast {
+    /// What is on screen; nil once dismissed (closed, Fix, or timed out).
+    private static var visible: IssueToastContent?
     private static let toast = ToastPanel(identifier: "chrome.issueToast",
-                                          placement: .topCenter, lifetime: 8)
+                                          placement: .topCenter, lifetime: 8,
+                                          onDismiss: { IssueToast.visible = nil })
 
     static func show(title: String, lines: [String], isError: Bool, fix: PermissionKind?) {
+        let content = IssueToastPolicy.merge(
+            visible: visible,
+            incoming: IssueToastContent(title: title, lines: lines, isError: isError, fix: fix))
+        visible = content
         let view = IssueToastView(
-            title: title,
-            lines: IssueToastPolicy.visibleLines(lines),
-            isError: isError,
-            onFix: fix.map { kind in
+            title: content.title,
+            lines: IssueToastPolicy.visibleLines(content.lines),
+            isError: content.isError,
+            onFix: content.fix.map { kind in
                 {
                     Task { await PermissionCenter.shared.fix(kind) }
                     dismiss()
@@ -141,6 +172,13 @@ final class SessionIssueNotifier {
     private func stateChanged(to state: RecordingSession.State) {
         let previous = lastState
         lastState = state
+        // A new take supersedes the last one's issues, so a stale failure toast
+        // can't sit over a successful retry. The take's initial warnings
+        // publish after `.arming`, so their toast still appears.
+        if state == .arming {
+            IssueToast.dismiss()
+            return
+        }
         // Every delivered failure is a new one (`.failed → .failed` included,
         // e.g. a repeated hotkey press). Never suppressed by the popup check:
         // the GUI closes the popup right before starting, and it can still
