@@ -27,6 +27,19 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: "recordSystemAudio") }
     }
 
+    /// Set once the app has asked for Screen Recording (preflight can't distinguish
+    /// "never asked" from "denied").
+    static var screenRecordingRequested: Bool {
+        get { defaults.object(forKey: "screenRecordingRequested") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "screenRecordingRequested") }
+    }
+
+    /// First-run permission onboarding finished or dismissed.
+    static var permissionOnboardingDone: Bool {
+        get { defaults.object(forKey: "permissionOnboardingDone") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "permissionOnboardingDone") }
+    }
+
     /// Open the Studio window automatically when a recording finishes. OFF shows
     /// a "Recording saved" toast instead, without stealing focus.
     static var openStudioAfterRecording: Bool {

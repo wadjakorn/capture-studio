@@ -149,7 +149,7 @@ struct RecorderMenuView: View {
                     Permissions.requestScreenRecording()
                     permissionGranted = Permissions.screenRecordingGranted()
                 }
-                Button("Open Settings") { Permissions.openScreenRecordingSettings() }
+                Button("Open Settings") { Permissions.openSettings(.screenRecording) }
             }
         }
     }
