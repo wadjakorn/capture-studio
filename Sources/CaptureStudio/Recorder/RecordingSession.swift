@@ -1050,7 +1050,16 @@ final class RecordingSession: ObservableObject {
             // display), ignore a start rather than silently grabbing the whole
             // display. A saved area (region, or a full-display area) records as usual.
             if (state == .idle || isFailed), area, region == nil,
-               AppSettings.captureRegionDisplayID == nil { return }
+               AppSettings.captureRegionDisplayID == nil {
+                // Without Screen Recording no area could ever have been saved,
+                // so say what's actually wrong instead of ignoring the press.
+                let permissions = PermissionCenter.shared
+                permissions.refresh()
+                if permissions.status(.screenRecording) != .granted {
+                    fail(PermissionPreflight.screenOff, permission: .screenRecording)
+                }
+                return
+            }
             // The guard above already rejected `.required`, so a hotkey start is
             // either Full Display or Area mode with an area saved.
             areaSelection = area ? .optional : .unavailable
@@ -1066,12 +1075,20 @@ final class RecordingSession: ObservableObject {
 
     /// Hotkey path: waits ≤3 s per stored Wi-Fi phone for Bonjour to find it.
     /// A missing phone main fails the start; a missing phone front camera / mic
-    /// is left to arm()'s best-effort warnings.
+    /// is left to arm()'s best-effort warnings. With Local Network known to be
+    /// denied no browse can succeed, so nothing waits: a phone main fails at
+    /// once and phone overlays/mics are left to the preflight, which drops them.
     private func waitForStoredPhones() async -> Bool {
         let browser = PhoneBrowser.shared
         let timeout = Duration.seconds(3)
         if let stored = AppSettings.lastMainSource,
            let phoneID = stored.cameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)) {
+            if browser.localNetworkDenied {
+                if state == .idle || isFailed {
+                    fail(PermissionPreflight.phoneMainOff, permission: .localNetwork)
+                }
+                return false
+            }
             guard await browser.waitForDevice(id: phoneID, timeout: timeout) != nil else {
                 if state == .idle || isFailed {
                     // Runs before the preflight, so a blocked browse is named here.
@@ -1087,6 +1104,9 @@ final class RecordingSession: ObservableObject {
         let others = [AppSettings.lastCameraID.flatMap(PhoneDeviceID.phoneID(fromCamera:)),
                       AppSettings.lastMicID.flatMap(PhoneDeviceID.phoneID(fromMic:))]
         for phoneID in others.compactMap({ $0 }) {
+            // Re-checked per phone: an earlier wait's browse may have just
+            // reported the denial.
+            if browser.localNetworkDenied { break }
             _ = await browser.waitForDevice(id: phoneID, timeout: timeout)
         }
         return true
@@ -1174,22 +1194,31 @@ final class RecordingSession: ObservableObject {
         // Wi-Fi phones need no camera/mic grant — only local devices do.
         let mainIsLocalCamera = main.cameraID.map { PhoneDeviceID.phoneID(fromCamera: $0) == nil } ?? false
         let cameraIsLocal = camera.map { PhoneDeviceID.phoneID(fromCamera: $0) == nil } ?? false
-        if mainIsLocalCamera || cameraIsLocal, await !Permissions.requestCapture(.video) {
-            // Camera-main without camera access can't record anything.
-            if mainIsLocalCamera {
-                fail(PermissionPreflight.cameraMainOff, permission: .camera)
-                return
-            }
-            camera = nil
-            if !startWarnings.contains(PermissionPreflight.cameraOverlayOff) {
-                startWarnings.append(PermissionPreflight.cameraOverlayOff)
+        // After each possible prompt, re-read the statuses so the toast's Fix
+        // and the popup see the user's answer, not the pre-prompt .notDetermined.
+        if mainIsLocalCamera || cameraIsLocal {
+            let granted = await Permissions.requestCapture(.video)
+            permissions.refresh()
+            if !granted {
+                // Camera-main without camera access can't record anything.
+                if mainIsLocalCamera {
+                    fail(PermissionPreflight.cameraMainOff, permission: .camera)
+                    return
+                }
+                camera = nil
+                if !startWarnings.contains(PermissionPreflight.cameraOverlayOff) {
+                    startWarnings.append(PermissionPreflight.cameraOverlayOff)
+                }
             }
         }
-        if let m = mic, PhoneDeviceID.phoneID(fromMic: m) == nil,
-           await !Permissions.requestCapture(.audio) {
-            mic = nil
-            if !startWarnings.contains(PermissionPreflight.micOff) {
-                startWarnings.append(PermissionPreflight.micOff)
+        if let m = mic, PhoneDeviceID.phoneID(fromMic: m) == nil {
+            let granted = await Permissions.requestCapture(.audio)
+            permissions.refresh()
+            if !granted {
+                mic = nil
+                if !startWarnings.contains(PermissionPreflight.micOff) {
+                    startWarnings.append(PermissionPreflight.micOff)
+                }
             }
         }
 

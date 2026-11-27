@@ -45,7 +45,10 @@ struct RecorderMenuView: View {
                     .font(.subheadline.weight(.medium))
             }
 
-            if permissionGranted || !cameras.isEmpty || !browser.phones.isEmpty {
+            // A live or failed session always keeps its controls/message: a
+            // grant revoked mid-take must not swap Stop for permission buttons.
+            if session.state != .idle || permissionGranted
+                || !cameras.isEmpty || !browser.phones.isEmpty {
                 recorderView
             } else {
                 permissionView

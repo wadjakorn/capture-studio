@@ -77,6 +77,9 @@ final class PermissionCenter: ObservableObject {
     }
 
     func fix(_ kind: PermissionKind) async {
+        // The cached status can be stale (e.g. a camera/mic prompt just denied
+        // during a start); re-requesting a denied grant shows no UI at all.
+        refresh()
         switch status(kind) {
         case .notDetermined, .unknown: await request(kind)
         case .denied:
@@ -84,7 +87,9 @@ final class PermissionCenter: ObservableObject {
             // window (behind Settings) is where Relaunch lives.
             if kind == .screenRecording { PermissionOnboarding.show() }
             openSettings(kind)
-        case .granted: break
+        case .granted:
+            // Fix was offered, so something still looks off — never a silent no-op.
+            openSettings(kind)
         }
     }
 
