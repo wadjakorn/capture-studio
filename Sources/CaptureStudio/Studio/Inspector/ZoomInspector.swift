@@ -8,6 +8,8 @@ struct ZoomInspector: View {
     @State private var askAutoZoomScope = false
     /// The last auto zoom found no clicks or typing in range.
     @State private var autoZoomFoundNothing = false
+    /// The zoom blocks changed while the video was analysed; nothing was replaced.
+    @State private var autoZoomSkipped = false
 
     /// Run auto zoom, or ask for the scope first when there are blocks to replace.
     private func autoZoomTapped() {
@@ -19,7 +21,13 @@ struct ZoomInspector: View {
     }
 
     private func runAutoZoom(_ scope: AutoZoomScope) {
-        autoZoomFoundNothing = !model.generateAutoZoom(scope: scope)
+        autoZoomFoundNothing = false
+        autoZoomSkipped = false
+        Task {
+            let outcome = await model.runAutoZoom(scope: scope)
+            autoZoomFoundNothing = outcome == .nothingFound
+            autoZoomSkipped = outcome == .editedMeanwhile
+        }
     }
 
     var body: some View {
@@ -45,10 +53,22 @@ struct ZoomInspector: View {
             }
 
             // Generate blocks from the recorded clicks / typing.
+            if let progress = model.autoZoomAnalysisProgress {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        ProgressView(value: progress)
+                        Button("Cancel") { model.cancelAutoZoomAnalysis() }
+                            .controlSize(.small)
+                    }
+                    Text("Analysing video… \(Int((progress * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .help("Looking at what changes on screen, once per project. Cancel to zoom from clicks and typing alone.")
+            }
             Button { autoZoomTapped() } label: {
                 Label("Auto zoom", systemImage: "wand.and.stars")
             }
-            .disabled(!model.canAutoZoom)
+            .disabled(!model.canAutoZoom || model.autoZoomAnalysisProgress != nil)
             .help(model.canAutoZoom
                   ? "Create zoom blocks from clicks and typing in this recording"
                   : "Zoom needs cursor data from a screen recording")
@@ -61,6 +81,11 @@ struct ZoomInspector: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Replace zoom blocks with ones generated from clicks and typing.")
+            }
+            if autoZoomSkipped {
+                Text("The zoom blocks changed while the video was analysed, so nothing was replaced. Press Auto zoom again.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if autoZoomFoundNothing {
                 Text("Nothing to zoom on here — no clicks or typing in range, or the range is too short.")

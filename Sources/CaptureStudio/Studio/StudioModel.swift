@@ -256,6 +256,7 @@ final class StudioModel: ObservableObject {
                                             placedAt: rects.fit ?? canvasRect,
                                             region: rects.frame ?? canvasRect)
         c.discontinuities = collapsedCutTimes
+        c.reveals = zoomReveals
         return c
     }
     var selectedBlock: CameraBlock? {
@@ -814,6 +815,7 @@ final class StudioModel: ObservableObject {
         guard let data = try? Data(contentsOf: bundle.eventsURL),
               let events = try? EventsCodec.decodeLines(data), !events.isEmpty else {
             cursorSamples = []; clickSamples = []; zoomActivity = ZoomActivity()
+            mouseDownTimes = []
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
@@ -824,6 +826,10 @@ final class StudioModel: ObservableObject {
         let dur = duration
         cursorSamples = s.cursor.filter { $0.t <= dur + 0.001 }
         clickSamples = s.clicks.filter { $0.t <= dur + 0.001 }
+        mouseDownTimes = events.filter { $0.e == .down }.map(\.t).sorted()
+        if let video = mainVideoURL, let cached = bundle.loadChanges(for: video) {
+            adoptContentAnalysis(cached)
+        }
 
         var glyphs: [String: CursorGlyph] = [:]
         for name in Set(cursorSamples.map(\.cursor)) {
@@ -1225,6 +1231,101 @@ final class StudioModel: ObservableObject {
     /// Auto zoom needs the same cursor data as a hand-placed zoom block.
     var canAutoZoom: Bool { hasCursorData }
 
+    // MARK: Content analysis (what changed on screen)
+
+    enum AutoZoomOutcome {
+        case generated
+        /// No clicks or typing in range.
+        case nothingFound
+        /// The zoom blocks were edited while the video was analysed; nothing
+        /// was replaced.
+        case editedMeanwhile
+        /// Another run is in progress, or the window closed.
+        case busy
+    }
+
+    /// What clicks opened, in master time (remapped inside
+    /// `withCollapsedTimeline`). Empty until the video has been analysed.
+    private var zoomReveals: [Reveal] = []
+    /// When the whole screen redrew, in master time.
+    private var zoomWideMoments: [Double] = []
+    /// The main video has been analysed (this session or from the bundle cache).
+    private(set) var hasContentAnalysis = false
+    /// Mouse-down times from `events.jsonl` (ascending).
+    private var mouseDownTimes: [Double] = []
+    /// 0…1 while "Auto zoom" is analysing the video; nil when idle.
+    @Published private(set) var autoZoomAnalysisProgress: Double?
+    private var analysisTask: Task<ChangeAnalysis?, Never>?
+
+    private var mainVideoURL: URL? {
+        guard let track = meta?.mainTrack, track.type == .screen else { return nil }
+        return bundle.url(for: track)
+    }
+
+    private func adoptContentAnalysis(_ analysis: ChangeAnalysis) {
+        hasContentAnalysis = true
+        zoomReveals = ContentHints.reveals(changes: analysis.events, clicks: zoomActivity.clicks,
+                                           mouseDowns: mouseDownTimes, sourceSize: sourceSize)
+        zoomWideMoments = ContentHints.wideMoments(analysis.events)
+    }
+
+    /// "Auto zoom" from the UI: analyse the video for on-screen change first
+    /// (once per project, cached in the bundle), then generate. Cancelling the
+    /// analysis, or a video that cannot be read, generates from the pointer
+    /// activity alone.
+    func runAutoZoom(scope: AutoZoomScope) async -> AutoZoomOutcome {
+        guard autoZoomAnalysisProgress == nil else { return .busy }
+        analysisClosed = false
+        if !hasContentAnalysis, !analysisFailed, let video = mainVideoURL {
+            let before = zoomBlocks
+            let splits = mouseDownTimes
+            autoZoomAnalysisProgress = 0
+            let report: @Sendable (Double) -> Void = { [weak self] p in
+                Task { @MainActor in self?.noteAnalysisProgress(p) }
+            }
+            let task = Task.detached(priority: .utility) { () -> ChangeAnalysis? in
+                try? await ChangeAnalyzer.analyze(url: video, splitTimes: splits,
+                                                  progress: report)
+            }
+            analysisTask = task
+            let analysis = await task.value
+            let cancelled = task.isCancelled
+            analysisTask = nil
+            autoZoomAnalysisProgress = nil
+            if analysisClosed { return .busy }
+            // An unreadable video will not read better next time this session.
+            if analysis == nil, !cancelled { analysisFailed = true }
+            if let analysis, !cancelled {
+                bundle.writeChanges(analysis)
+                adoptContentAnalysis(analysis)
+                // Existing follow blocks pick up the new hints.
+                applyVideoComposition()
+            }
+            // The user kept editing while the video was analysed: do not
+            // overwrite that work.
+            guard zoomBlocks == before else { return .editedMeanwhile }
+        }
+        return generateAutoZoom(scope: scope) ? .generated : .nothingFound
+    }
+    private var analysisFailed = false
+
+    private func noteAnalysisProgress(_ p: Double) {
+        guard let current = autoZoomAnalysisProgress else { return }
+        autoZoomAnalysisProgress = max(current, p)
+    }
+
+    /// Stop a running analysis; "Auto zoom" then continues without content hints.
+    func cancelAutoZoomAnalysis() {
+        analysisTask?.cancel()
+    }
+
+    /// The Studio window is going away: stop analysing and touch nothing after.
+    func closeAutoZoomAnalysis() {
+        analysisClosed = true
+        analysisTask?.cancel()
+    }
+    private var analysisClosed = false
+
     /// Generate zoom blocks from the recorded activity and replace either every
     /// block (`.all`) or just one (`.block`, using only the activity inside its
     /// span). One undo step. Returns false — and changes nothing — when the
@@ -1235,10 +1336,12 @@ final class StudioModel: ObservableObject {
               let span = AutoZoomSuggester.span(for: scope, existing: zoomBlocks,
                                                 duration: duration) else { return false }
         let ramp = AutoZoomTrack.rampFor(autoZoomConfig.defaultSensitivity)
+        var suggest = AutoZoomSuggestConfig(rampIn: ramp, rampOut: ramp)
+        suggest.viewSize = zoomTrackConfig(canvas: previewCanvasSize).viewSize
         let generated = AutoZoomSuggester.suggest(
             activity: zoomActivity, cursorSamples: cursorSamples, span: span,
             sourceSize: sourceSize, cuts: TimelineSegments.cutRanges(segments),
-            config: AutoZoomSuggestConfig(rampIn: ramp, rampOut: ramp))
+            config: suggest, reveals: zoomReveals, wideMoments: zoomWideMoments)
         guard let result = AutoZoomSuggester.resolve(existing: zoomBlocks, generated: generated,
                                                      scope: scope) else { return false }
         setZoomBlocks(result, select: nil)
@@ -3080,8 +3183,10 @@ final class StudioModel: ObservableObject {
         let snapSubtitles = subtitles
         let snapCursor = cursorSamples
         let snapClick = clickSamples
+        let snapReveals = zoomReveals
         let snapCutTimes = collapsedCutTimes
         defer {
+            zoomReveals = snapReveals
             collapsedCutTimes = snapCutTimes
             composition = snapComposition
             duration = snapDuration
@@ -3108,6 +3213,11 @@ final class StudioModel: ObservableObject {
         }
         clickSamples = snapClick.compactMap { s in
             TimelineCut.point(s.t, cuts: cuts).map { var c = s; c.t = $0; return c }
+        }
+        // Reveals were paired with their clicks in master time; only the click
+        // time moves.
+        zoomReveals = snapReveals.compactMap { r in
+            TimelineCut.point(r.t, cuts: cuts).map { var c = r; c.t = $0; return c }
         }
         return body()
     }

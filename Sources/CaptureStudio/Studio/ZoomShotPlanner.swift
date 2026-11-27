@@ -80,6 +80,11 @@ enum ZoomShotPlanner {
     }()
     /// A dip never takes the scale below this (scale 1 would un-recentre the frame).
     static let dipFloor = 1.1
+    /// A shot leaning toward content keeps the pointer path inside this fraction
+    /// of the safe zone, so ordinary jitter does not push it straight back out.
+    static let leanZone = 0.6
+    /// A lean smaller than this fraction of the view is not worth making.
+    static let minLean = 0.05
     /// Pixel tolerance on safe-zone tests, so a cursor sitting exactly on the
     /// settle box edge does not immediately re-exit.
     private static let edgeTolerance = 0.5
@@ -114,11 +119,15 @@ enum ZoomShotPlanner {
     /// - `reach`: allowed range for `center` (see `clamp(_:toReach:)`).
     /// - `breaks`: picture discontinuities; one inside `(begin, end)` ends the
     ///   current shot and starts a fresh one flagged `isCut`.
+    /// - `lean`: the content (source px) a shot settling at the given time
+    ///   should try to include, or nil. The pointer still decides: the frame
+    ///   only leans toward it (see `leanedAim`). nil = pointer-only framing.
     ///
     /// Every scan index only moves forward, so the pass is linear in samples.
     static func shots(cursor: (Double) -> CGPoint, begin: Double, end: Double,
                       start: CGPoint?, half: CGSize, tuning: FollowTuning,
-                      reach: CGRect, breaks: [Double], step: Double) -> [PlannedShot] {
+                      reach: CGRect, breaks: [Double], step: Double,
+                      lean: ((Double) -> CGRect?)? = nil) -> [PlannedShot] {
         guard end > begin, step > 0 else { return [] }
         let cuts = breaks.filter { $0 > begin + 1e-9 && $0 < end - 1e-9 }.sorted()
         var out: [PlannedShot] = []
@@ -126,15 +135,39 @@ enum ZoomShotPlanner {
         for (i, limit) in (cuts + [end]).enumerated() {
             planSegment(cursor: cursor, begin: segBegin, end: limit,
                         start: i == 0 ? start : nil, isCut: i > 0,
-                        half: half, tuning: tuning, reach: reach, step: step, into: &out)
+                        half: half, tuning: tuning, reach: reach, step: step, lean: lean,
+                        into: &out)
             segBegin = limit
         }
         return out
     }
 
+    /// The aim for a shot whose pointer path covers `box`, leaning toward
+    /// `target` (already limited to where the view centre can go): as close to
+    /// it as possible while the whole `box` stays within `leanZone` of the safe
+    /// zone (`safeW` × `safeH` half-extent). An axis where the box is too large
+    /// for that, or a lean under `minLean` of the view, keeps the box centre.
+    static func leanedAim(box: CGRect, toward target: CGPoint, safeW: Double, safeH: Double,
+                          half: CGSize) -> CGPoint {
+        func axis(_ lo: CGFloat, _ hi: CGFloat, _ goal: CGFloat, _ safe: Double) -> CGFloat {
+            let mid = (lo + hi) / 2
+            let zone = CGFloat(safe * leanZone)
+            let minAim = hi - zone, maxAim = lo + zone
+            guard minAim <= maxAim else { return mid }
+            return min(max(goal, minAim), maxAim)
+        }
+        let centre = CGPoint(x: box.midX, y: box.midY)
+        let aim = CGPoint(x: axis(box.minX, box.maxX, target.x, safeW),
+                          y: axis(box.minY, box.maxY, target.y, safeH))
+        let moved = max(abs(Double(aim.x - centre.x)) / max(Double(half.width) * 2, 1e-6),
+                        abs(Double(aim.y - centre.y)) / max(Double(half.height) * 2, 1e-6))
+        return moved >= minLean ? aim : centre
+    }
+
     private static func planSegment(cursor: (Double) -> CGPoint, begin: Double, end: Double,
                                     start: CGPoint?, isCut: Bool, half: CGSize,
                                     tuning: FollowTuning, reach: CGRect, step: Double,
+                                    lean: ((Double) -> CGRect?)?,
                                     into out: inout [PlannedShot]) {
         let n = max(1, Int(((end - begin) / step - 1e-9).rounded(.up)))
         func time(_ k: Int) -> Double { begin + Double(k) * step }
@@ -163,7 +196,13 @@ enum ZoomShotPlanner {
                 minX = nMinX; maxX = nMaxX; minY = nMinY; maxY = nMaxY
                 k += 1
             }
-            return CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2)
+            let box = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            guard let content = lean?(time(k0)) else {
+                return CGPoint(x: box.midX, y: box.midY)
+            }
+            // Lean toward where the view could actually centre on the content.
+            let goal = clamp(CGPoint(x: content.midX, y: content.midY), toReach: reach)
+            return leanedAim(box: box, toward: goal, safeW: safeW, safeH: safeH, half: half)
         }
         // Step-to-step cursor speed in view-widths per second.
         func speed(_ k: Int) -> Double {

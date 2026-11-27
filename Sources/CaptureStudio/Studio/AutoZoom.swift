@@ -42,6 +42,14 @@ struct AutoZoomConfig {
     /// points). The camera cuts with it instead of gliding across footage that
     /// was never adjacent.
     var discontinuities: [Double] = []
+    /// What clicks opened (see `ContentHints.reveals`), on the track's timeline.
+    /// A follow shot that settles around one leans toward it. Empty = frame by
+    /// the pointer alone.
+    var reveals: [Reveal] = []
+    /// A reveal counts for a shot settling within this long before / after its
+    /// click.
+    var revealLead = 2.0
+    var revealLag = 0.5
 }
 
 /// Pure pre-pass: turn zoom blocks + cursor samples into a `[ZoomKeyframe]`
@@ -160,6 +168,29 @@ enum AutoZoomTrack {
                                y: min(max(p.y, g.cursorBounds.minY), g.cursorBounds.maxY))
             }
         }
+        // Reveals in this run, by click time.
+        let reveals = config.reveals
+            .filter { $0.t >= runStart - config.revealLag && $0.t <= runEnd }
+            .sorted { $0.t < $1.t }
+        // The revealed content a shot settling at `t` should lean toward: the
+        // reveals of the clicks around it that fit the view, united for as long
+        // as the union still fits.
+        func leanTarget(at t: Double, geo: BlockGeometry) -> CGRect? {
+            var union: CGRect?
+            for r in reveals where r.t >= t - config.revealLag && r.t <= t + config.revealLead {
+                // No pairing across a picture cut.
+                if breaks.contains(where: { ($0 > t && $0 <= r.t) || ($0 > r.t && $0 <= t) }) {
+                    continue
+                }
+                let rect = r.rect.intersection(geo.cursorBounds)
+                guard !rect.isNull, rect.width > 0, rect.height > 0 else { continue }
+                let next = union.map { $0.union(rect) } ?? rect
+                guard next.width <= geo.half.width * 2, next.height <= geo.half.height * 2
+                else { continue }
+                union = next
+            }
+            return union
+        }
         func differs(_ a: CGPoint, _ b: CGPoint) -> Bool {
             hypot(Double(a.x - b.x), Double(a.y - b.y)) > 1e-6
         }
@@ -244,7 +275,8 @@ enum AutoZoomTrack {
                 let shots = ZoomShotPlanner.shots(
                     cursor: cur, begin: block.begin, end: block.end,
                     start: prevMode == .follow && !cutAtBegin ? lastAim : nil, half: geo.half,
-                    tuning: geo.tuning, reach: geo.reach, breaks: breaks, step: config.step)
+                    tuning: geo.tuning, reach: geo.reach, breaks: breaks, step: config.step,
+                    lean: reveals.isEmpty ? nil : { leanTarget(at: $0, geo: geo) })
                 if let firstShot = shots.first {
                     if !haveOrigin {
                         origin = firstShot.center; current = origin; haveOrigin = true

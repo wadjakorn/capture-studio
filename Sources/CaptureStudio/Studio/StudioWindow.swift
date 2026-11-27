@@ -34,6 +34,7 @@ struct StudioView: View {
         }
         .frame(minWidth: 480, minHeight: 480)
         .task { await model.load() }
+        .onDisappear { model.closeAutoZoomAnalysis() }
         .navigationTitle(model.bundle.url.deletingPathExtension().lastPathComponent)
     }
 

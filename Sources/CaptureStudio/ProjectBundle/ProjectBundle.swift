@@ -110,6 +110,32 @@ struct ProjectBundle {
         return name
     }
 
+    // MARK: - Derived analysis cache
+
+    /// Cached on-screen change analysis of the main video. Derived data: safe to
+    /// delete; "Auto zoom" recomputes it.
+    var changesURL: URL { url.appendingPathComponent("analysis/changes.json") }
+
+    /// The cached analysis for `video`, or nil when there is none, it cannot be
+    /// read, or it was made from a different file / format version.
+    func loadChanges(for video: URL) -> ChangeAnalysis? {
+        guard let bytes = ChangeAnalysis.fileBytes(video),
+              let data = try? Data(contentsOf: changesURL),
+              let analysis = try? JSONDecoder().decode(ChangeAnalysis.self, from: data),
+              analysis.matches(videoBytes: bytes) else { return nil }
+        return analysis
+    }
+
+    /// Best-effort: never recreates a bundle that was moved or deleted while
+    /// the analysis ran.
+    func writeChanges(_ analysis: ChangeAnalysis) {
+        guard isFinalized else { return }
+        let dir = changesURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        guard let data = try? JSONEncoder().encode(analysis) else { return }
+        try? data.write(to: changesURL, options: .atomic)
+    }
+
     /// Remove the imported subtitle file, if any.
     func deleteSubtitleFile() {
         try? FileManager.default.removeItem(at: url.appendingPathComponent("subtitles.srt"))
