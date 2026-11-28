@@ -757,41 +757,48 @@ final class StudioCompositor: NSObject, AVVideoCompositing {
             return CGPoint(x: focus.x + (centre.x - focus.x) * weight,
                            y: focus.y + (centre.y - focus.y) * weight)
         }
-        // The HOLD target (weight 1): the region centre, clamped so the scaled
-        // content still covers the region. Cover constraint per axis:
-        // content.min·scale-mapped ≤ region.min and content.max·scale-mapped ≥
-        // region.max → a [lower, upper] band; when the scaled content is too small
-        // to cover the region the band inverts → fall back to the band midpoint
-        // (centres the content), which stays continuous across the inversion.
-        func cover(_ f: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
-                   _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
+        // Per axis: head for the region centre in step with the weight — the same
+        // path the unclamped pan takes, so the pan keeps pace with the zoom — and
+        // only then apply the cover constraint for the CURRENT scale:
+        // content.min mapped ≤ region.min and content.max mapped ≥ region.max →
+        // a [lower, upper] band for the target. When the scaled content is too
+        // small to cover the region the band inverts → its midpoint (centres the
+        // content), which stays continuous across the inversion.
+        //
+        // (Easing the already-clamped hold target by the weight instead — the
+        // earlier rule — made the pan lag the zoom quadratically near the
+        // picture's edge: the frame zoomed about the old spot, pushing what was
+        // there off screen, and only slid over at the end of the ramp.)
+        //
+        // At weight 0 the result must be exactly `focus`, so `magnify` adds no
+        // translation and nothing snaps as the zoom starts or ends (#31):
+        //  - Content that covers the region at 1× (the ordinary layouts): an
+        //    in-place zoom about any point keeps it covered, so `focus` is inside
+        //    the band at every scale ≥ 1 and the hard clamp is a no-op at weight 0.
+        //    The region is then covered at every point of the ramp.
+        //  - Content that does not (letterboxed, or smaller than the region): the
+        //    constraint may not hold at 1× at all, so the correction toward it is
+        //    itself eased by the weight. Such content can sit just short of the
+        //    band for a few frames of a ramp, briefly showing background;
+        //    hard-clamping there would bring back the position snap, so
+        //    continuity is chosen deliberately.
+        func axis(_ f: CGFloat, _ c: CGFloat, _ cMin: CGFloat, _ cMax: CGFloat,
+                  _ rMin: CGFloat, _ rMax: CGFloat) -> CGFloat {
+            let eased = f + (c - f) * weight
             let lower = rMax - scale * (cMax - f)
             let upper = rMin - scale * (cMin - f)
-            let target = min(max(rMin + (rMax - rMin) / 2, lower), upper)  // clamp region centre
-            return lower <= upper ? target : (lower + upper) / 2
+            let covers = cMin <= rMin + 1e-6 && cMax >= rMax - 1e-6
+            if covers && scale >= 1 { return min(max(eased, lower), upper) }
+            // Here the goal is the held framing itself (the clamped centre, or
+            // the centred content), approached with the weight — clamping the
+            // eased point instead would make the picture double back when the
+            // band opens partway through a ramp.
+            let hold = lower <= upper ? min(max(c, lower), upper) : (lower + upper) / 2
+            return eased + (hold - eased) * weight
         }
-        let hold = CGPoint(
-            x: cover(focus.x, content.minX, content.maxX, region.minX, region.maxX),
-            y: cover(focus.y, content.minY, content.maxY, region.minY, region.maxY))
-        // Ease the recenter from the focus (weight 0 = pure in-place zoom, lined up
-        // with the un-zoomed natural placement) to the cover-clamped hold (weight 1),
-        // applying the weight EXACTLY ONCE. At weight 0 there is no `target − focus`
-        // offset, so `magnify` adds no translation and there is no snap when the zoom
-        // starts/ends — the "position jump in the first/last second" (#31), which the
-        // old code caused by holding the full clamp/midpoint offset even at weight 0.
-        // When the clamp doesn't bind, `hold == centre`, so this reduces to the plain
-        // weight-eased recenter — no double-weighting.
-        //
-        // Tradeoff: this is CONTINUOUS everywhere (the magnify cut-off and the cover
-        // threshold) and keeps content that covers the region covered — but for
-        // content smaller than the region at 1× that only becomes coverable partway
-        // through a high-zoom ramp, the interpolated target can sit inside the cover
-        // band edge for a few frames, briefly revealing background. Hard-clamping to
-        // restore full coverage there would reintroduce a mid-ramp position SNAP (the
-        // exact #31 symptom), so continuity is chosen deliberately — a brief edge gap
-        // in a rare letterbox-plus-high-zoom case is far less noticeable than a jump.
-        return CGPoint(x: focus.x + (hold.x - focus.x) * weight,
-                       y: focus.y + (hold.y - focus.y) * weight)
+        return CGPoint(
+            x: axis(focus.x, centre.x, content.minX, content.maxX, region.minX, region.maxX),
+            y: axis(focus.y, centre.y, content.minY, content.maxY, region.minY, region.maxY))
     }
 
     /// Magnify an already-placed canvas-space image by `scale`, mapping the
