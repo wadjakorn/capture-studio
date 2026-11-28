@@ -203,6 +203,12 @@ final class StudioModel: ObservableObject {
     /// by "Apply to all blocks"); nil = the app default. Saved in `EditState`.
     @Published private(set) var zoomDefaultSensitivity: Double?
     @Published private(set) var zoomDefaultOverflow: Bool?
+    /// Auto-scale settings for blocks "Auto zoom" makes; nil = the built-in ones.
+    @Published private(set) var zoomDefaultAuto: ZoomAutoScale?
+    /// What new follow blocks show, and whether they use one zoom level rather
+    /// than a range; nil until "Use these settings for all blocks" is pressed.
+    @Published private(set) var zoomDefaultShow: ZoomShow?
+    @Published private(set) var zoomDefaultOneLevel: Bool?
 
     /// Defaults for new/unset blocks: the app-wide ones, overridden by this
     /// project's follow settings.
@@ -257,6 +263,7 @@ final class StudioModel: ObservableObject {
                                             region: rects.frame ?? canvasRect)
         c.discontinuities = collapsedCutTimes
         c.reveals = zoomReveals
+        c.windows = zoomWindows
         return c
     }
     var selectedBlock: CameraBlock? {
@@ -675,6 +682,9 @@ final class StudioModel: ObservableObject {
         zoomBlocks = edit.zoomBlocks.sorted { $0.begin < $1.begin }
         zoomDefaultSensitivity = edit.zoomDefaultSensitivity
         zoomDefaultOverflow = edit.zoomDefaultOverflow
+        zoomDefaultAuto = edit.zoomDefaultAuto
+        zoomDefaultShow = edit.zoomDefaultShow
+        zoomDefaultOneLevel = edit.zoomDefaultOneLevel
         layoutBlocks = edit.layoutBlocks.sorted { $0.begin < $1.begin }
         // Empty stays empty (uncut); a stored partition is renormalized onto
         // the current duration (which may have changed since it was saved).
@@ -816,6 +826,7 @@ final class StudioModel: ObservableObject {
               let events = try? EventsCodec.decodeLines(data), !events.isEmpty else {
             cursorSamples = []; clickSamples = []; zoomActivity = ZoomActivity()
             mouseDownTimes = []
+            zoomWindows = []
             return
         }
         let s = CursorOverlay.samples(from: events, display: display, sourceSize: sourceSize)
@@ -827,6 +838,11 @@ final class StudioModel: ObservableObject {
         cursorSamples = s.cursor.filter { $0.t <= dur + 0.001 }
         clickSamples = s.clicks.filter { $0.t <= dur + 0.001 }
         mouseDownTimes = events.filter { $0.e == .down }.map(\.t).sorted()
+        // Optional (recordings made before it existed have none).
+        zoomWindows = (try? Data(contentsOf: bundle.windowsURL)).map {
+            WindowHints.spans(lines: WindowsCodec.decodeLines($0), display: display,
+                              sourceSize: sourceSize, duration: dur)
+        } ?? []
         if let video = mainVideoURL, let cached = bundle.loadChanges(for: video) {
             adoptContentAnalysis(cached)
         }
@@ -1207,8 +1223,16 @@ final class StudioModel: ObservableObject {
         // Zoom follows the cursor; bundles without events (camera-main) get none.
         guard hasCursorData else { return }
         let t = min(max(currentTime, 0), duration)
-        let added = ZoomTimeline.add(zoomBlocks, atTime: t,
+        var added = ZoomTimeline.add(zoomBlocks, atTime: t,
                                      width: Self.defaultBlockWidth, duration: duration)
+        if let i = added.blocks.firstIndex(where: { $0.id == added.id }) {
+            added.blocks[i].made = ZoomMade(byHand: true)
+            // Once the project has settings of its own, new blocks start from them.
+            if let oneLevel = zoomDefaultOneLevel {
+                added.blocks[i].show = zoomDefaultShow
+                added.blocks[i].auto = oneLevel ? nil : (zoomDefaultAuto ?? ZoomAutoScale())
+            }
+        }
         setZoomBlocks(added.blocks, select: added.id)
     }
 
@@ -1220,7 +1244,14 @@ final class StudioModel: ObservableObject {
               let src = zoomBlocks.first(where: { $0.id == id }) else { return }
         let config = autoZoomConfig
         zoomDefaultSensitivity = src.sensitivity ?? config.defaultSensitivity
-        zoomDefaultOverflow = src.overflow ?? config.defaultOverflow
+        if !ZoomTimeline.holdsWindow(src) {
+            zoomDefaultOverflow = src.overflow ?? config.defaultOverflow
+        }
+        if (src.mode ?? .follow) == .follow {
+            zoomDefaultShow = src.effectiveShow
+            zoomDefaultOneLevel = src.auto == nil
+            if let auto = src.auto { zoomDefaultAuto = auto }
+        }
         setZoomBlocks(ZoomTimeline.applyingFollowSettings(of: id, toAll: zoomBlocks), select: id)
     }
 
@@ -1262,10 +1293,13 @@ final class StudioModel: ObservableObject {
     /// What clicks opened, in master time (remapped inside
     /// `withCollapsedTimeline`). Empty until the video has been analysed.
     private var zoomReveals: [Reveal] = []
+    /// The window under the pointer, in master time (remapped inside
+    /// `withCollapsedTimeline`). Empty for recordings without `windows.jsonl`.
+    private var zoomWindows: [WindowSpan] = []
     /// When the whole screen redrew, in master time.
     private var zoomWideMoments: [Double] = []
     /// The main video has been analysed (this session or from the bundle cache).
-    private(set) var hasContentAnalysis = false
+    @Published private(set) var hasContentAnalysis = false
     /// Mouse-down times from `events.jsonl` (ascending).
     private var mouseDownTimes: [Double] = []
     /// 0…1 while "Auto zoom" is analysing the video; nil when idle.
@@ -1291,38 +1325,51 @@ final class StudioModel: ObservableObject {
     func runAutoZoom(scope: AutoZoomScope) async -> AutoZoomOutcome {
         guard autoZoomAnalysisProgress == nil else { return .busy }
         analysisClosed = false
-        if !hasContentAnalysis, !analysisFailed, let video = mainVideoURL {
+        if !hasContentAnalysis, !analysisFailed, mainVideoURL != nil {
             let before = zoomBlocks
-            let splits = mouseDownTimes
-            autoZoomAnalysisProgress = 0
-            let report: @Sendable (Double) -> Void = { [weak self] p in
-                Task { @MainActor in self?.noteAnalysisProgress(p) }
-            }
-            let task = Task.detached(priority: .utility) { () -> ChangeAnalysis? in
-                try? await ChangeAnalyzer.analyze(url: video, splitTimes: splits,
-                                                  progress: report)
-            }
-            analysisTask = task
-            let analysis = await task.value
-            let cancelled = task.isCancelled
-            analysisTask = nil
-            autoZoomAnalysisProgress = nil
-            if analysisClosed { return .busy }
-            // An unreadable video will not read better next time this session.
-            if analysis == nil, !cancelled { analysisFailed = true }
-            if let analysis, !cancelled {
-                bundle.writeChanges(analysis)
-                adoptContentAnalysis(analysis)
-                // Existing follow blocks pick up the new hints.
-                applyVideoComposition()
-            }
+            if await analyseContent() == .closed { return .busy }
             // The user kept editing while the video was analysed: do not
             // overwrite that work.
             guard zoomBlocks == before else { return .editedMeanwhile }
         }
         return generateAutoZoom(scope: scope) ? .generated : .nothingFound
     }
-    private var analysisFailed = false
+
+    private enum AnalysisEnd { case done, failed, cancelled, closed }
+
+    /// Run the on-screen change analysis (progress published, cancellable),
+    /// cache it in the bundle and adopt it.
+    private func analyseContent() async -> AnalysisEnd {
+        guard let video = mainVideoURL else { return .failed }
+        let splits = mouseDownTimes
+        autoZoomAnalysisProgress = 0
+        let report: @Sendable (Double) -> Void = { [weak self] p in
+            Task { @MainActor in self?.noteAnalysisProgress(p) }
+        }
+        let task = Task.detached(priority: .utility) { () -> ChangeAnalysis? in
+            try? await ChangeAnalyzer.analyze(url: video, splitTimes: splits,
+                                              progress: report)
+        }
+        analysisTask = task
+        let analysis = await task.value
+        let cancelled = task.isCancelled
+        analysisTask = nil
+        autoZoomAnalysisProgress = nil
+        if analysisClosed { return .closed }
+        if cancelled { return .cancelled }
+        guard let analysis else {
+            // An unreadable video will not read better next time this session.
+            analysisFailed = true
+            return .failed
+        }
+        bundle.writeChanges(analysis)
+        adoptContentAnalysis(analysis)
+        // Existing follow blocks pick up the new hints.
+        applyVideoComposition()
+        return .done
+    }
+    /// The video could not be analysed this session.
+    @Published private(set) var analysisFailed = false
 
     private func noteAnalysisProgress(_ p: Double) {
         guard let current = autoZoomAnalysisProgress else { return }
@@ -1353,13 +1400,29 @@ final class StudioModel: ObservableObject {
         let ramp = AutoZoomTrack.rampFor(autoZoomConfig.defaultSensitivity)
         var suggest = AutoZoomSuggestConfig(rampIn: ramp, rampOut: ramp)
         suggest.viewSize = zoomTrackConfig(canvas: previewCanvasSize).viewSize
+        suggest.defaultScale = autoZoomConfig.defaultScale
+        // A range needs something to fit the zoom to.
+        let canFit = hasWindowData || hasContentAnalysis
+        suggest.auto = zoomDefaultOneLevel == true || !canFit
+            ? nil : (zoomDefaultAuto ?? ZoomAutoScale())
+        suggest.show = zoomDefaultShow ?? .auto
+        if case .block(let id) = scope, let b = zoomBlocks.first(where: { $0.id == id }) {
+            // Its own fixed scale is kept, so frame typing for that scale.
+            if b.auto == nil { suggest.fixedScale = b.scale }
+            if let auto = b.auto { suggest.auto = auto }
+        }
         let generated = AutoZoomSuggester.suggest(
             activity: zoomActivity, cursorSamples: cursorSamples, span: span,
             sourceSize: sourceSize, cuts: TimelineSegments.cutRanges(segments),
-            config: suggest, reveals: zoomReveals, wideMoments: zoomWideMoments)
+            config: suggest, reveals: zoomReveals, wideMoments: zoomWideMoments,
+            windows: zoomWindows)
         guard let result = AutoZoomSuggester.resolve(existing: zoomBlocks, generated: generated,
                                                      scope: scope) else { return false }
-        setZoomBlocks(result, select: nil)
+        // Leave a block selected, so its settings are right there to adjust:
+        // the one under the playhead, else the first of the new ones.
+        let fresh = result.filter { b in !zoomBlocks.contains { $0.id == b.id } }
+        let pick = fresh.first { $0.begin <= currentTime && currentTime < $0.end } ?? fresh.first
+        setZoomBlocks(result, select: pick?.id)
         return true
     }
 
@@ -1411,6 +1474,155 @@ final class StudioModel: ObservableObject {
         zoomBlocks[i].scale = min(max(1, v), 6)
         applyVideoComposition()
     }
+
+    /// The selected block's auto-scale settings; nil = one fixed scale (or
+    /// nothing selected).
+    var selectedZoomAuto: ZoomAutoScale? { selectedZoomBlock?.auto }
+
+    /// Turn auto scale on/off or change its settings on the selected block
+    /// (live; persist via commitZoomEdit). Turning it on starts from the
+    /// project's settings.
+    func setZoomAuto(_ auto: ZoomAutoScale?) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        zoomBlocks[i].auto = auto.map {
+            ZoomAutoScale(min: $0.min, max: $0.max, fitReveals: $0.fitReveals)
+        }
+        applyVideoComposition()
+    }
+
+    /// The zoom level the selected block shows at the playhead (its own level,
+    /// or the one its range picked for that moment).
+    private func shownZoomLevel(of b: ZoomBlock) -> Double {
+        let level = max(1, b.scale ?? autoZoomConfig.defaultScale)
+        guard ZoomAutoScaler.expands(b) else { return level }
+        let now = min(max(currentTime, b.begin), b.end - 1e-6)
+        func shown(at t: Double) -> Double? {
+            let x = ZoomAutoScaler.expand(blocks: zoomBlocks, cursor: cursorSamples,
+                                          sourceSize: sourceSize,
+                                          config: zoomTrackConfig(canvas: previewCanvasSize))
+            return ZoomAutoScaler.scale(at: t, in: x)
+        }
+        // Work it out the way the preview does — on the cut timeline — so the
+        // level is the one on screen.
+        if !previewCuts.isEmpty, let cutComp = previewComposition {
+            let cuts = previewCuts
+            return withCollapsedTimeline(cuts: cuts, cutComposition: cutComp) {
+                shown(at: TimelineCut.map(now, cuts: cuts))
+            } ?? level
+        }
+        return shown(at: now) ?? level
+    }
+
+    /// Switch the selected block between one zoom level and a range, keeping
+    /// the picture at the playhead: a new range contains the current level,
+    /// and going back to one level takes the level being shown. One undo step.
+    func setZoomRangeEnabled(_ on: Bool) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
+        let b = zoomBlocks[i]
+        guard on != (b.auto != nil) else { return }
+        // What it shows was implied by the zoom kind until now: pin it.
+        zoomBlocks[i].show = b.effectiveShow
+        if on {
+            let start = zoomDefaultAuto ?? ZoomAutoScale()
+            let level = max(1, b.scale ?? autoZoomConfig.defaultScale)
+            zoomBlocks[i].auto = ZoomAutoScale(min: min(start.min, level),
+                                               max: max(start.max, level),
+                                               fitReveals: start.fitReveals)
+        } else {
+            zoomBlocks[i].scale = shownZoomLevel(of: b)
+            zoomBlocks[i].auto = nil
+        }
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// What the inspector's "Show" offers: the four follow framings and a
+    /// fixed spot (manual).
+    enum ZoomShowChoice: Hashable { case auto, pointer, window, both, spot }
+
+    var selectedZoomShowChoice: ZoomShowChoice {
+        guard let b = selectedZoomBlock else { return .pointer }
+        if (b.mode ?? .follow) == .manual { return .spot }
+        switch b.effectiveShow {
+        case .auto: return .auto
+        case .pointer: return .pointer
+        case .window: return .window
+        case .both: return .both
+        }
+    }
+
+    /// Change what the selected block shows. One undo step.
+    func setZoomShowChoice(_ choice: ZoomShowChoice) {
+        guard let id = selectedZoomBlockID,
+              let i = zoomBlocks.firstIndex(where: { $0.id == id }),
+              choice != selectedZoomShowChoice else { return }
+        let show: ZoomShow
+        switch choice {
+        case .spot:
+            // Pin what it showed, for when it follows again.
+            zoomBlocks[i].show = zoomBlocks[i].effectiveShow
+            setZoomMode(.manual)
+            return
+        case .auto: show = .auto
+        case .pointer: show = .pointer
+        case .window: show = .window
+        case .both: show = .both
+        }
+        zoomBlocks[i].show = show
+        zoomBlocks[i].mode = .follow
+        applyVideoComposition()
+        saveEdit()
+    }
+
+    /// What the selected block's picture does, stretch by stretch — worked out
+    /// by the code that renders it.
+    var selectedZoomStory: ZoomBlockStory? {
+        guard let b = selectedZoomBlock, sourceSize.width > 0, sourceSize.height > 0 else {
+            return nil
+        }
+        // The panel redraws with the playhead; the story only changes with what
+        // it is made from.
+        let key = ZoomStoryKey(id: b.id, blocks: zoomBlocks, cuts: previewCuts,
+                               canvas: previewCanvasSize, windows: zoomWindows.count,
+                               reveals: zoomReveals.count, defaults: autoZoomConfig.defaultScale)
+        if let cached = zoomStoryCache, cached.key == key { return cached.story }
+        let story = ZoomBlockSummary.story(of: b, in: zoomBlocks, cursor: cursorSamples,
+                                           sourceSize: sourceSize,
+                                           config: zoomTrackConfig(canvas: previewCanvasSize),
+                                           cuts: previewCuts)
+        zoomStoryCache = (key, story)
+        return story
+    }
+    private struct ZoomStoryKey: Equatable {
+        var id: UUID
+        var blocks: [ZoomBlock]
+        var cuts: [Range<Double>]
+        var canvas: CGSize
+        var windows: Int
+        var reveals: Int
+        var defaults: Double
+    }
+    private var zoomStoryCache: (key: ZoomStoryKey, story: ZoomBlockStory)?
+
+    /// A block that holds a window stops at the picture's edge whatever its
+    /// own edge setting says.
+    var selectedZoomHoldsWindow: Bool {
+        guard let b = selectedZoomBlock, (b.mode ?? .follow) == .follow else { return false }
+        return b.effectiveShow == .window || b.effectiveShow == .both
+    }
+
+    /// Analyse the video for what clicks open, without generating anything.
+    /// Follow blocks may then re-frame toward what opens.
+    func analyseVideoForZoom() async {
+        guard autoZoomAnalysisProgress == nil, !hasContentAnalysis, !analysisFailed else { return }
+        analysisClosed = false
+        _ = await analyseContent()
+    }
+    /// Recordings made before window tracking have nothing for the window
+    /// options to work with.
+    var hasWindowData: Bool { !zoomWindows.isEmpty }
 
     /// Clear the override so the block follows the global default again.
     func resetZoomScale() {
@@ -1492,6 +1704,11 @@ final class StudioModel: ObservableObject {
               let i = zoomBlocks.firstIndex(where: { $0.id == id }) else { return }
         if mode == .manual, zoomBlocks[i].focusX == nil || zoomBlocks[i].focusY == nil {
             seedManualFocus(at: i)
+        }
+        // A block with a range is at whatever level it chose for this moment:
+        // hold that. The range itself is kept for when it follows again.
+        if mode == .manual, ZoomAutoScaler.expands(zoomBlocks[i]) {
+            zoomBlocks[i].scale = shownZoomLevel(of: zoomBlocks[i])
         }
         zoomBlocks[i].mode = mode
         applyVideoComposition()
@@ -3082,6 +3299,9 @@ final class StudioModel: ObservableObject {
             zoomBlocks: zoomBlocks,
             zoomDefaultSensitivity: zoomDefaultSensitivity,
             zoomDefaultOverflow: zoomDefaultOverflow,
+            zoomDefaultAuto: zoomDefaultAuto,
+            zoomDefaultShow: zoomDefaultShow,
+            zoomDefaultOneLevel: zoomDefaultOneLevel,
             layoutBlocks: layoutBlocks,
             frameEnabled: frameEnabled,
             frameCenterX: frameCenterX,
@@ -3201,9 +3421,11 @@ final class StudioModel: ObservableObject {
         let snapCursor = cursorSamples
         let snapClick = clickSamples
         let snapReveals = zoomReveals
+        let snapWindows = zoomWindows
         let snapCutTimes = collapsedCutTimes
         defer {
             zoomReveals = snapReveals
+            zoomWindows = snapWindows
             collapsedCutTimes = snapCutTimes
             composition = snapComposition
             duration = snapDuration
@@ -3236,6 +3458,7 @@ final class StudioModel: ObservableObject {
         zoomReveals = snapReveals.compactMap { r in
             TimelineCut.point(r.t, cuts: cuts).map { var c = r; c.t = $0; return c }
         }
+        zoomWindows = WindowHints.collapsed(snapWindows, cuts: cuts)
         return body()
     }
 

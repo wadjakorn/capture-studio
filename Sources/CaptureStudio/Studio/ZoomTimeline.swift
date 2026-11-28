@@ -93,18 +93,32 @@ enum ZoomTimeline {
         return (sortedByBegin(blocks + [block]), block.id)
     }
 
-    /// Copy one block's follow sensitivity and overflow setting onto every block
-    /// (overrides included, so nil — "use the default" — is copied too). Scale,
-    /// mode and manual targets are per-block framing and stay untouched. No-op
-    /// when `id` is not in `blocks`.
+    /// Copy one block's follow sensitivity, overflow and auto-scale settings onto
+    /// every block (overrides included, so nil — "use the default" / "fixed
+    /// scale" — is copied too). Scale, mode and manual targets are per-block
+    /// framing and stay untouched. No-op when `id` is not in `blocks`.
     static func applyingFollowSettings(of id: UUID, toAll blocks: [ZoomBlock]) -> [ZoomBlock] {
         guard let src = blocks.first(where: { $0.id == id }) else { return blocks }
+        let holdsWindow = holdsWindow(src)
         return blocks.map { b in
             var c = b
             c.sensitivity = src.sensitivity
-            c.overflow = src.overflow
+            // A block that holds a window stops at the edge whatever its own
+            // edge setting says: that hidden setting is not one to spread.
+            if !holdsWindow { c.overflow = src.overflow }
+            // Auto scale is a follow setting: taken from a follow block, given
+            // to follow blocks.
+            if (src.mode ?? .follow) == .follow, (b.mode ?? .follow) == .follow {
+                c.auto = src.auto
+                c.show = src.effectiveShow
+            }
             return c
         }
+    }
+
+    /// A follow block showing "the window" or "window and pointer".
+    static func holdsWindow(_ b: ZoomBlock) -> Bool {
+        (b.mode ?? .follow) == .follow && (b.effectiveShow == .window || b.effectiveShow == .both)
     }
 
     // MARK: - Helpers

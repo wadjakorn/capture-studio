@@ -59,7 +59,7 @@ struct ZoomTimelineLane: View {
         let manual = (block.mode ?? .follow) == .manual
         // Manual holds a fixed frame (teal); follow tracks the cursor (orange).
         let accent = manual ? Color.teal : Color.orange
-        let icon = manual ? "pin.fill" : "plus.magnifyingglass"
+        let icon = Self.icon(for: block)
         // A block that starts exactly where another ends is a continuous run: mark
         // the shared edge as a start/stop seam.
         let touchesPrev = model.zoomBlocks.contains { abs($0.end - block.begin) < 1e-6 }
@@ -112,6 +112,18 @@ struct ZoomTimelineLane: View {
         }
         .frame(width: bodyW, height: laneHeight, alignment: .leading)
         .offset(x: x0)
+    }
+
+    /// What the block shows, at a glance: the same choices as the inspector's
+    /// "Show".
+    static func icon(for block: ZoomBlock) -> String {
+        if (block.mode ?? .follow) == .manual { return "pin.fill" }
+        switch block.effectiveShow {
+        case .auto: return "sparkles"
+        case .pointer: return "cursorarrow"
+        case .window: return "macwindow"
+        case .both: return "macwindow.and.cursorarrow"
+        }
     }
 
     private func bodyGesture(_ block: ZoomBlock, width: CGFloat) -> some Gesture {

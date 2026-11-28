@@ -85,6 +85,16 @@ enum ZoomShotPlanner {
     static let leanZone = 0.6
     /// A lean smaller than this fraction of the view is not worth making.
     static let minLean = 0.05
+    /// Margin kept around a bounding window, as a fraction of the view per side.
+    /// With `boundStep` it stays above `1 − hardMargin`, so a pointer on the
+    /// window's edge is still inside the hard margin.
+    static let boundMargin = 0.07
+    /// An area up to this fraction of the view is held whole in it (its ends
+    /// that close to the view's edge at most); a larger one is followed across.
+    static let holdFill = 0.98
+    /// A window change that would move the frame less than this fraction of the
+    /// view is not worth a move; an axis with less slack than this is centred.
+    static let boundStep = 0.02
     /// Pixel tolerance on safe-zone tests, so a cursor sitting exactly on the
     /// settle box edge does not immediately re-exit.
     private static let edgeTolerance = 0.5
@@ -107,6 +117,38 @@ enum ZoomShotPlanner {
                        y: axis(p.y, reach.origin.y, reach.origin.y + reach.size.height))
     }
 
+    /// `reach` narrowed so the view (half-extent `half`) stays inside `area`
+    /// grown by `boundMargin`, and holds all of `area` when it can. Per axis: a base axis that cannot pan (inverted)
+    /// is kept; an area the view does not fit in, or fits with next to no
+    /// slack, centres the view on it — as far as the base reach allows.
+    static func boundedReach(_ reach: CGRect, to area: CGRect, half: CGSize) -> CGRect {
+        func axis(_ baseLo: CGFloat, _ baseHi: CGFloat, _ aMin: CGFloat, _ aMax: CGFloat,
+                  _ h: CGFloat) -> (CGFloat, CGFloat) {
+            guard baseHi >= baseLo else { return (baseLo, baseHi) }
+            let m = CGFloat(boundMargin) * 2 * h
+            var lo = aMin - m + h, hi = aMax + m - h
+            // An area the view can hold — but not with the margin to spare — is
+            // kept whole in the view rather than cut on one side for the sake
+            // of a margin on the other; neither of its ends comes closer than
+            // `holdFill` to the view's edge.
+            let k = CGFloat(holdFill)
+            if aMax - aMin <= 2 * h * k + 1e-6 {
+                lo = max(lo, aMax - h * k)
+                hi = min(hi, aMin + h * k)
+            }
+            if hi - lo >= CGFloat(boundStep) * 2 * h, min(baseHi, hi) >= max(baseLo, lo) {
+                return (max(baseLo, lo), min(baseHi, hi))
+            }
+            let c = min(max((lo + hi) / 2, baseLo), baseHi)
+            return (c, c)
+        }
+        let x = axis(reach.origin.x, reach.origin.x + reach.size.width,
+                     area.minX, area.maxX, half.width)
+        let y = axis(reach.origin.y, reach.origin.y + reach.size.height,
+                     area.minY, area.maxY, half.height)
+        return CGRect(x: x.0, y: y.0, width: x.1 - x.0, height: y.1 - y.0)
+    }
+
     // MARK: - Shots
 
     /// Split the cursor path over `[begin, end)` into held shots.
@@ -122,12 +164,19 @@ enum ZoomShotPlanner {
     /// - `lean`: the content (source px) a shot settling at the given time
     ///   should try to include, or nil. The pointer still decides: the frame
     ///   only leans toward it (see `leanedAim`). nil = pointer-only framing.
+    /// - `bound`: the window (source px) the pointer is over at a time, or nil.
+    ///   It never changes which shots there are — only where each one's centre
+    ///   may sit: the view stays inside the window, widened by whatever the
+    ///   pointer does outside it during the shot and by the content the shot
+    ///   leans toward. A window change during a shot can add an eased move
+    ///   (a shot with `tExit == tArrive`). nil = no bound.
     ///
     /// Every scan index only moves forward, so the pass is linear in samples.
     static func shots(cursor: (Double) -> CGPoint, begin: Double, end: Double,
                       start: CGPoint?, half: CGSize, tuning: FollowTuning,
                       reach: CGRect, breaks: [Double], step: Double,
-                      lean: ((Double) -> CGRect?)? = nil) -> [PlannedShot] {
+                      lean: ((Double) -> CGRect?)? = nil,
+                      bound: ((Double) -> CGRect?)? = nil) -> [PlannedShot] {
         guard end > begin, step > 0 else { return [] }
         let cuts = breaks.filter { $0 > begin + 1e-9 && $0 < end - 1e-9 }.sorted()
         var out: [PlannedShot] = []
@@ -136,7 +185,7 @@ enum ZoomShotPlanner {
             planSegment(cursor: cursor, begin: segBegin, end: limit,
                         start: i == 0 ? start : nil, isCut: i > 0,
                         half: half, tuning: tuning, reach: reach, step: step, lean: lean,
-                        into: &out)
+                        bound: bound, into: &out)
             segBegin = limit
         }
         return out
@@ -168,6 +217,7 @@ enum ZoomShotPlanner {
                                     start: CGPoint?, isCut: Bool, half: CGSize,
                                     tuning: FollowTuning, reach: CGRect, step: Double,
                                     lean: ((Double) -> CGRect?)?,
+                                    bound: ((Double) -> CGRect?)?,
                                     into out: inout [PlannedShot]) {
         let n = max(1, Int(((end - begin) / step - 1e-9).rounded(.up)))
         func time(_ k: Int) -> Double { begin + Double(k) * step }
@@ -184,7 +234,7 @@ enum ZoomShotPlanner {
         }
         // Centre of the cursor path's bounding box from step `k0`, grown for as
         // long as the box still fits one safe zone.
-        func settle(_ k0: Int) -> CGPoint {
+        func settle(_ k0: Int) -> (aim: CGPoint, content: CGRect?) {
             let p0 = cursor(time(k0))
             var minX = Double(p0.x), maxX = minX, minY = Double(p0.y), maxY = minY
             var k = k0 + 1
@@ -198,11 +248,12 @@ enum ZoomShotPlanner {
             }
             let box = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
             guard let content = lean?(time(k0)) else {
-                return CGPoint(x: box.midX, y: box.midY)
+                return (CGPoint(x: box.midX, y: box.midY), nil)
             }
             // Lean toward where the view could actually centre on the content.
             let goal = clamp(CGPoint(x: content.midX, y: content.midY), toReach: reach)
-            return leanedAim(box: box, toward: goal, safeW: safeW, safeH: safeH, half: half)
+            return (leanedAim(box: box, toward: goal, safeW: safeW, safeH: safeH, half: half),
+                    content)
         }
         // Step-to-step cursor speed in view-widths per second.
         func speed(_ k: Int) -> Double {
@@ -210,10 +261,17 @@ enum ZoomShotPlanner {
             return hypot(Double(b.x - a.x) / viewW, Double(b.y - a.y) / viewH) / step
         }
 
-        var aim = start ?? settle(0)
-        var center = clamp(aim, toReach: reach)
-        out.append(PlannedShot(aim: aim, center: center, tExit: begin, tArrive: begin,
-                               isCut: isCut))
+        // --- Holds: found from the pointer and the aim alone -----------------------
+        struct Hold {
+            var aim: CGPoint
+            /// What the aim leans toward, if anything.
+            var content: CGRect?
+            var exitK: Int
+            var arriveK: Int
+        }
+        let first = start.map { (aim: $0, content: CGRect?.none) } ?? settle(0)
+        var holds = [Hold(aim: first.aim, content: first.content, exitK: 0, arriveK: 0)]
+        var aim = first.aim
         let graceSteps = max(1, Int((tuning.flickGrace / step).rounded()))
         let transitSteps = max(1, Int((maxTransit / step).rounded()))
 
@@ -237,18 +295,106 @@ enum ZoomShotPlanner {
             var arriveK = exitK
             let lastK = min(n - 1, exitK + transitSteps)
             while arriveK < lastK && speed(arriveK) >= vRest { arriveK += 1 }
-            aim = settle(arriveK)
-            let next = clamp(aim, toReach: reach)
-            if hypot(Double(next.x - center.x), Double(next.y - center.y)) > 1e-6 {
-                center = next
-                out.append(PlannedShot(aim: aim, center: center, tExit: time(exitK),
-                                       tArrive: time(arriveK), isCut: false))
+            let landed = settle(arriveK)
+            aim = landed.aim
+            holds.append(Hold(aim: aim, content: landed.content, exitK: exitK, arriveK: arriveK))
+            k = arriveK + 1
+        }
+
+        // --- Shots: where each hold's centre may sit --------------------------------
+        /// One stretch of a hold under one window.
+        struct Stretch {
+            var fromK: Int
+            var window: CGRect?
+            var minX: Double, maxX: Double, minY: Double, maxY: Double
+        }
+        /// The hold's stretches: split where the window under the pointer changes.
+        func stretches(_ h: Hold, untilK: Int) -> [Stretch] {
+            guard let bound else { return [] }
+            let minSteps = max(1, Int((dMin / step).rounded()))
+            var out: [Stretch] = []
+            for kk in h.arriveK..<max(untilK, h.arriveK + 1) {
+                let p = cursor(time(kk)), w = bound(time(kk))
+                if var last = out.last, last.window == w || kk - last.fromK < minSteps
+                    || untilK - kk < minSteps {
+                    // Same window — or a stretch too short to be worth a move:
+                    // a change right after a stretch starts applies from its
+                    // start, one right before the hold ends is left to the
+                    // next hold.
+                    if last.window != w, kk - last.fromK < minSteps { last.window = w }
+                    last.minX = min(last.minX, Double(p.x)); last.maxX = max(last.maxX, Double(p.x))
+                    last.minY = min(last.minY, Double(p.y)); last.maxY = max(last.maxY, Double(p.y))
+                    out[out.count - 1] = last
+                } else {
+                    out.append(Stretch(fromK: kk, window: w, minX: Double(p.x), maxX: Double(p.x),
+                                       minY: Double(p.y), maxY: Double(p.y)))
+                }
+            }
+            // A blip that ended up under the same window as before it is no
+            // change at all.
+            var merged: [Stretch] = []
+            for st in out {
+                if var last = merged.last, last.window == st.window {
+                    last.minX = min(last.minX, st.minX); last.maxX = max(last.maxX, st.maxX)
+                    last.minY = min(last.minY, st.minY); last.maxY = max(last.maxY, st.maxY)
+                    merged[merged.count - 1] = last
+                } else {
+                    merged.append(st)
+                }
+            }
+            return merged
+        }
+        /// The centre for a stretch, and whether a window decided it.
+        func centre(_ h: Hold, _ s: Stretch?) -> (c: CGPoint, bound: Bool) {
+            let free = (c: clamp(h.aim, toReach: reach), bound: false)
+            guard let s, let window = s.window else { return free }
+            let path = CGRect(x: s.minX, y: s.minY, width: s.maxX - s.minX, height: s.maxY - s.minY)
+            // A pointer nowhere near the window is not held to it.
+            let near = window.insetBy(dx: -CGFloat(boundMargin * viewW),
+                                      dy: -CGFloat(boundMargin * viewH))
+            guard near.intersects(path) else { return free }
+            var area = window.union(path)
+            if let content = h.content { area = area.union(content) }
+            return (clamp(h.aim, toReach: boundedReach(reach, to: area, half: half)), true)
+        }
+        /// Whether going from the shown centre to `next` is a move worth making.
+        /// Between two framings a window decided, a shift too small to see is
+        /// not (the pointer path nudging the allowed area by a few pixels).
+        func moves(from prev: CGPoint, to next: CGPoint, small: Bool) -> Bool {
+            small ? dNorm(dx: Double(next.x - prev.x), dy: Double(next.y - prev.y),
+                          half: half) >= boundStep
+                  : hypot(Double(next.x - prev.x), Double(next.y - prev.y)) > 1e-6
+        }
+        var shownBound = false
+
+        for (i, h) in holds.enumerated() {
+            let untilK = i + 1 < holds.count ? holds[i + 1].exitK : n
+            let parts = stretches(h, untilK: untilK)
+            let c = centre(h, parts.first)
+            if i == 0 {
+                out.append(PlannedShot(aim: h.aim, center: c.c, tExit: begin, tArrive: begin,
+                                       isCut: isCut))
+                shownBound = c.bound
+            } else if let prev = out.last,
+                      moves(from: prev.center, to: c.c, small: shownBound && c.bound) {
+                out.append(PlannedShot(aim: h.aim, center: c.c, tExit: time(h.exitK),
+                                       tArrive: time(h.arriveK), isCut: false))
+                shownBound = c.bound
             } else {
                 // Same picture (e.g. pinned at the reach limit): keep the shot,
                 // but adopt the new aim so the cursor stops re-exiting.
-                out[out.count - 1].aim = aim
+                out[out.count - 1].aim = h.aim
             }
-            k = arriveK + 1
+            // The window changed while holding: re-frame, if it is worth a move.
+            for part in parts.dropFirst() {
+                let next = centre(h, part)
+                guard let prev = out.last, moves(from: prev.center, to: next.c, small: true)
+                else { continue }
+                let t = time(part.fromK)
+                out.append(PlannedShot(aim: h.aim, center: next.c, tExit: t, tArrive: t,
+                                       isCut: false))
+                shownBound = next.bound
+            }
         }
     }
 

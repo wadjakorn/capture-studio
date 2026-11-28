@@ -171,6 +171,7 @@ final class RecordingSession: ObservableObject {
     /// `.required` — it's recordable as-is.
     private var armedAreaSelection: AreaSelection = .unavailable
     private let eventTracker = EventTracker()
+    private let windowTracker = WindowTracker()
     private var displayInfo: DisplayInfo?
     /// Region being recorded (display-local points), stashed at arm time so the
     /// countdown overlay can center on it. nil = full display.
@@ -990,6 +991,10 @@ final class RecordingSession: ObservableObject {
         // Cursor/click events only make sense against a captured display.
         if !armedMain.isCamera {
             eventTracker.start()
+            if let d = displayInfo {
+                windowTracker.start(captured: CGRect(x: d.originX, y: d.originY,
+                                                     width: d.pointWidth, height: d.pointHeight))
+            }
         }
         _ = bundle
         state = .recording(startedAt: Date())
@@ -1309,6 +1314,7 @@ final class RecordingSession: ObservableObject {
         armedAreaSelection = .unavailable
         pairingPrompt = nil
         eventTracker.cancel()
+        windowTracker.cancel()
         // Detach everything before the first await: a concurrent teardown (cancel
         // racing a failure path) then finds nothing left, so nothing is discarded
         // or deleted twice. The bundle is deleted via `pendingBundleURL` because
@@ -1362,6 +1368,7 @@ final class RecordingSession: ObservableObject {
         }
 
         guard let bundle, let screenRecorder, let displayInfo else {
+            windowTracker.cancel()
             fail("Internal error: no active recording.")
             return
         }
@@ -1406,6 +1413,12 @@ final class RecordingSession: ObservableObject {
             } catch {
                 warnings.append("Event data lost: \(error.localizedDescription)")
             }
+            // Optional hint data for the editor's follow camera: losing it is
+            // not worth a warning.
+            try? windowTracker.stopAndWrite(
+                to: bundle.windowsURL,
+                screenAnchorHostTime: screenTrack.sessionStartHostTime
+            )
 
             let meta = ProjectMeta(
                 app: .current(),
@@ -1418,6 +1431,7 @@ final class RecordingSession: ObservableObject {
         } catch {
             Log.recorder.error("stop failed: \(error.localizedDescription, privacy: .public)")
             eventTracker.cancel()
+            windowTracker.cancel()
             fail(error.localizedDescription)
         }
 

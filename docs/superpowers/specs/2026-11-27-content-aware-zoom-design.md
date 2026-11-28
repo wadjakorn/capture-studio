@@ -414,3 +414,48 @@ is what the code does.
   being analysed, generation is skipped rather than overwriting that work.
 - **Undo:** hints are not part of the edit history. Undoing an Auto zoom
   restores the blocks; follow blocks keep leaning toward revealed content.
+
+## Revision — 3a as built (2026-11-28)
+
+The 3a plan was scrutinised before implementation and the code reviewed after.
+Where this section and the text above disagree, this section is what the code
+does.
+
+- **Which window:** the topmost ordinary window *under the pointer*, not the
+  front application's first window — the bound only matters for the window the
+  pointer is in, and a completion list or popover elsewhere must not take it.
+  Sampled ten times a second and shortly after each mouse-down, off the main
+  thread. `windows.jsonl` holds time, window number and frame only (no owning
+  app, no title); a window outside the captured area is written as "none".
+- **Usable windows:** one that is at least a quarter inside the picture, covers
+  less than 85% of it, and stays put for a second. A window being dragged, or
+  one the pointer only passes over, bounds nothing.
+- **Bound (use 3):** shots are found from the pointer exactly as before. The
+  window only limits where a shot's frame may sit: inside the window, widened
+  by whatever the pointer does outside it during that shot and by the revealed
+  content the shot leans toward, plus 7% of the view. A pointer nowhere near
+  the window is not held to it. Overflow blocks are never bound.
+- **Window change (use 4):** no re-settling. A change during a held shot
+  re-frames it with one eased move, and only when the frame would shift by at
+  least 2% of the view.
+- **Scale (use 2):** when every click of a run (not counting the one that
+  opened the window) is inside a window small enough to fill the frame at 1.5×
+  or more, the run gets the scale at which that window and its margin fit,
+  rounded down. A typing block in such a window holds the window's framing
+  rather than the click point.
+- **Not done:** window changes as "stay wide" walls (a whole-screen redraw
+  already is one); bounding manual blocks the user aimed.
+
+## Revision — dynamic zoom inside one block (2026-11-28)
+
+Asked for after trying 3a; design, rules and review outcome are in
+`docs/superpowers/plans/2026-11-28-dynamic-zoom-block.md`. In short: a follow
+block can be set to an auto zoom range (least / most zoom) instead of one
+scale. The block then changes its zoom by itself to fit the window it works in
+and what clicks open, and the user chooses what happens when the pointer
+leaves that window (show both, follow the pointer, stay on the window, or let
+the app decide). "Auto zoom" makes its follow blocks this way; every setting
+can be changed afterwards. This replaces "one scale per run" as the default
+for generated blocks. Round 2 (not built): picking the window on the canvas,
+and fitting content that appears without a click. 3b follows after that.
+

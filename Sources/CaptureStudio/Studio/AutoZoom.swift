@@ -50,6 +50,20 @@ struct AutoZoomConfig {
     /// click.
     var revealLead = 2.0
     var revealLag = 0.5
+    /// The window the pointer is over (see `WindowHints.spans`), on the track's
+    /// timeline. A follow shot inside one keeps its frame on that window
+    /// (contained blocks only). Empty = no bound.
+    var windows: [WindowSpan] = []
+    /// Filled in by `ZoomAutoScaler` (not for callers): block boundaries where
+    /// an auto block changes scale — eased over a ramp instead of the short
+    /// blend between two user blocks.
+    var softSeams: [Double] = []
+    /// Filled in by `ZoomAutoScaler`: spans in which the pointer is treated as
+    /// staying inside the rect, so the frame stays on that window.
+    var pointerHolds: [WindowSpan] = []
+    /// Filled in by `ZoomAutoScaler`: stretches that show the window only — no
+    /// leaning toward what a click opened.
+    var windowOnly: [TimeSpan] = []
 }
 
 /// Pure pre-pass: turn zoom blocks + cursor samples into a `[ZoomKeyframe]`
@@ -68,6 +82,18 @@ enum AutoZoomTrack {
                       sourceSize: CGSize,
                       config: AutoZoomConfig = AutoZoomConfig()) -> [ZoomKeyframe] {
         guard !blocks.isEmpty else { return [] }
+        // Auto blocks become touching pieces with one scale each.
+        var config = config
+        var blocks = blocks
+        if blocks.contains(where: { ZoomAutoScaler.expands($0) }) {
+            let x = ZoomAutoScaler.expand(blocks: blocks, cursor: cursorSamples,
+                                          sourceSize: sourceSize, config: config)
+            blocks = x.blocks
+            config.windows = x.windows
+            config.softSeams = x.softSeams
+            config.pointerHolds = x.pointerHolds
+            config.windowOnly = x.windowOnly
+        }
         let sorted = blocks.filter { $0.end - $0.begin > 0 }
             .sorted { $0.begin < $1.begin }
         guard !sorted.isEmpty else { return [] }
@@ -104,6 +130,8 @@ enum AutoZoomTrack {
         var reach: CGRect
         /// Where cursor samples are clamped before planning.
         var cursorBounds: CGRect
+        /// The pan may leave the framing window (never bound to a window).
+        var overflow: Bool
         var tuning: FollowTuning
     }
 
@@ -158,14 +186,22 @@ enum AutoZoomTrack {
                          height: content.height - 2 * half.height)
             return BlockGeometry(hold: hold, half: half, reach: reach,
                                  cursorBounds: overflow ? full : content,
+                                 overflow: overflow,
                                  tuning: ZoomShotPlanner.followTuning(
                                     b.sensitivity ?? config.defaultSensitivity))
         }
         func cursor(_ g: BlockGeometry) -> (Double) -> CGPoint {
             { t in
                 let p = cursorPoint(at: t, in: cursorSamples, breaks: breaks) ?? contentCentre
-                return CGPoint(x: min(max(p.x, g.cursorBounds.minX), g.cursorBounds.maxX),
-                               y: min(max(p.y, g.cursorBounds.minY), g.cursorBounds.maxY))
+                var bounds = g.cursorBounds
+                // "Stay on the window": the pointer counts as still inside it.
+                if !config.pointerHolds.isEmpty,
+                   let hold = WindowHints.window(at: t, in: config.pointerHolds) {
+                    let r = hold.intersection(bounds)
+                    if !r.isNull { bounds = r }
+                }
+                return CGPoint(x: min(max(p.x, bounds.minX), bounds.maxX),
+                               y: min(max(p.y, bounds.minY), bounds.maxY))
             }
         }
         // Reveals in this run, by click time.
@@ -176,6 +212,8 @@ enum AutoZoomTrack {
         // reveals of the clicks around it that fit the view, united for as long
         // as the union still fits.
         func leanTarget(at t: Double, geo: BlockGeometry) -> CGRect? {
+            // "The window" means the window: nothing else pulls the frame.
+            if config.windowOnly.contains(where: { $0.begin <= t && t < $0.end }) { return nil }
             var union: CGRect?
             for r in reveals where r.t >= t - config.revealLag && r.t <= t + config.revealLead {
                 // No pairing across a picture cut.
@@ -190,6 +228,16 @@ enum AutoZoomTrack {
                 union = next
             }
             return union
+        }
+        // The window a contained follow shot is held to, clipped to what the
+        // picture can show.
+        func windowBound(_ geo: BlockGeometry) -> ((Double) -> CGRect?)? {
+            guard !config.windows.isEmpty, !geo.overflow else { return nil }
+            return { t in
+                guard let w = WindowHints.window(at: t, in: config.windows) else { return nil }
+                let r = w.intersection(geo.cursorBounds)
+                return r.isNull || r.width <= 0 || r.height <= 0 ? nil : r
+            }
         }
         func differs(_ a: CGPoint, _ b: CGPoint) -> Bool {
             hypot(Double(a.x - b.x), Double(a.y - b.y)) > 1e-6
@@ -272,11 +320,13 @@ enum AutoZoomTrack {
                 lastAim = nil
             } else {
                 let cur = cursor(geo)
+                let bound = windowBound(geo)
                 let shots = ZoomShotPlanner.shots(
                     cursor: cur, begin: block.begin, end: block.end,
                     start: prevMode == .follow && !cutAtBegin ? lastAim : nil, half: geo.half,
                     tuning: geo.tuning, reach: geo.reach, breaks: breaks, step: config.step,
-                    lean: reveals.isEmpty ? nil : { leanTarget(at: $0, geo: geo) })
+                    lean: reveals.isEmpty ? nil : { leanTarget(at: $0, geo: geo) },
+                    bound: bound)
                 if let firstShot = shots.first {
                     if !haveOrigin {
                         origin = firstShot.center; current = origin; haveOrigin = true
@@ -303,7 +353,14 @@ enum AutoZoomTrack {
                         }
                         let delta = CGVector(dx: s.center.x - current.x,
                                              dy: s.center.y - current.y)
-                        let from = fromAim
+                        // A window bound moves the centre away from where the aim
+                        // alone would put it; time the move from there.
+                        var from = fromAim
+                        if bound != nil {
+                            let free = ZoomShotPlanner.clamp(fromAim, toReach: geo.reach)
+                            from.x += current.x - free.x
+                            from.y += current.y - free.y
+                        }
                         let idx = append(to: s.center, geo: geo) { d in
                             ZoomShotPlanner.moveTime(
                                 cursor: cur, from: from, delta: delta, d: d, tExit: s.tExit,
@@ -479,10 +536,41 @@ enum AutoZoomTrack {
         while i < run.count - 1 && t >= run[i].end - 1e-9 { i += 1 }
         let cur = tgt(run[i])
         let curSpan = span(run[i])
-        // Blend window clamped to both adjacent spans so it never overruns a short
-        // block (the two half-windows meet at the block midpoint at most, so each
-        // boundary blends on both sides).
-        if i > 0 {
+        func isSoft(_ bT: Double) -> Bool {
+            config.softSeams.contains { abs($0 - bT) < 1e-6 }
+        }
+        // A boundary inside an auto block (a soft seam) eases over a zoom ramp
+        // scaled by how far the scale travels — out before the boundary, in
+        // after it, so the wider framing is the one shown while the camera
+        // travels. On a picture cut it steps with the picture.
+        if !config.softSeams.isEmpty {
+            // How long the scale has been / stays the same either side.
+            func stretch(_ k: Int, _ dir: Int) -> Double {
+                var j = k, len = span(run[k])
+                while j + dir >= 0, j + dir < run.count, tgt(run[j + dir]) == tgt(run[k]),
+                      !isSoft(dir < 0 ? run[j].begin : run[j].end) {
+                    j += dir
+                    len += span(run[j])
+                }
+                return len
+            }
+            for k in 0..<(run.count - 1) where isSoft(run[k + 1].begin) {
+                let bT = run[k + 1].begin
+                if config.discontinuities.contains(where: { abs($0 - bT) < 1e-6 }) { continue }
+                let a = tgt(run[k]), b = tgt(run[k + 1])
+                let ramp = rampFor(run[k + 1].sensitivity ?? config.defaultSensitivity)
+                let blend = min(max(0.4, ramp * 1.5 * abs(log2(b / a))),
+                                stretch(k, -1) / 2, stretch(k + 1, 1) / 2)
+                let from = b < a ? bT - blend : bT
+                guard blend > 1e-9, t > from, t < from + blend else { continue }
+                // Log space, so the zoom speed looks even.
+                return a * pow(b / a, smoothstep((t - from) / blend))
+            }
+        }
+        // Between two user blocks: a short linear blend, clamped to both
+        // adjacent spans so it never overruns a short block (the two
+        // half-windows meet at the block midpoint at most).
+        if i > 0, !isSoft(run[i].begin) {
             let blend = min(0.3, curSpan, span(run[i - 1]))
             let bT = run[i].begin
             if blend > 1e-9, t < bT + blend / 2 {
@@ -490,7 +578,7 @@ enum AutoZoomTrack {
                 return tgt(run[i - 1]) + (cur - tgt(run[i - 1])) * f
             }
         }
-        if i < run.count - 1 {
+        if i < run.count - 1, !isSoft(run[i].end) {
             let blend = min(0.3, curSpan, span(run[i + 1]))
             let bT = run[i].end
             if blend > 1e-9, t > bT - blend / 2 {

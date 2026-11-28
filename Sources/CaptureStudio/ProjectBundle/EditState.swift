@@ -281,10 +281,47 @@ struct ZoomBlock: Codable, Equatable, Identifiable {
     /// source pixels at build time.
     var focusX: Double?
     var focusY: Double?
+    /// Set = the zoom changes by itself inside the block, within a range, to
+    /// fit what is on screen (`ZoomAutoScaler`); `scale` is then what it uses
+    /// while there is nothing to fit. nil = one zoom level. Only acts while the
+    /// block follows (a fixed spot keeps it for when it follows again).
+    var auto: ZoomAutoScale?
+    /// What a follow block keeps in the picture. nil = never chosen: see
+    /// `effectiveShow`.
+    var show: ZoomShow?
+    /// Where this block came from. nil = not recorded (a project from before
+    /// this was kept).
+    var made: ZoomMade?
+
+    /// `show`, or for a block where it was never chosen: "decide for me" with a
+    /// zoom range and the pointer without.
+    var effectiveShow: ZoomShow {
+        show ?? (auto != nil ? .auto : .pointer)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        begin = try c.decode(Double.self, forKey: .begin)
+        end = try c.decode(Double.self, forKey: .end)
+        scale = try c.decodeIfPresent(Double.self, forKey: .scale)
+        sensitivity = try c.decodeIfPresent(Double.self, forKey: .sensitivity)
+        overflow = try c.decodeIfPresent(Bool.self, forKey: .overflow)
+        mode = try c.decodeIfPresent(ZoomMode.self, forKey: .mode)
+        focusX = try c.decodeIfPresent(Double.self, forKey: .focusX)
+        focusY = try c.decodeIfPresent(Double.self, forKey: .focusY)
+        auto = try c.decodeIfPresent(ZoomAutoScale.self, forKey: .auto)
+        show = try c.decodeIfPresent(ZoomShow.self, forKey: .show)
+        // A project saved while this choice lived inside the range.
+        if show == nil, let legacy = auto?.legacyShow { show = legacy }
+        auto?.legacyShow = nil
+        made = try? c.decodeIfPresent(ZoomMade.self, forKey: .made)
+    }
 
     init(id: UUID = UUID(), begin: Double, end: Double, scale: Double? = nil,
          sensitivity: Double? = nil, overflow: Bool? = nil,
-         mode: ZoomMode? = nil, focusX: Double? = nil, focusY: Double? = nil) {
+         mode: ZoomMode? = nil, focusX: Double? = nil, focusY: Double? = nil,
+         auto: ZoomAutoScale? = nil, show: ZoomShow? = nil, made: ZoomMade? = nil) {
         self.id = id
         self.begin = begin
         self.end = end
@@ -294,6 +331,104 @@ struct ZoomBlock: Codable, Equatable, Identifiable {
         self.mode = mode
         self.focusX = focusX
         self.focusY = focusY
+        self.auto = auto
+        self.show = show
+        self.made = made
+    }
+}
+
+/// Where a zoom block came from: added by hand, or made by "Auto zoom" from
+/// what it saw in that stretch. Counts only — nothing about what was clicked
+/// or typed. Decodes tolerantly (missing fields take their defaults).
+struct ZoomMade: Codable, Equatable {
+    /// Added by the user rather than by Auto zoom.
+    var byHand = false
+    var clicks = 0
+    var drags = 0
+    var typing = false
+
+    init(byHand: Bool = false, clicks: Int = 0, drags: Int = 0, typing: Bool = false) {
+        self.byHand = byHand
+        self.clicks = clicks
+        self.drags = drags
+        self.typing = typing
+    }
+
+    private enum CodingKeys: String, CodingKey { case byHand, clicks, drags, typing }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        byHand = (try? c.decode(Bool.self, forKey: .byHand)) ?? false
+        clicks = (try? c.decode(Int.self, forKey: .clicks)) ?? 0
+        drags = (try? c.decode(Int.self, forKey: .drags)) ?? 0
+        typing = (try? c.decode(Bool.self, forKey: .typing)) ?? false
+    }
+}
+
+/// What a follow zoom block keeps in the picture. Unknown raw strings (future
+/// versions) decode as `auto`.
+enum ZoomShow: String, Codable, CaseIterable, Equatable {
+    /// The window the pointer works in; a short trip outside it shows both, a
+    /// longer one follows the pointer.
+    case auto
+    /// The pointer, wherever it goes.
+    case pointer
+    /// The window (the pointer may leave the picture).
+    case window
+    /// The window and the pointer: zoom out enough for both.
+    case both
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ZoomShow(rawValue: raw) ?? .auto
+    }
+}
+
+/// A zoom block's range: the zoom changes by itself inside the block, between
+/// `min` and `max`, to fit what is on screen. Decodes tolerantly — a missing
+/// or odd field takes its default, so a project from another version never
+/// fails to open over it.
+struct ZoomAutoScale: Codable, Equatable {
+    /// Above 1: at exactly 1× there is no zoom to recentre.
+    static let scaleLimits = 1.1...6.0
+    static let defaultMin = 1.5
+    static let defaultMax = 3.0
+
+    var min: Double
+    var max: Double
+    /// Make room for what a click opened (menus, popovers, dialogs).
+    var fitReveals: Bool
+    /// Read from projects saved before `ZoomBlock.show` existed, moved onto the
+    /// block when it is decoded (see `ZoomBlock.init(from:)`); never written.
+    fileprivate(set) var legacyShow: ZoomShow?
+
+    init(min: Double = ZoomAutoScale.defaultMin, max: Double = ZoomAutoScale.defaultMax,
+         fitReveals: Bool = true) {
+        let lo = Swift.min(Swift.max(min, Self.scaleLimits.lowerBound), Self.scaleLimits.upperBound)
+        let hi = Swift.min(Swift.max(max, Self.scaleLimits.lowerBound), Self.scaleLimits.upperBound)
+        self.min = Swift.min(lo, hi)
+        self.max = Swift.max(lo, hi)
+        self.fitReveals = fitReveals
+    }
+
+    private enum CodingKeys: String, CodingKey { case min, max, fitReveals, fitWindow, leave }
+
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else {
+            self.init()
+            return
+        }
+        self.init(min: (try? c.decode(Double.self, forKey: .min)) ?? Self.defaultMin,
+                  max: (try? c.decode(Double.self, forKey: .max)) ?? Self.defaultMax,
+                  fitReveals: (try? c.decode(Bool.self, forKey: .fitReveals)) ?? true)
+        if let leave = try? c.decode(ZoomShow.self, forKey: .leave) { legacyShow = leave }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(min, forKey: .min)
+        try c.encode(max, forKey: .max)
+        try c.encode(fitReveals, forKey: .fitReveals)
     }
 }
 
@@ -770,6 +905,13 @@ struct EditState: Codable, Equatable {
     /// their own (blocks added by hand or by "Auto zoom"). nil = the app default.
     var zoomDefaultSensitivity: Double? = nil
     var zoomDefaultOverflow: Bool? = nil
+    /// The auto-scale settings "Auto zoom" gives the blocks it makes (set by
+    /// "Apply to all blocks"). nil = the built-in ones.
+    var zoomDefaultAuto: ZoomAutoScale? = nil
+    /// What new follow blocks show, and whether they use one zoom level
+    /// instead of a range (both set by "Use these settings for all blocks").
+    var zoomDefaultShow: ZoomShow? = nil
+    var zoomDefaultOneLevel: Bool? = nil
     /// Layout timeline. Empty = the whole clip uses `cameraHomeLayout`. Non-empty
     /// = each block sets the frame layout over its span; uncovered gaps render
     /// blank (black). Non-overlapping (a single layout at a time).
@@ -813,7 +955,9 @@ struct EditState: Codable, Equatable {
          shapeBlocks: [ShapeBlock] = [],
          subtitles: SubtitleTrack? = nil,
          zoomBlocks: [ZoomBlock] = [], zoomDefaultSensitivity: Double? = nil,
-         zoomDefaultOverflow: Bool? = nil, layoutBlocks: [LayoutBlock] = [],
+         zoomDefaultOverflow: Bool? = nil, zoomDefaultAuto: ZoomAutoScale? = nil,
+         zoomDefaultShow: ZoomShow? = nil, zoomDefaultOneLevel: Bool? = nil,
+         layoutBlocks: [LayoutBlock] = [],
          frameEnabled: Bool = false, frameCenterX: Double = 0.5,
          frameCenterY: Double = 0.5, frameWidth: Double = 0.6,
          frameHeight: Double = 0.6, segments: [TimelineSegment] = []) {
@@ -855,6 +999,9 @@ struct EditState: Codable, Equatable {
         self.zoomBlocks = zoomBlocks
         self.zoomDefaultSensitivity = zoomDefaultSensitivity
         self.zoomDefaultOverflow = zoomDefaultOverflow
+        self.zoomDefaultAuto = zoomDefaultAuto
+        self.zoomDefaultShow = zoomDefaultShow
+        self.zoomDefaultOneLevel = zoomDefaultOneLevel
         self.layoutBlocks = layoutBlocks
         self.frameEnabled = frameEnabled
         self.frameCenterX = frameCenterX
@@ -916,6 +1063,9 @@ struct EditState: Codable, Equatable {
         zoomBlocks = try c.decodeIfPresent([ZoomBlock].self, forKey: .zoomBlocks) ?? []
         zoomDefaultSensitivity = try c.decodeIfPresent(Double.self, forKey: .zoomDefaultSensitivity)
         zoomDefaultOverflow = try c.decodeIfPresent(Bool.self, forKey: .zoomDefaultOverflow)
+        zoomDefaultAuto = try c.decodeIfPresent(ZoomAutoScale.self, forKey: .zoomDefaultAuto)
+        zoomDefaultShow = try c.decodeIfPresent(ZoomShow.self, forKey: .zoomDefaultShow)
+        zoomDefaultOneLevel = try c.decodeIfPresent(Bool.self, forKey: .zoomDefaultOneLevel)
         layoutBlocks = try c.decodeIfPresent([LayoutBlock].self, forKey: .layoutBlocks) ?? []
         frameEnabled = try c.decodeIfPresent(Bool.self, forKey: .frameEnabled) ?? false
         frameCenterX = try c.decodeIfPresent(Double.self, forKey: .frameCenterX) ?? 0.5

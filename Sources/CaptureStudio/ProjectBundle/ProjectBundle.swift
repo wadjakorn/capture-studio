@@ -14,6 +14,8 @@ struct ProjectBundle {
     var micURL: URL { url.appendingPathComponent("mic.m4a") }
     var systemAudioURL: URL { url.appendingPathComponent("system.m4a") }
     var eventsURL: URL { url.appendingPathComponent("events.jsonl") }
+    /// Optional: which window the pointer was over, when (see `WindowLine`).
+    var windowsURL: URL { url.appendingPathComponent("windows.jsonl") }
     var editURL: URL { url.appendingPathComponent("edit.json") }
     /// Dashboard preview frame. Derived cache, regenerated on demand; its name
     /// must not start with `background.` (see `deleteBackgroundImages`).

@@ -32,6 +32,16 @@ struct AutoZoomSuggestConfig {
     /// Revealed content smaller than this fraction of the view on both axes
     /// does not set a scale.
     var minSubjectFrac = 0.1
+    /// The scale of blocks that get none of their own — needed to keep a typing
+    /// block's frame inside a small window. nil = not adjusted.
+    var defaultScale: Double? = nil
+    /// The scale every generated block will end up with regardless of what is
+    /// chosen here ("only this block" on a block with its own scale).
+    var fixedScale: Double? = nil
+    /// Zoom range for the generated follow blocks. nil = one level.
+    var auto: ZoomAutoScale? = nil
+    /// What the generated follow blocks show. nil = leave it unset.
+    var show: ZoomShow? = nil
 
     var preRoll: Double { rampIn + preRollPad }
     /// Actions closer than this would leave an un-zoomed gap under `minWide`.
@@ -57,6 +67,14 @@ enum AutoZoomSuggester {
         /// Set for typing bursts long enough to hold the frame: where to hold it
         /// (normalized 0…1 of the source).
         var hold: CGPoint?
+        /// The window that point is in (source px), if any.
+        var holdWindow: CGRect?
+        /// Positions (source px) of the clicks this item stands for.
+        var click: CGPoint?
+        /// The window under that click, if any.
+        var clickWindow: CGRect?
+        var kind = Kind.click
+        enum Kind { case click, drag, typing }
     }
 
     private struct Run {
@@ -65,6 +83,9 @@ enum AutoZoomSuggester {
         var firstActivity: Double
         var lastActivity: Double
         var holds: [Item]
+        var clicks: [Item] = []
+        /// What the run was made from.
+        var made = ZoomMade()
     }
 
     /// Generate zoom blocks for `span` (master-timeline seconds). Only activity
@@ -80,10 +101,14 @@ enum AutoZoomSuggester {
     ///   which each one fits the frame together with its click.
     /// - `wideMoments`: when the whole screen redrew. The zoom is out by then
     ///   and stays out for `minWide`, unless the user is mid-drag or mid-typing.
+    /// - `windows`: the window under the pointer. A run whose clicks are all
+    ///   inside small windows gets the scale at which they fill the frame, and
+    ///   a typing block's frame is kept on its window.
     static func suggest(activity: ZoomActivity, cursorSamples: [CursorSample],
                         span: ClosedRange<Double>, sourceSize: CGSize,
                         cuts: [Range<Double>], config: AutoZoomSuggestConfig,
-                        reveals: [Reveal] = [], wideMoments: [Double] = []) -> [ZoomBlock] {
+                        reveals: [Reveal] = [], wideMoments: [Double] = [],
+                        windows: [WindowSpan] = []) -> [ZoomBlock] {
         guard span.upperBound > span.lowerBound, sourceSize.width > 0, sourceSize.height > 0
         else { return [] }
         let lo = TimelineCut.map(span.lowerBound, cuts: cuts)
@@ -112,17 +137,29 @@ enum AutoZoomSuggester {
         // --- Activity items on the collapsed timeline ---------------------------
         var items: [Item] = []
         for c in activity.clicks {
-            if let t = TimelineCut.point(c.t, cuts: cuts) { items.append(Item(begin: t, end: t)) }
+            guard let t = TimelineCut.point(c.t, cuts: cuts) else { continue }
+            var item = Item(begin: t, end: t)
+            item.click = c.p
+            if let w = WindowHints.window(at: c.t, in: windows), w.contains(c.p) {
+                item.clickWindow = w
+            }
+            items.append(item)
         }
         for d in activity.drags {
-            if let s = collapse(d) { items.append(Item(begin: s.begin, end: s.end)) }
+            if let s = collapse(d) { items.append(Item(begin: s.begin, end: s.end, kind: .drag)) }
         }
         for typed in activity.typing {
             guard let s = collapse(typed) else { continue }
-            var item = Item(begin: s.begin, end: s.end)
+            var item = Item(begin: s.begin, end: s.end, kind: .typing)
             if s.length >= config.typingMin {
                 item.hold = typingFocus(typed, activity: activity, cursorSamples: cursorSamples,
                                         sourceSize: sourceSize, window: config.typingClickWindow)
+                if let h = item.hold {
+                    let p = CGPoint(x: h.x * sourceSize.width, y: h.y * sourceSize.height)
+                    if let w = WindowHints.window(at: typed.begin, in: windows), w.contains(p) {
+                        item.holdWindow = w
+                    }
+                }
             }
             items.append(item)
         }
@@ -183,7 +220,11 @@ enum AutoZoomSuggester {
             guard end - begin >= config.minLength - 1e-9 else { continue }
 
             let run = Run(begin: begin, end: end, firstActivity: firstT, lastActivity: lastT,
-                          holds: cluster.filter { $0.hold != nil })
+                          holds: cluster.filter { $0.hold != nil },
+                          clicks: cluster.filter { $0.click != nil },
+                          made: ZoomMade(clicks: cluster.filter { $0.kind == .click }.count,
+                                         drags: cluster.filter { $0.kind == .drag }.count,
+                                         typing: cluster.contains { $0.kind == .typing }))
             // Too close to the previous run to show a worthwhile un-zoomed gap
             // (e.g. a minimum-length extension closed it): one run. A splitting
             // scroll between them always keeps them apart.
@@ -192,6 +233,10 @@ enum AutoZoomSuggester {
                 runs[runs.count - 1].end = max(prev.end, run.end)
                 runs[runs.count - 1].lastActivity = max(prev.lastActivity, run.lastActivity)
                 runs[runs.count - 1].holds += run.holds
+                runs[runs.count - 1].clicks += run.clicks
+                runs[runs.count - 1].made.clicks += run.made.clicks
+                runs[runs.count - 1].made.drags += run.made.drags
+                runs[runs.count - 1].made.typing = prev.made.typing || run.made.typing
             } else {
                 runs.append(run)
             }
@@ -215,51 +260,103 @@ enum AutoZoomSuggester {
         }
         /// One scale for the whole run — the largest at which every reveal in it
         /// still fits — so touching blocks never pump. nil without reveals.
+        /// The scale at which `window` plus the camera's bound margin fills the
+        /// frame, when that is a zoom worth making.
+        func windowFit(_ window: CGRect?) -> Double? {
+            guard let window, let view = config.viewSize, view.width > 0, view.height > 0,
+                  window.width > 0, window.height > 0 else { return nil }
+            let room = 1 - 2 * ZoomShotPlanner.boundMargin
+            let fit = room * min(Double(view.width / window.width),
+                                 Double(view.height / window.height))
+            return fit >= config.minScale ? fit : nil
+        }
         func scale(for run: Run) -> Double? {
             let fits = placed.filter { $0.t >= run.begin - 1e-9 && $0.t <= run.end + 1e-9 }
                 .map(\.fit)
+            // A small window sets the scale only when the whole run happens in
+            // small windows: one click in a dialog must not rescale a long run.
+            var windowFits = run.clicks.sorted { $0.begin < $1.begin }
+                .map { windowFit($0.clickWindow) }
+            // The click that opened the window was made outside it.
+            if windowFits.count >= 2, windowFits[0] == nil { windowFits.removeFirst() }
+            if !windowFits.isEmpty, !windowFits.contains(where: { $0 == nil }),
+               let fit = (windowFits.compactMap { $0 } + fits).min() {
+                // Rounded down, so the window and its margin always fit.
+                let clamped = min(max(fit, config.minScale), config.maxScale)
+                return ((clamped * 20 + 1e-9).rounded(.down)) / 20
+            }
             guard let fit = fits.min() else { return nil }
             let clamped = min(max(fit, config.minScale), config.maxScale)
             return (clamped * 20).rounded() / 20
         }
+        /// A typing block's hold point, kept where a follow shot bound to the
+        /// same window would sit, so the frame does not shift when typing starts.
+        func boundedHold(_ item: Item, scale: Double?) -> CGPoint? {
+            guard let hold = item.hold else { return nil }
+            guard let window = item.holdWindow, let view = config.viewSize,
+                  let s = config.fixedScale ?? scale ?? config.defaultScale, s >= 1
+            else { return hold }
+            let half = CGSize(width: view.width / (2 * s), height: view.height / (2 * s))
+            let free = CGRect(x: half.width, y: half.height,
+                              width: sourceSize.width - 2 * half.width,
+                              height: sourceSize.height - 2 * half.height)
+            let p = CGPoint(x: hold.x * sourceSize.width, y: hold.y * sourceSize.height)
+            let c = ZoomShotPlanner.clamp(
+                p, toReach: ZoomShotPlanner.boundedReach(free, to: window, half: half))
+            return CGPoint(x: min(max(c.x / sourceSize.width, 0), 1),
+                           y: min(max(c.y / sourceSize.height, 0), 1))
+        }
 
         // --- Blocks: follow, with typing bursts held on the text field ---------
         var blocks: [ZoomBlock] = []
-        func emit(_ begin: Double, _ end: Double, hold: CGPoint?, scale: Double?) {
+        /// A typing block between auto blocks sits at the scale they take in
+        /// its window, so the zoom does not step out and back around it.
+        func typingScale(_ item: Item, run: Double?) -> Double? {
+            guard let auto = config.auto, config.fixedScale == nil,
+                  let window = item.holdWindow, let view = config.viewSize,
+                  window.width > 0, window.height > 0 else { return run }
+            let raw = (1 - 2 * ZoomShotPlanner.boundMargin)
+                * min(Double(view.width / window.width), Double(view.height / window.height))
+            return max(min((raw * 20 + 1e-9).rounded(.down) / 20, auto.max), auto.min)
+        }
+        func emit(_ begin: Double, _ end: Double, hold: CGPoint?, scale: Double?, made: ZoomMade) {
             // Back to master time, clamped into the requested span.
             let b = max(TimelineCut.unmap(begin, cuts: cuts), span.lowerBound)
             let e = min(TimelineCut.unmap(end, cuts: cuts), span.upperBound)
             guard e - b > 1e-6 else { return }
             if let hold {
                 blocks.append(ZoomBlock(begin: b, end: e, scale: scale, mode: .manual,
-                                        focusX: Double(hold.x), focusY: Double(hold.y)))
+                                        focusX: Double(hold.x), focusY: Double(hold.y),
+                                        made: made))
             } else {
-                blocks.append(ZoomBlock(begin: b, end: e, scale: scale))
+                blocks.append(ZoomBlock(begin: b, end: e, scale: scale, auto: config.auto,
+                                        show: config.show, made: made))
             }
         }
         for run in runs {
-            // (begin, end, hold) pieces that tile the run exactly.
-            var pieces: [(Double, Double, CGPoint?)] = []
+            let runScale = scale(for: run)
+            // (begin, end, hold, scale) pieces that tile the run exactly.
+            var pieces: [(Double, Double, CGPoint?, Double?)] = []
             var cursor = run.begin
             for item in run.holds.sorted(by: { $0.begin < $1.begin }) {
                 var tb = max(item.begin, cursor)
                 let te = min(item.end, run.end)
                 guard te - tb >= config.typingMin else { continue }
                 if tb - cursor >= ZoomTimeline.splitMinWidth {
-                    pieces.append((cursor, tb, nil))
+                    pieces.append((cursor, tb, nil, runScale))
                 } else {
                     tb = cursor     // sliver before the burst: absorb it
                 }
-                pieces.append((tb, te, item.hold))
+                let scale = typingScale(item, run: runScale)
+                pieces.append((tb, te, boundedHold(item, scale: scale), scale))
                 cursor = te
             }
             if run.end - cursor >= ZoomTimeline.splitMinWidth || pieces.isEmpty {
-                pieces.append((cursor, run.end, nil))
+                pieces.append((cursor, run.end, nil, runScale))
             } else {
                 pieces[pieces.count - 1].1 = run.end   // sliver after: absorb it
             }
-            let runScale = scale(for: run)
-            for p in pieces { emit(p.0, p.1, hold: p.2, scale: runScale) }
+            for p in pieces { emit(p.0, p.1, hold: p.2, scale: p.3, made: run.made) }
         }
         return blocks
     }
@@ -305,7 +402,19 @@ enum AutoZoomSuggester {
             let replaced = existing.first { $0.id == id }
             let inherited = generated.map { g -> ZoomBlock in
                 var b = g
-                b.scale = replaced?.scale ?? g.scale
+                // (A typing block made for an auto block keeps the scale chosen
+                // for its window — the auto pieces around it take the same.)
+                if !(g.mode == .manual && replaced?.auto != nil) {
+                    b.scale = replaced?.scale ?? g.scale
+                }
+                // A block the user has set up (what it shows, a range, a level
+                // of its own) keeps those choices; an untouched one takes what
+                // was generated.
+                if let r = replaced, (g.mode ?? .follow) == .follow,
+                   r.show != nil || r.auto != nil || r.scale != nil {
+                    b.auto = r.auto
+                    b.show = r.effectiveShow
+                }
                 b.sensitivity = replaced?.sensitivity
                 b.overflow = replaced?.overflow
                 return b
